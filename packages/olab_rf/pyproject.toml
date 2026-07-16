@@ -5,17 +5,55 @@ build-backend = "hatchling.build"
 [project]
 name = "olab-rf"
 version = "0.1.0"
-description = "ADS-B/AIS/scanner/RemoteID telemetry decoding for lab robotics projects."
-# TODO(open item #5): requires-python not yet decided workspace-wide;
-# cuas_practice's ub_rf already requires >=3.11 — likely carries forward as-is.
-requires-python = ">=3.11"
+description = "Local-first RF telemetry package for ADS-B, AIS, scanner, and future Remote ID workflows."
 readme = "README.md"
+requires-python = ">=3.11"
 dependencies = [
-    # TODO: populate during migration from ~/Projects/cuas_practice/src/ub_rf
+    "numpy>=1.26",
+    "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]
-all = []
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.4",
+    "httpx>=0.27",
+    "pyais>=3.1",
+]
+web = [
+    "fastapi>=0.111",
+    "uvicorn[standard]>=0.29",
+]
+ais = [
+    "pyais>=3.1",
+]
+pyrtlsdr = [
+    "pyrtlsdr>=0.5",
+]
+notebook = [
+    "notebook>=7.0",
+]
+nats = [
+    "msgpack>=1.0",
+    "nats-py>=2.6",
+]
+all = [
+    "olab-rf[web,ais,pyrtlsdr,nats]",
+]
+
+[project.scripts]
+olab-rf-check = "olab_rf.cli:check_main"
+olab-rf-demo-server = "olab_rf.cli:demo_server_main"
+olab-rf-history = "olab_rf.cli:history_main"
+olab-rf-replay = "olab_rf.cli:replay_main"
+olab-rf-run = "olab_rf.cli:run_main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/olab_rf"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

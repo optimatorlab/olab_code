@@ -53,6 +53,7 @@ olab-voice-synthesize = "olab_voice.cli:synthesize_main"
 olab-voice-demo-server = "olab_voice.web_demo:demo_server_main"
 olab-voice-ofm-adapter = "olab_voice.ofm_smoke:ofm_adapter_main"
 olab-voice-ofm-publish-audio = "olab_voice.ofm_smoke:ofm_publish_audio_main"
+olab-voice-download-models = "olab_voice.download_models:download_models_main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/olab_voice"]

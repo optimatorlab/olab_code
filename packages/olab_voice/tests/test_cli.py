@@ -85,7 +85,7 @@ def test_synthesize_cli_writes_wav(monkeypatch, tmp_path, capsys):
 
 def test_synthesize_cli_real_model_when_available(tmp_path):
     if not DEFAULT_PIPER_MODEL.exists():
-        pytest.skip("Piper model is not configured; run scripts/download_models.py")
+        pytest.skip("Piper model is not configured; run olab-voice-download-models")
 
     output_path = tmp_path / "out.wav"
     result = cli.synthesize_main(
@@ -98,7 +98,7 @@ def test_synthesize_cli_real_model_when_available(tmp_path):
 
 def test_transcribe_cli_real_model_when_available(tmp_path, capsys):
     if not DEFAULT_FASTER_WHISPER_MODEL.exists():
-        pytest.skip("Faster-Whisper model is not configured; run scripts/download_models.py")
+        pytest.skip("Faster-Whisper model is not configured; run olab-voice-download-models")
 
     audio_path = tmp_path / "input.wav"
     _silent_wav(audio_path)

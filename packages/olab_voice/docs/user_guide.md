@@ -6,14 +6,17 @@ downloads are explicit setup steps; runtime STT/TTS calls use local files.
 
 ## Setup
 
-From the project root:
-
 ```bash
 python3 -m venv venv
 source venv/bin/activate
-pip install -e ".[dev,models,stt-faster-whisper,tts-piper,nats]"
-venv/bin/python scripts/download_models.py
+pip install "olab-voice[models,stt-faster-whisper,tts-piper,nats] @ git+https://github.com/optimatorlab/olab_code.git@<tag-or-sha>#subdirectory=packages/olab_voice"
+olab-voice-download-models
 ```
+
+Once release wheels exist, prefer pinning the release's exact URL and
+SHA-256 hash instead of a git reference. For local development against an
+`olab_code` checkout, use `pip install -e "packages/olab_voice[dev,models,stt-faster-whisper,tts-piper,nats]"`
+from the repo root instead.
 
 The default local model paths are:
 

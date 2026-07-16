@@ -32,7 +32,7 @@ def download_faster_whisper(root: Path) -> Path:
     except ImportError as exc:
         raise SystemExit(
             "huggingface-hub is required for model downloads. "
-            "Install with: venv/bin/python -m pip install -e '.[models]'"
+            'Install with: pip install "olab-voice[models]"'
         ) from exc
 
     target = root / "faster-whisper" / "base.en"
@@ -50,7 +50,7 @@ def download_piper(root: Path) -> Path:
     except ImportError as exc:
         raise SystemExit(
             "huggingface-hub is required for model downloads. "
-            "Install with: venv/bin/python -m pip install -e '.[models]'"
+            'Install with: pip install "olab-voice[models]"'
         ) from exc
 
     target = root / "piper"
@@ -94,7 +94,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main() -> None:
+def download_models_main() -> None:
     args = parse_args()
     root = args.model_root.expanduser().resolve()
     root.mkdir(parents=True, exist_ok=True)
@@ -119,4 +119,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    download_models_main()

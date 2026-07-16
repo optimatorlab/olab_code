@@ -61,7 +61,7 @@ def test_faster_whisper_transcribes_local_fixture_when_configured():
         "OLAB_VOICE_FASTER_WHISPER_MODEL", DEFAULT_FASTER_WHISPER_MODEL
     )
     if model_path is None:
-        pytest.skip("Faster-Whisper model is not configured; run scripts/download_models.py")
+        pytest.skip("Faster-Whisper model is not configured; run olab-voice-download-models")
     if importlib.util.find_spec("faster_whisper") is None:
         pytest.skip("faster-whisper is not installed")
 
@@ -119,7 +119,7 @@ def test_piper_synthesizer_writes_wav_from_chunks(monkeypatch):
 def test_piper_synthesizes_wav_when_configured():
     model_path = _model_path_from_env("OLAB_VOICE_PIPER_MODEL", DEFAULT_PIPER_MODEL)
     if model_path is None:
-        pytest.skip("Piper model is not configured; run scripts/download_models.py")
+        pytest.skip("Piper model is not configured; run olab-voice-download-models")
     if importlib.util.find_spec("piper") is None:
         pytest.skip("piper-tts is not installed")
 

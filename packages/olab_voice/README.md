@@ -50,12 +50,12 @@ export OLAB_VOICE_PIPER_MODEL="$OLAB_VOICE_MODEL_DIR/piper/en_US-lessac-medium.o
 ### Download Local Models
 
 ```bash
-pip install -e "packages/olab_voice[dev,models,stt-faster-whisper,tts-piper]"
-python packages/olab_voice/scripts/download_models.py
+pip install "olab-voice[models,stt-faster-whisper,tts-piper] @ git+https://github.com/optimatorlab/olab_code.git@<tag-or-sha>#subdirectory=packages/olab_voice"
+olab-voice-download-models
 ```
 
-The script downloads Faster-Whisper `Systran/faster-whisper-base.en` and Piper
-`en_US-lessac-medium` (from `rhasspy/piper-voices`) into
+The command downloads Faster-Whisper `Systran/faster-whisper-base.en` and
+Piper `en_US-lessac-medium` (from `rhasspy/piper-voices`) into
 `models/olab_voice/`. After it completes, export the printed paths and run
 the full backend test suite — see
 [`docs/user_guide.md`](docs/user_guide.md) for the manual-download fallback
@@ -122,7 +122,7 @@ olab-voice-synthesize "107 is listening" out.wav
 ```
 
 Both commands run inference locally and default to the project-local model
-paths prepared by `scripts/download_models.py`; override with `--model`.
+paths prepared by `olab-voice-download-models`; override with `--model`.
 
 ## Relationship to OFM and realtime_transcription
 
