@@ -10,7 +10,8 @@ description = "Shared utility helpers for lab robotics projects."
 requires-python = ">=3.10"
 readme = "README.md"
 dependencies = [
-    # TODO: populate during migration from ~/Projects/ub_code/ub_utils (no src/ layout in the current repo)
+    "numpy>=1.21.0",
+    "opencv-contrib-python>=4.10.0",
 ]
 
 [project.optional-dependencies]

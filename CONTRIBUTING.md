@@ -60,6 +60,34 @@ pip install "git+https://github.com/optimatorlab/olab_code.git@<tag-or-sha>#subd
 Once a package has a tagged release, prefer pinning the release wheel's
 exact URL and SHA-256 hash instead.
 
+### Workspace-internal dependencies (e.g. `olab_camera` → `olab_utils`)
+
+**Deliberate policy decision**, not just a migration-specific workaround:
+if a package depends on another package in this workspace, that dependency
+is not published anywhere `pip` can resolve it from by name — there is no
+package index for this workspace (see "Deferred: a real package index" in
+the plan doc), and none is planned unless broader-than-lab distribution
+becomes an actual goal. `pip install <dependent-package>` alone will
+therefore fail to resolve its workspace-internal dependency.
+
+**The chosen mechanism: consumers/deployment manifests install every
+workspace-internal dependency explicitly, pinned, alongside the package
+that needs it, in the same `pip install` invocation** (see
+[`packages/olab_camera/README.md`](packages/olab_camera/README.md) for a
+worked example — `olab-utils` and `olab-camera` are both listed in one
+command). This applies to both the git+subdirectory mechanism above and to
+pinned release wheels once they exist. The alternatives considered and
+rejected: encoding a pinned direct-reference to the matching dependency
+artifact inside each release's own metadata (real release-automation work,
+not yet built, and not clearly worth it for one dependency edge), and
+standing up a real package index now (explicitly deferred elsewhere in
+this doc as unneeded infra investment).
+
+**CI implication**: a package's path filter in `ci.yml` must also include
+its workspace-internal dependencies' paths — see the `olab_camera` filter
+entry, which also watches `packages/olab_utils/**` — so a dependency-only
+change still exercises the dependent package's install/test/build job.
+
 ## Testing
 
 - Test each package in a fresh virtual environment with only its declared
