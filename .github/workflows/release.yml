@@ -1,0 +1,61 @@
+name: Release
+
+# Tag-triggered only. Never runs as a side effect of an ordinary merge to
+# main. Tags are package-namespaced, e.g. olab-voice-v0.1.0 — a bare
+# vX.Y.Z would collide across packages in this repo.
+on:
+  push:
+    tags:
+      - 'olab-*-v*'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Derive package name and version from tag
+        id: tag
+        run: |
+          # olab-<pkg>-v<version> -> pkg=<pkg>, version=<version>
+          tag="${GITHUB_REF_NAME}"
+          pkg="$(echo "$tag" | sed -E 's/^olab-(.+)-v[0-9].*$/\1/')"
+          version="$(echo "$tag" | sed -E 's/^olab-.+-v//')"
+          echo "package=olab_$pkg" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Verify package metadata matches tag
+        run: |
+          python -m pip install --upgrade pip tomli 2>/dev/null || pip install tomli
+          python - <<'EOF'
+          import sys
+          try:
+              import tomllib
+          except ImportError:
+              import tomli as tomllib
+          pkg = "${{ steps.tag.outputs.package }}"
+          expected = "${{ steps.tag.outputs.version }}"
+          with open(f"packages/{pkg}/pyproject.toml", "rb") as f:
+              data = tomllib.load(f)
+          actual = data["project"]["version"]
+          if actual != expected:
+              print(f"pyproject.toml version {actual!r} does not match tag version {expected!r}")
+              sys.exit(1)
+          EOF
+
+      - name: Build wheel and sdist
+        run: |
+          pip install build
+          python -m build "packages/${{ steps.tag.outputs.package }}"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: packages/${{ steps.tag.outputs.package }}/dist/*
+          generate_release_notes: true

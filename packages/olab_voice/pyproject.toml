@@ -1,0 +1,25 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "olab-voice"
+version = "0.1.0"
+description = "Capture/transport-agnostic STT/TTS building blocks (dataclasses + Protocol interfaces) for lab robotics and teaching projects."
+# TODO(open item #5): requires-python not yet decided workspace-wide.
+requires-python = ">=3.10"
+readme = "README.md"
+dependencies = [
+    # TODO: populate during migration from ~/Projects/CoG/tts_practice_migration/src/ub_voice (canonical copy)
+]
+
+[project.optional-dependencies]
+# TODO: carry forward ub_voice's existing STT/TTS/NATS/web extras during migration.
+stt = []
+tts = []
+nats = []
+web = []
+all = ["olab-voice[stt,tts,nats,web]"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/olab_voice"]

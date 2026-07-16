@@ -1,0 +1,21 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "olab-rf"
+version = "0.1.0"
+description = "ADS-B/AIS/scanner/RemoteID telemetry decoding for lab robotics projects."
+# TODO(open item #5): requires-python not yet decided workspace-wide;
+# cuas_practice's ub_rf already requires >=3.11 — likely carries forward as-is.
+requires-python = ">=3.11"
+readme = "README.md"
+dependencies = [
+    # TODO: populate during migration from ~/Projects/cuas_practice/src/ub_rf
+]
+
+[project.optional-dependencies]
+all = []
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/olab_rf"]

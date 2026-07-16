@@ -1,0 +1,26 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "olab-camera"
+version = "0.1.0"
+description = "Camera capture, local recording, and network streaming (MJPEG/WebSocket/WebRTC) for lab robotics projects."
+# TODO(open item #5): requires-python not yet decided workspace-wide;
+# ub_rf needs >=3.11, ub_camera's old claim was >=3.7. Resolve before release.
+requires-python = ">=3.10"
+readme = "README.md"
+dependencies = [
+    # TODO: populate during migration from ~/Projects/ub_code/ub_camera (no src/ layout in the current repo; core, lightweight deps only)
+]
+
+[project.optional-dependencies]
+# Extras carried over from ub_code's existing, already-proven convention.
+yolo = []
+ros = []
+websocket = []
+webrtc = []
+all = ["olab-camera[yolo,ros,websocket,webrtc]"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/olab_camera"]
