@@ -71,3 +71,41 @@ exact URL and SHA-256 hash instead.
   blindly. See the plan doc's testing-methodology notes for why (some
   failure modes, like ALSA pseudo-device opens, are C-level crashes that
   `try`/`except` cannot catch or safely provoke in a test).
+
+## Pre-commit checklist
+
+Every commit in this repo goes through an outside reviewer before it
+lands — use this checklist to catch what the reviewer would catch, before
+proposing the commit, so review rounds spend time on real judgment calls
+instead of avoidable misses:
+
+1. **Build and install each touched package fresh.** For every package
+   whose `pyproject.toml` or source changed: `python -m build` the wheel,
+   `pip install` it into a clean virtualenv (base dependencies only —
+   don't default to `[all]`), and run its `tests/`. This alone catches
+   most packaging mistakes (missing deps, broken `src/`-layout mapping,
+   version drift, uncollectible test dirs).
+2. **Re-read CI/release YAML against this document's stated rules.**
+   Specifically: does `ci.yml` actually install base-only dependencies
+   where a package's own README/pyproject says something is core vs. an
+   opt-in extra (e.g. `olab_audio`'s `pyaudio` is core, not an extra —
+   CI needs PortAudio headers for it, not a skip)? Does anything install
+   `[all]` universally? Do inline comments describe what the workflow
+   actually does, not a stale or aspirational version of it?
+3. **Check paths and claims against the real filesystem, not the plan
+   doc's assumptions.** If a README/pyproject TODO cites a source path
+   (e.g. "migrate from `~/Projects/ub_code/...`"), verify that path
+   actually exists and has the layout claimed (`src/`-layout or not)
+   before writing it down.
+4. **No duplicated sources of truth.** Things like a version number
+   should live in exactly one place (`pyproject.toml`); derive the rest
+   (e.g. `__version__`) from installed package metadata rather than
+   hand-copying a value that can drift.
+5. **Clean the working tree of build/test artifacts** (`__pycache__/`,
+   `*.egg-info/`, `dist/`) before staging — check `.gitignore` covers
+   them so they don't need to be caught by hand every time.
+6. **Draft the commit message, then stop.** Per the review workflow, do
+   not run `git commit` — present the message and diff and wait for the
+   reviewer and user to sign off. If pushing back on reviewer feedback,
+   give a detailed rebuttal (the reasoning, not just a restated
+   conclusion), not silent compliance or silent disagreement.
