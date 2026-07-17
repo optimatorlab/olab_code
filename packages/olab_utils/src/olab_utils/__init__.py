@@ -55,15 +55,6 @@ class Logger():
 			print(f'Error in Logger init: {e}')
 
 
-	def write2file(self, msg):
-		# FIXME -- Not used.
-		try:
-			f = open("/home/pi/tmp/debugmain.txt", "a")
-			f.write(f"{msg}\n")
-			f.close()
-		except Exception as e:
-			print(f'write2file error: {e}')
-			
 	def log(self, msgtext, severity=SEVERITY_INFO, **kwargs):
 		if (self.consolePublisher):
 			# def pubConsole(pub, id, severity, msgtext, userID=0, speakMsg='', tune=px4Tunes.DEFAULT.value):

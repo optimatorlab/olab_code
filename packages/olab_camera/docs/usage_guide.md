@@ -28,7 +28,7 @@ If you're unsure, chances are `CameraUSB` is the appropriate class for you.
 port = olab_utils.findOpenPort(8000, options=range(8000,8040))
 
 # Define input device, image size, frames-per-second, etc:
-device    = 0      # or 'https://10.83.17.66:8002/stream.mjpg' or '/dev/video0'
+device    = 0      # or 'https://192.0.2.1:8002/stream.mjpg' or '/dev/video0'
 paramDict = {'res_rows':480, 'res_cols':640, 'fps_target':30, 'outputPort': port}
 apiPref   = cv2.CAP_ANY   # on linux try cv2.CAP_V4L2
 
