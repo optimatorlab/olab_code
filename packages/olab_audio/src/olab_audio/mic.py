@@ -174,6 +174,20 @@ class Mic():
 	def start(self, frmt=None, channels=None, samplerate=None, frames_per_buffer=None,
 			  reachbackFunc=_passFunction, postFunc=None):
 		try:
+			# PortAudio's ALSA host API segfaults -- a C-level crash Python's
+			# try/except cannot catch -- when asked to open a device index at
+			# or past get_device_count() (confirmed via real-hardware testing:
+			# every index >= the actual device count crashed the whole
+			# process, not just wildly-out-of-range values). Validating the
+			# index ourselves before ever calling audio.open() turns that
+			# crash into an ordinary catchable exception, routed through
+			# excFunc like any other start() failure below.
+			device_count = audio.get_device_count()
+			if not (0 <= self.deviceID < device_count):
+				raise ValueError(
+					f'Invalid deviceID={self.deviceID}: must be in range [0, {device_count})'
+				)
+
 			# If user didn't provide a parameter, use the default value
 			self.frmt              = defaultFromNone(frmt, self.FORMAT, int)
 			self.channels          = defaultFromNone(channels, self.CHANNELS, int)

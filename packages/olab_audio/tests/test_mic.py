@@ -16,10 +16,14 @@ class _FakeStream:
 
 
 class _FakePyAudio:
-    def __init__(self, default_rate=32000.0, fail_open=False):
+    def __init__(self, default_rate=32000.0, fail_open=False, device_count=8):
         self.default_rate = default_rate
         self.fail_open = fail_open
+        self.device_count = device_count
         self.opened_with = None
+
+    def get_device_count(self):
+        return self.device_count
 
     def get_device_info_by_host_api_device_index(self, host_api_index, device_index):
         return {'defaultSampleRate': self.default_rate}
@@ -80,6 +84,47 @@ def test_mic_stop_after_failed_start_does_not_raise(monkeypatch):
     mic.stop()  # must not raise
 
     assert mic.stream is None
+
+
+def test_mic_start_rejects_out_of_range_device_id_without_opening(monkeypatch):
+    """Real-hardware finding (2026-07-17): PortAudio's ALSA host API
+    segfaults -- a C-level crash Python's try/except cannot catch -- when
+    audio.open() is given a device index at or past get_device_count().
+    Mic.start() must validate the index itself and raise before ever
+    reaching audio.open(), turning the crash into an ordinary catchable
+    failure like any other start() error."""
+    fake_audio = _FakePyAudio(device_count=8)
+    monkeypatch.setattr("olab_audio.mic.audio", fake_audio)
+
+    errors = []
+    mic = Mic(deviceID=99999, excFunc=lambda msg: errors.append(msg))
+    mic.start()
+
+    assert mic.micOn is False
+    assert mic.stream is None
+    assert fake_audio.opened_with is None  # audio.open() must never be reached
+    assert any('Invalid deviceID' in m for m in errors)
+
+    mic.stop()  # must not raise
+    assert mic.stream is None
+
+
+def test_mic_start_rejects_negative_device_id_without_opening(monkeypatch):
+    """A negative deviceID (e.g. -1) isn't caught by an upper-bound-only
+    check and silently opens PortAudio's ambient default device instead of
+    raising -- confirmed via real hardware. Must be rejected the same way
+    as an out-of-range positive index."""
+    fake_audio = _FakePyAudio(device_count=8)
+    monkeypatch.setattr("olab_audio.mic.audio", fake_audio)
+
+    errors = []
+    mic = Mic(deviceID=-1, excFunc=lambda msg: errors.append(msg))
+    mic.start()
+
+    assert mic.micOn is False
+    assert mic.stream is None
+    assert fake_audio.opened_with is None
+    assert any('Invalid deviceID' in m for m in errors)
 
 
 def test_mic_stop_is_idempotent(monkeypatch):
