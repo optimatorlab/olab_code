@@ -77,8 +77,9 @@ construct a `Camera`) at `~/.olab_camera/ssl/` (owner-only permissions),
 via the `cryptography` library — no bundled/shared private key, no
 platform-specific tooling. Capture-only use of a `Camera` never touches
 the filesystem for TLS. See [`docs/deployment.md`](docs/deployment.md)
-for custom certificates and reverse-proxy deployment (zero browser TLS
-warnings).
+for custom certificates, fleet deployment via a lab-private CA and
+per-device leaf certs (zero browser TLS warnings without a shared private
+key), and reverse-proxy deployment.
 
 ## Streaming Protocols
 

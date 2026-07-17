@@ -6,8 +6,11 @@ import multiprocessing
 import threading
 from pathlib import Path
 
+from cryptography import x509
+
 from olab_camera.tls import (
     _pair_matches,
+    build_san_list,
     ensure_local_cert,
     generate_cert_main,
     generate_self_signed_cert,
@@ -159,6 +162,63 @@ def test_generate_cert_main_force_regenerates_through_the_lock(tmp_path, capsys)
 
     assert first_key != second_key
     assert _pair_matches(ssl_dir / "ca.crt", ssl_dir / "ca.key") is True
+
+
+def test_build_san_list_includes_common_name_ip_and_dns():
+    sans = build_san_list(
+        "localhost", ip_addresses=["192.168.0.107"], dns_names=["olab-107"]
+    )
+    assert x509.DNSName("localhost") in sans
+    assert x509.DNSName("olab-107") in sans
+    assert any(isinstance(s, x509.IPAddress) and str(s.value) == "192.168.0.107" for s in sans)
+
+
+def test_build_san_list_deduplicates_repeated_entries():
+    sans = build_san_list("localhost", dns_names=["localhost", "olab-107", "olab-107"])
+    assert len(sans) == 2  # "localhost" (common name) + "olab-107", each once
+
+
+def test_generate_self_signed_cert_with_ip_and_dns_sans(tmp_path):
+    ssl_dir = tmp_path / "ssl"
+    cert_path = ssl_dir / "ca.crt"
+    key_path = ssl_dir / "ca.key"
+
+    generate_self_signed_cert(
+        cert_path,
+        key_path,
+        common_name="localhost",
+        ip_addresses=["192.168.0.107"],
+        dns_names=["olab-107"],
+    )
+
+    cert = x509.load_pem_x509_certificate(cert_path.read_bytes())
+    san = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
+    assert [str(ip) for ip in san.get_values_for_type(x509.IPAddress)] == ["192.168.0.107"]
+    assert san.get_values_for_type(x509.DNSName) == ["localhost", "olab-107"]
+
+
+def test_generate_cert_main_accepts_repeatable_ip_and_dns_flags(tmp_path):
+    ssl_dir = tmp_path / "ssl"
+    generate_cert_main(
+        [
+            "--ssl-dir",
+            str(ssl_dir),
+            "--ip-address",
+            "192.168.0.107",
+            "--ip-address",
+            "192.168.0.207",
+            "--dns-name",
+            "olab-107",
+        ]
+    )
+
+    cert = x509.load_pem_x509_certificate((ssl_dir / "ca.crt").read_bytes())
+    san = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
+    assert {str(ip) for ip in san.get_values_for_type(x509.IPAddress)} == {
+        "192.168.0.107",
+        "192.168.0.207",
+    }
+    assert "olab-107" in san.get_values_for_type(x509.DNSName)
 
 
 def test_generate_cert_main_without_force_regenerates_a_mismatched_pair(tmp_path):

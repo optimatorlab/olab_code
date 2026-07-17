@@ -32,6 +32,8 @@ all = ["olab-camera[yolo,ros,websocket,webrtc]"]
 
 [project.scripts]
 olab-camera-generate-cert = "olab_camera.tls:generate_cert_main"
+olab-camera-generate-ca = "olab_camera.ca:generate_ca_main"
+olab-camera-issue-cert = "olab_camera.ca:issue_cert_main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/olab_camera"]

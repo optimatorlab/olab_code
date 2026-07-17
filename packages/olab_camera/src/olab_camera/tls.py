@@ -149,13 +149,59 @@ def _pair_matches(cert_path: Path, key_path: Path) -> bool:
 		return False
 
 
+def build_san_list(common_name: str, ip_addresses=None, dns_names=None):
+	"""Build a de-duplicated `x509.SubjectAlternativeName` entry list.
+
+	`common_name` is always included as a `DNSName` (matching this module's
+	historical behavior). Each string in `ip_addresses` is parsed with
+	`ipaddress.ip_address()` and added as an `x509.IPAddress` -- a plain
+	`DNSName` entry containing an IP literal does not satisfy browsers'
+	hostname-vs-IP SAN matching, which is the whole reason this helper
+	exists. Each string in `dns_names` is added as an `x509.DNSName`.
+	Shared by the dev-only self-signed flow here and the CA leaf-issuance
+	flow in `ca.py`.
+	"""
+	import ipaddress
+
+	from cryptography import x509
+
+	seen = set()
+	sans: list = []
+
+	def _add(entry):
+		key = (type(entry), str(entry))
+		if key not in seen:
+			seen.add(key)
+			sans.append(entry)
+
+	_add(x509.DNSName(common_name))
+	for dns_name in dns_names or ():
+		_add(x509.DNSName(dns_name))
+	for ip in ip_addresses or ():
+		_add(x509.IPAddress(ipaddress.ip_address(ip)))
+	return sans
+
+
 def generate_self_signed_cert(
 	cert_path: Path,
 	key_path: Path,
 	common_name: str = "localhost",
 	days: int = 3650,
+	ip_addresses=None,
+	dns_names=None,
 ) -> None:
 	"""Write a fresh self-signed certificate and private key to the given paths.
+
+	`ip_addresses` and `dns_names` add extra `x509.IPAddress`/`x509.DNSName`
+	Subject Alternative Names beyond `common_name` -- useful so a browser
+	visiting a camera by its raw IP doesn't also hit a name-mismatch
+	warning on top of the expected self-signed warning. **This flow is a
+	development convenience only**: it does not remove the browser's
+	self-signed warning, because nothing installs this cert as a trusted
+	CA anywhere. For deployments that need warning-free browsing across a
+	fleet of devices, see `ca.py` -- a real CA whose public cert gets
+	installed into browser/OS trust stores, plus per-device leaf certs it
+	signs.
 
 	`key_path`'s parent directory is created owner-only (0700) if it does
 	not already exist; the key itself is written owner-read/write-only
@@ -172,6 +218,7 @@ def generate_self_signed_cert(
 	key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
 	name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, common_name)])
 	now = datetime.datetime.now(datetime.timezone.utc)
+	sans = build_san_list(common_name, ip_addresses=ip_addresses, dns_names=dns_names)
 	cert = (
 		x509.CertificateBuilder()
 		.subject_name(name)
@@ -180,7 +227,7 @@ def generate_self_signed_cert(
 		.serial_number(x509.random_serial_number())
 		.not_valid_before(now)
 		.not_valid_after(now + datetime.timedelta(days=days))
-		.add_extension(x509.SubjectAlternativeName([x509.DNSName(common_name)]), critical=False)
+		.add_extension(x509.SubjectAlternativeName(sans), critical=False)
 		.sign(key, hashes.SHA256())
 	)
 
@@ -252,6 +299,27 @@ def generate_cert_main(argv: list[str] | None = None) -> None:
 		action="store_true",
 		help="Regenerate even if a valid certificate already exists at --ssl-dir.",
 	)
+	parser.add_argument(
+		"--ip-address",
+		action="append",
+		dest="ip_addresses",
+		metavar="IP",
+		help="Extra IP SAN to add (repeatable), e.g. --ip-address 192.168.0.107. "
+		"DEVELOPMENT CONVENIENCE ONLY: this stops a browser hitting a name-mismatch "
+		"warning when visiting by IP, but does NOT remove the self-signed warning "
+		"itself -- nothing installs this cert as a trusted CA. For a deployment "
+		"that needs warning-free browsing across a fleet of devices, use the CA "
+		"and per-device leaf certs from `olab-camera-generate-ca` / "
+		"`olab-camera-issue-cert` instead (see ca.py / docs/deployment.md).",
+	)
+	parser.add_argument(
+		"--dns-name",
+		action="append",
+		dest="dns_names",
+		metavar="NAME",
+		help="Extra DNS SAN to add (repeatable), e.g. --dns-name my-camera.local. "
+		"Same development-only caveat as --ip-address.",
+	)
 	args = parser.parse_args(argv)
 
 	cert_path = args.ssl_dir / "ca.crt"
@@ -262,7 +330,14 @@ def generate_cert_main(argv: list[str] | None = None) -> None:
 			print(f"Certificate already exists at {args.ssl_dir} (use --force to regenerate).")
 			return
 
-		generate_self_signed_cert(cert_path, key_path, common_name=args.common_name, days=args.days)
+		generate_self_signed_cert(
+			cert_path,
+			key_path,
+			common_name=args.common_name,
+			days=args.days,
+			ip_addresses=args.ip_addresses,
+			dns_names=args.dns_names,
+		)
 		print(f"Generated a local self-signed certificate in {args.ssl_dir}")
 		print(f"  cert: {cert_path}")
 		print(f"  key:  {key_path}")

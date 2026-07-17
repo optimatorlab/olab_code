@@ -8,6 +8,7 @@ import sys
 
 import pytest
 
+from olab_camera.ca import generate_ca_cert, issue_leaf_cert
 from olab_camera.tls import generate_self_signed_cert
 
 pytestmark = pytest.mark.skipif(
@@ -43,3 +44,31 @@ def test_generate_self_signed_cert_permissions_survive_a_permissive_umask(tmp_pa
         assert stat.S_IMODE(key_path.stat().st_mode) == 0o600
     finally:
         os.umask(old_umask)
+
+
+def test_generate_ca_cert_sets_restrictive_permissions(tmp_path):
+    ca_dir = tmp_path / "ca"
+    generate_ca_cert(ca_dir / "ca.crt", ca_dir / "ca.key")
+
+    assert stat.S_IMODE(ca_dir.stat().st_mode) == 0o700
+    assert stat.S_IMODE((ca_dir / "ca.key").stat().st_mode) == 0o600
+    assert stat.S_IMODE((ca_dir / "ca.crt").stat().st_mode) == 0o644
+
+
+def test_issue_leaf_cert_sets_restrictive_permissions(tmp_path):
+    ca_dir = tmp_path / "ca"
+    generate_ca_cert(ca_dir / "ca.crt", ca_dir / "ca.key")
+
+    leaf_dir = tmp_path / "leaf"
+    issue_leaf_cert(
+        ca_dir / "ca.crt",
+        ca_dir / "ca.key",
+        leaf_dir / "ca.crt",
+        leaf_dir / "ca.key",
+        common_name="olab-107",
+        ip_addresses=["192.168.0.107"],
+    )
+
+    assert stat.S_IMODE(leaf_dir.stat().st_mode) == 0o700
+    assert stat.S_IMODE((leaf_dir / "ca.key").stat().st_mode) == 0o600
+    assert stat.S_IMODE((leaf_dir / "ca.crt").stat().st_mode) == 0o644
