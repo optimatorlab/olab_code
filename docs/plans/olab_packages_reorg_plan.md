@@ -425,12 +425,28 @@ with different style or without the design insight available while doing
 the core extraction fresh. It is one `olab-audio` distribution — a lean
 I/O base plus an `analysis` extra — not two separate distributions.
 
-**Extras split:**
+**Extras split** (revised 2026-07-16 during implementation, after finding
+`Recording_np.append()` — the method that runs on every captured chunk —
+actually called `librosa.resample()` unconditionally, contradicting the
+table below's original "core needs only pyaudio+pulsectl" claim; resolved
+with the user and an independent reviewer):
 
 | Extra | Contents | Deps |
 |---|---|---|
-| *(core, default)* | `Mic`, `Speaker`, `Recording`/`Recording_bytes`/`Recording_np`, device enumeration + PulseAudio port control | `pyaudio`, `pulsectl` |
-| `analysis` | `Wave`, `Spectrogram`, `Spectrum`, tone/chirp/pitch synthesis, `trim`/`normalize`/`resample`, `decorate`/`legend` plotting | `librosa`, `soundfile`, `matplotlib` |
+| *(core, default)* | `Mic`, `Speaker`, `Recording`/`Recording_bytes`/`Recording_np` (same-native-rate recording — the default `recordStart()` path), device enumeration + PulseAudio port control | `pyaudio`, `pulsectl`, `numpy` (`Mic`'s callback already produces numpy arrays) |
+| `resample` | Cross-rate `Recording_np` recording (`recordStart(samplerateRec=...)` at a rate other than the mic's native one) and `olab_audio.resample()`/`StreamResampler` directly. Backend: `soxr` (not `librosa` — lightweight, no heavy transitive deps, has a real streaming API for chunk-by-chunk conversion with explicit end-of-stream flush, avoiding the boundary artifacts a fresh stateless `resample()` call per chunk would cause). Not yet validated on target Raspberry Pi hardware. | `soxr` |
+| `analysis` | `Wave`, `Spectrogram`, `Spectrum`, tone/chirp/pitch synthesis, `trim`/`normalize`, `decorate`/`legend` plotting, `Recording.make_wave()`, `Recording_np`'s explicit `.resample()` method. Includes `resample` as a sub-dependency. | `resample` (`soxr`) + `librosa`, `soundfile`, `matplotlib` |
+
+`Recording_np.append()` skips resampling entirely when the recording's
+target rate matches the mic's native rate — the default, and by far the
+common case — so most consumers (including a future `olab_voice`
+integration) never need `soxr` installed at all for ordinary same-rate
+recording. Cross-rate `Recording_np` construction fails early and clearly
+(synchronously, before recording starts — never from inside the PortAudio
+callback thread) if `resample` isn't installed. `Recording_bytes` does not
+support cross-rate recording at all (rejected at construction) — it would
+otherwise silently save original-rate bytes labeled with the wrong sample
+rate.
 
 **Explicit exclusion**: `Mic`'s embedded Whisper transcription hooks
 (`transcribeStart`/`transcribeStop`) are **removed**, not migrated —
