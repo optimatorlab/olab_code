@@ -1,0 +1,66 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "olab-voice"
+version = "0.1.0"
+description = "Local-first voice capture, STT, TTS, wake phrase, and transport adapters."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24,<3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==9.1.1",
+    "ruff==0.15.20",
+]
+stt-faster-whisper = [
+    "faster-whisper==1.2.1",
+]
+stt-openai-whisper = [
+    "openai-whisper",
+]
+stt-vosk = [
+    "vosk",
+]
+tts-piper = [
+    "piper-tts==1.4.2",
+]
+models = [
+    "huggingface-hub==1.21.0",
+]
+audio-pyaudio = [
+    "pyaudio",
+]
+nats = [
+    "nats-py==2.15.0",
+    "msgpack==1.2.1",
+]
+web = [
+    "fastapi",
+    "uvicorn",
+]
+all = [
+    "olab-voice[stt-faster-whisper,stt-openai-whisper,stt-vosk,tts-piper,models,audio-pyaudio,nats,web]",
+]
+
+[project.scripts]
+olab-voice-transcribe = "olab_voice.cli:transcribe_main"
+olab-voice-synthesize = "olab_voice.cli:synthesize_main"
+olab-voice-demo-server = "olab_voice.web_demo:demo_server_main"
+olab-voice-ofm-adapter = "olab_voice.ofm_smoke:ofm_adapter_main"
+olab-voice-ofm-publish-audio = "olab_voice.ofm_smoke:ofm_publish_audio_main"
+olab-voice-download-models = "olab_voice.download_models:download_models_main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/olab_voice"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"

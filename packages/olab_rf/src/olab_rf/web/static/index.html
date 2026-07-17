@@ -1,0 +1,264 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>olab_rf</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main>
+    <section class="toolbar">
+      <strong>olab_rf</strong>
+      <select id="mode">
+        <option value="replay">Replay</option>
+        <option value="adsb">ADS-B</option>
+        <option value="ais">AIS</option>
+        <option value="spectrum">Spectrum</option>
+      </select>
+      <button id="start">Start</button>
+      <button id="stop">Stop</button>
+      <span id="status">Idle</span>
+    </section>
+    <nav class="tabs" aria-label="Views">
+      <button class="tab active" data-view="map">Map</button>
+      <button class="tab" data-view="spectrum-panel">Spectrum</button>
+    </nav>
+    <section class="layout">
+      <div class="workspace">
+        <div id="map" class="view-panel active"></div>
+        <section id="spectrum-panel" class="view-panel spectrum-view">
+          <div class="spectrum-top-grid">
+            <section class="tool-panel discovery-panel">
+              <div class="panel-heading">
+                <h2>Frequency Discovery</h2>
+                <div class="event-actions">
+                  <a href="/api/frequency/scans/export.csv" download>CSV</a>
+                  <a href="/api/frequency/scans/export.json" download>JSON</a>
+                </div>
+              </div>
+              <div class="frequency-scan-controls">
+                <label>
+                  Range
+                  <select
+                    id="frequency-range"
+                    title="Catalog range used as inputs for a bounded frequency discovery scan."
+                    aria-label="Frequency range: catalog range used as inputs for a bounded scan."
+                  ></select>
+                </label>
+                <label>
+                  Duration s
+                  <input
+                    id="frequency-scan-duration"
+                    type="number"
+                    min="1"
+                    value="20"
+                    title="Total scan duration in seconds."
+                    aria-label="Frequency scan duration in seconds."
+                  >
+                </label>
+                <label>
+                  Results
+                  <select
+                    id="frequency-candidate-view"
+                    title="Choose whether Frequency Discovery shows all detected candidates or only candidates matched to catalog channels."
+                    aria-label="Frequency Discovery results view."
+                  >
+                    <option value="all">All candidates</option>
+                    <option value="matched">Matched channels</option>
+                  </select>
+                </label>
+                <label>
+                  SDR Gain dB
+                  <input
+                    id="frequency-scan-gain"
+                    type="number"
+                    step="0.1"
+                    placeholder="auto"
+                    title="Receiver gain in dB for Frequency Discovery scans. Leave blank for automatic gain."
+                    aria-label="Frequency Discovery SDR gain dB, blank for automatic gain."
+                  >
+                </label>
+                <button id="frequency-baseline-start" type="button">Capture Baseline</button>
+                <button id="frequency-scan-start" type="button">Find Frequencies</button>
+              </div>
+              <div id="frequency-scan-status" class="events compact-events"></div>
+            </section>
+            <section class="tool-panel monitor-panel">
+              <div class="panel-heading">
+                <h2>Live Monitor</h2>
+              </div>
+              <div class="spectrum-controls">
+                <label>
+                  Range
+                  <select
+                    id="spectrum-preset"
+                    title="Predefined frequency range and modulation family to sweep."
+                    aria-label="Spectrum preset: predefined frequency range and modulation family to sweep."
+                  ></select>
+                </label>
+                <label>
+                  Start MHz
+                  <input
+                    id="spectrum-start"
+                    type="number"
+                    step="0.0001"
+                    title="Lower edge of the sweep range, in megahertz."
+                    aria-label="Start MHz: lower edge of the sweep range."
+                  >
+                </label>
+                <label>
+                  Stop MHz
+                  <input
+                    id="spectrum-stop"
+                    type="number"
+                    step="0.0001"
+                    title="Upper edge of the sweep range, in megahertz."
+                    aria-label="Stop MHz: upper edge of the sweep range."
+                  >
+                </label>
+                <label>
+                  Bin kHz
+                  <input
+                    id="spectrum-bin"
+                    type="number"
+                    step="0.1"
+                    title="Approximate width of each frequency bucket in the chart, in kilohertz."
+                    aria-label="Bin kHz: approximate width of each frequency bucket in the chart."
+                  >
+                </label>
+                <label>
+                  Interval s
+                  <input
+                    id="spectrum-interval"
+                    type="number"
+                    min="1"
+                    value="2"
+                    title="Seconds between rtl_power sweep reports."
+                    aria-label="Interval seconds: seconds between rtl_power sweep reports."
+                  >
+                </label>
+                <label>
+                  Monitor Gain dB
+                  <input
+                    id="spectrum-gain"
+                    type="number"
+                    step="0.1"
+                    placeholder="auto"
+                    title="Receiver gain in dB for the Live Monitor sweep. Leave blank for automatic gain."
+                    aria-label="Live Monitor gain dB: receiver gain, blank for automatic gain."
+                  >
+                </label>
+                <label>
+                  Sample Hz
+                  <input
+                    id="spectrum-sample-rate"
+                    type="number"
+                    placeholder="default"
+                    title="RTL-SDR sample rate in samples per second. Leave blank for rtl_power default."
+                    aria-label="Sample rate Hz: sample rate in samples per second, blank for rtl_power default."
+                  >
+                </label>
+                <label>
+                  Event dB
+                  <input
+                    id="spectrum-threshold"
+                    type="number"
+                    min="0"
+                    step="0.5"
+                    value="12"
+                    title="Log peaks this many dB above the current noise floor."
+                    aria-label="Event dB: log peaks this many dB above the current noise floor."
+                  >
+                </label>
+                <label>
+                  Listen MHz
+                  <input
+                    id="watch-frequency"
+                    type="number"
+                    step="0.0001"
+                    placeholder="462.7125"
+                    title="Set Listen directly when a signal is visible but no event was logged."
+                    aria-label="Listen MHz: set Listen directly when a signal is visible but no event was logged."
+                  >
+                </label>
+                <button
+                  id="watch-frequency-apply"
+                  type="button"
+                  title="Set Listen to the entered frequency without changing the sweep range."
+                >Set Listen</button>
+              </div>
+            </section>
+          </div>
+          <section class="tool-panel plot-panel">
+            <div class="panel-heading">
+              <h2>Spectrum</h2>
+              <div class="spectrum-meter" id="spectrum-meter"></div>
+            </div>
+            <div class="spectrum-plot">
+              <canvas
+                id="spectrum-canvas"
+                width="1200"
+                height="360"
+                role="img"
+                aria-label="Spectrum chart showing frequency in megahertz on the horizontal axis and power in dB on the vertical axis."
+              ></canvas>
+            </div>
+          </section>
+          <section class="tool-panel plot-panel">
+            <div class="panel-heading">
+              <h2>Waterfall</h2>
+            </div>
+            <div class="waterfall-plot">
+              <canvas
+                id="waterfall-canvas"
+                width="1200"
+                height="220"
+                role="img"
+                aria-label="Waterfall chart showing recent spectrum sweeps over time."
+              ></canvas>
+              <div id="waterfall-tooltip" class="waterfall-tooltip" hidden></div>
+            </div>
+          </section>
+          <div class="spectrum-bottom-grid">
+            <section class="tool-panel">
+              <div class="panel-heading">
+                <h2>Listen</h2>
+              </div>
+              <div id="spectrum-watch" class="watch-panel"></div>
+            </section>
+            <section class="tool-panel">
+              <div class="panel-heading">
+                <h2>Events</h2>
+                <div class="event-actions">
+                  <a href="/api/spectrum/events/export.csv" download>CSV</a>
+                  <a href="/api/spectrum/events/export.json" download>JSON</a>
+                </div>
+              </div>
+              <div id="spectrum-events" class="events"></div>
+            </section>
+            <section class="tool-panel">
+              <div class="panel-heading">
+                <h2>Peaks</h2>
+              </div>
+              <div id="spectrum-peaks" class="peaks"></div>
+            </section>
+          </div>
+        </section>
+      </div>
+      <aside>
+        <h2>Session</h2>
+        <div id="session"></div>
+        <h2>Tracks</h2>
+        <div id="tracks"></div>
+        <h2>Hardware</h2>
+        <button id="check">Check</button>
+        <div id="hardware"></div>
+      </aside>
+    </section>
+  </main>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>

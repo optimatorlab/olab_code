@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      packages: ${{ steps.filter.outputs.changes }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            olab_camera:
+              - 'packages/olab_camera/**'
+              # olab_camera depends on olab_utils (see the workspace-dependency
+              # install step below) — a olab_utils-only change must still run
+              # olab_camera's install/test/build job, not just olab_utils's own.
+              - 'packages/olab_utils/**'
+            olab_utils:
+              - 'packages/olab_utils/**'
+            olab_rf:
+              - 'packages/olab_rf/**'
+            olab_voice:
+              - 'packages/olab_voice/**'
+            olab_audio:
+              - 'packages/olab_audio/**'
+
+  test:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.packages != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        package: ${{ fromJSON(needs.detect-changes.outputs.packages) }}
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      # olab_audio's base dependencies (pyaudio, pulsectl) are intentionally
+      # core, not an opt-in extra — the plan's v1 scope treats device I/O as
+      # the default install; only the DSP/teaching toolkit (`analysis`) is
+      # opt-in. pyaudio needs PortAudio's headers to build on Ubuntu.
+      - name: Install system prerequisites for olab_audio
+        if: matrix.package == 'olab_audio'
+        run: sudo apt-get update && sudo apt-get install -y portaudio19-dev
+      # olab_camera depends on olab_utils (a workspace-internal package, not
+      # published anywhere pip can resolve it from by name) — install it
+      # from its local path first so olab_camera's own install can find it.
+      - name: Install olab_utils (olab_camera's workspace dependency)
+        if: matrix.package == 'olab_camera'
+        run: pip install "./packages/olab_utils"
+      - name: Install package (base dependencies only)
+        run: |
+          python -m pip install --upgrade pip
+          pip install "./packages/${{ matrix.package }}"
+          pip install pytest
+      # Only base-dependency tests run here, deliberately — hardware/model
+      # *extras* (ROS, STT/TTS models, etc.) are opt-in per CONTRIBUTING.md's
+      # Testing section and must not be installed on every PR. Packages
+      # needing extra-specific CI coverage add a separate, explicitly
+      # opt-in job rather than expanding this one.
+      - name: Run tests
+        run: pytest "packages/${{ matrix.package }}/tests" -v
+      - name: Build wheel and sdist
+        run: |
+          pip install build
+          python -m build "packages/${{ matrix.package }}"

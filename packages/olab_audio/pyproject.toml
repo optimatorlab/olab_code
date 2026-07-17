@@ -1,0 +1,38 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "olab-audio"
+version = "0.1.0"
+description = "Audio device I/O (Mic/Speaker/recording, device enumeration, PulseAudio control) plus an optional DSP/analysis/teaching toolkit."
+# TODO(open item #5): requires-python not yet decided workspace-wide.
+requires-python = ">=3.10"
+readme = "README.md"
+dependencies = [
+    # Core I/O. Mic's normal callback already produces numpy arrays, and
+    # Recording_np.append() needs numpy for same-rate concatenation even
+    # without the resample extra -- so numpy is core, not analysis-only.
+    "pyaudio",
+    "pulsectl",
+    "numpy",
+]
+
+[project.optional-dependencies]
+# Lightweight, high-quality PCM sample-rate conversion for cross-rate
+# recording (Recording_np with samplerateRec != the mic's native rate) and
+# the future olab_voice streaming adapter. Kept separate from `analysis` so
+# a voice/streaming consumer doesn't need librosa/soundfile/matplotlib.
+# soxr>=0.4 is the version confirmed (in this environment, at 1.1.0) to
+# provide the ResampleStream streaming API this package's resample.py
+# uses; not yet validated on target Raspberry Pi hardware -- see the plan
+# doc's acceptance checklist.
+resample = ["soxr>=0.4"]
+
+# DSP/analysis/teaching toolkit.
+analysis = ["olab-audio[resample]", "librosa", "soundfile", "matplotlib"]
+
+all = ["olab-audio[analysis]"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/olab_audio"]

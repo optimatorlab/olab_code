@@ -1,0 +1,111 @@
+frequency_catalog:
+  ranges:
+    - id: noaa_weather
+      label: NOAA weather
+      min_freq_hz: 162400000
+      max_freq_hz: 162550000
+      default_modulation: NFM
+      default_bin_size_hz: 25000
+      channels:
+        - id: noaa_wx1
+          label: NOAA WX1
+          frequency_hz: 162550000
+          modulation: NFM
+        - id: noaa_wx2
+          label: NOAA WX2
+          frequency_hz: 162400000
+          modulation: NFM
+        - id: noaa_wx3
+          label: NOAA WX3
+          frequency_hz: 162475000
+          modulation: NFM
+        - id: noaa_wx4
+          label: NOAA WX4
+          frequency_hz: 162425000
+          modulation: NFM
+        - id: noaa_wx5
+          label: NOAA WX5
+          frequency_hz: 162450000
+          modulation: NFM
+        - id: noaa_wx6
+          label: NOAA WX6
+          frequency_hz: 162500000
+          modulation: NFM
+        - id: noaa_wx7
+          label: NOAA WX7
+          frequency_hz: 162525000
+          modulation: NFM
+    - id: aviation_am
+      label: Aviation AM
+      min_freq_hz: 118000000
+      max_freq_hz: 137000000
+      default_modulation: AM
+      default_bin_size_hz: 25000
+      channels:
+        - id: aviation_emergency
+          label: Aviation emergency
+          frequency_hz: 121500000
+          modulation: AM
+        - id: air_to_air_advisory
+          label: Air-to-air advisory
+          frequency_hz: 122750000
+          modulation: AM
+    - id: frs_gmrs
+      label: FRS/GMRS
+      min_freq_hz: 462000000
+      max_freq_hz: 468000000
+      default_modulation: NFM
+      default_bin_size_hz: 12500
+      channels:
+        - {id: frs_gmrs_01, label: FRS/GMRS Ch 1, frequency_hz: 462562500, modulation: NFM}
+        - {id: frs_gmrs_02, label: FRS/GMRS Ch 2, frequency_hz: 462587500, modulation: NFM}
+        - {id: frs_gmrs_03, label: FRS/GMRS Ch 3, frequency_hz: 462612500, modulation: NFM}
+        - {id: frs_gmrs_04, label: FRS/GMRS Ch 4, frequency_hz: 462637500, modulation: NFM}
+        - {id: frs_gmrs_05, label: FRS/GMRS Ch 5, frequency_hz: 462662500, modulation: NFM}
+        - {id: frs_gmrs_06, label: FRS/GMRS Ch 6, frequency_hz: 462687500, modulation: NFM}
+        - {id: frs_gmrs_07, label: FRS/GMRS Ch 7, frequency_hz: 462712500, modulation: NFM}
+        - {id: frs_08, label: FRS Ch 8, frequency_hz: 467562500, modulation: NFM}
+        - {id: frs_09, label: FRS Ch 9, frequency_hz: 467587500, modulation: NFM}
+        - {id: frs_10, label: FRS Ch 10, frequency_hz: 467612500, modulation: NFM}
+        - {id: frs_11, label: FRS Ch 11, frequency_hz: 467637500, modulation: NFM}
+        - {id: frs_12, label: FRS Ch 12, frequency_hz: 467662500, modulation: NFM}
+        - {id: frs_13, label: FRS Ch 13, frequency_hz: 467687500, modulation: NFM}
+        - {id: frs_14, label: FRS Ch 14, frequency_hz: 467712500, modulation: NFM}
+        - {id: gmrs_15, label: GMRS Ch 15, frequency_hz: 462550000, modulation: NFM}
+        - {id: gmrs_16, label: GMRS Ch 16, frequency_hz: 462575000, modulation: NFM}
+        - {id: gmrs_17, label: GMRS Ch 17, frequency_hz: 462600000, modulation: NFM}
+        - {id: gmrs_18, label: GMRS Ch 18, frequency_hz: 462625000, modulation: NFM}
+        - {id: gmrs_19, label: GMRS Ch 19, frequency_hz: 462650000, modulation: NFM}
+        - {id: gmrs_20, label: GMRS Ch 20, frequency_hz: 462675000, modulation: NFM}
+        - {id: gmrs_21, label: GMRS Ch 21, frequency_hz: 462700000, modulation: NFM}
+        - {id: gmrs_22, label: GMRS Ch 22, frequency_hz: 462725000, modulation: NFM}
+    - id: murs
+      label: MURS
+      min_freq_hz: 151820000
+      max_freq_hz: 154600000
+      default_modulation: NFM
+      default_bin_size_hz: 12500
+      channels:
+        - {id: murs_01, label: MURS Ch 1, frequency_hz: 151820000, modulation: NFM}
+        - {id: murs_02, label: MURS Ch 2, frequency_hz: 151880000, modulation: NFM}
+        - {id: murs_03, label: MURS Ch 3, frequency_hz: 151940000, modulation: NFM}
+        - {id: murs_04, label: MURS Ch 4, frequency_hz: 154570000, modulation: NFM}
+        - {id: murs_05, label: MURS Ch 5, frequency_hz: 154600000, modulation: NFM}
+    - id: cb
+      label: CB radio
+      min_freq_hz: 26965000
+      max_freq_hz: 27405000
+      default_modulation: AM
+      default_bin_size_hz: 10000
+    - id: fm_broadcast
+      label: FM broadcast
+      min_freq_hz: 88000000
+      max_freq_hz: 108000000
+      default_modulation: WFM
+      default_bin_size_hz: 100000
+    - id: ham_2m_70cm
+      label: Ham 2m/70cm
+      min_freq_hz: 144000000
+      max_freq_hz: 450000000
+      default_modulation: FM
+      default_bin_size_hz: 25000
