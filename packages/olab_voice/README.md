@@ -114,6 +114,22 @@ print(transcript.text)
 synthesize_to_wav("107 is listening", "response.wav")
 ```
 
+## Local Speaker Playback
+
+`TtsPlaybackService` adds queued/preemptive local playback on top of Piper
+synthesis, with a synchronous API so callers never need `await`:
+
+```python
+from olab_voice import AplayPlaybackSink, PiperSynthesizer, TtsPlaybackService, TtsRequest
+
+service = TtsPlaybackService(PiperSynthesizer.from_env(), AplayPlaybackSink())
+result = service.speak_and_wait(TtsRequest(text="107 is listening"))
+service.close()
+```
+
+See [`docs/tts_playback.md`](docs/tts_playback.md) for Piper/ALSA setup,
+preemption semantics, and troubleshooting.
+
 ## CLI Smoke Tools
 
 ```bash

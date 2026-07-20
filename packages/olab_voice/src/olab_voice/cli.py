@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 from pathlib import Path
 from typing import Any, Sequence
 
 from olab_voice.defaults import default_faster_whisper_model, default_piper_model
 from olab_voice.files import synthesize_to_wav, transcribe_file
+from olab_voice.playback import AplayPlaybackSink
 
 
 def transcribe_main(argv: Sequence[str] | None = None) -> int:
@@ -46,9 +48,13 @@ def synthesize_main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--length-scale", type=float)
     parser.add_argument("--noise-scale", type=float)
     parser.add_argument("--noise-w", type=float)
+    parser.add_argument(
+        "--play", action="store_true", help="Play the synthesized audio locally with aplay after writing it."
+    )
+    parser.add_argument("--device", help="ALSA device name to pass to aplay (only with --play).")
     args = parser.parse_args(argv)
 
-    synthesize_to_wav(
+    audio = synthesize_to_wav(
         args.text,
         args.output_wav,
         model_path=args.model,
@@ -58,6 +64,10 @@ def synthesize_main(argv: Sequence[str] | None = None) -> int:
         noise_w=args.noise_w,
     )
     print(args.output_wav.expanduser())
+
+    if args.play:
+        sink = AplayPlaybackSink(device=args.device)
+        asyncio.run(sink.play(audio))
     return 0
 
 

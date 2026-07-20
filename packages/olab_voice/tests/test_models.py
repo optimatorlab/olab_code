@@ -93,6 +93,7 @@ def test_tts_request_defaults():
 
     assert request.output == "browser_playback"
     assert request.format == "wav"
+    assert request.preempt is False
 
 
 def test_tts_request_round_trip():
@@ -101,6 +102,21 @@ def test_tts_request_round_trip():
     restored = TtsRequest.from_dict(request.to_dict())
 
     assert restored == request
+
+
+def test_tts_request_preempt_round_trip():
+    request = TtsRequest(text="alert: obstacle ahead", preempt=True)
+
+    restored = TtsRequest.from_dict(request.to_dict())
+
+    assert restored == request
+    assert restored.preempt is True
+
+
+def test_tts_request_from_dict_defaults_preempt_false():
+    restored = TtsRequest.from_dict({"text": "107 is listening"})
+
+    assert restored.preempt is False
 
 
 def test_tts_audio_round_trip():

@@ -16,6 +16,7 @@ class TtsRequest:
     voice: str | None = None
     output: TtsOutputMode = "browser_playback"
     format: str = "wav"
+    preempt: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -26,6 +27,7 @@ class TtsRequest:
             "voice": self.voice,
             "output": self.output,
             "format": self.format,
+            "preempt": self.preempt,
         }
 
     @classmethod
@@ -38,6 +40,7 @@ class TtsRequest:
             voice=data.get("voice"),
             output=data.get("output", "browser_playback"),
             format=data.get("format", "wav"),
+            preempt=data.get("preempt", False),
         )
 
 

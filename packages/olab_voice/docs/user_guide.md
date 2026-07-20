@@ -41,6 +41,15 @@ Synthesize local speech to WAV:
 venv/bin/olab-voice-synthesize "107 is listening" /tmp/olab_voice_test.wav
 ```
 
+Synthesize and immediately play it on the local speaker with `aplay`:
+
+```bash
+venv/bin/olab-voice-synthesize "107 is listening" /tmp/olab_voice_test.wav --play
+```
+
+For queued/preemptive playback and the `TtsPlaybackService` Python API, see
+[`tts_playback.md`](tts_playback.md).
+
 Transcribe a local audio file:
 
 ```bash
