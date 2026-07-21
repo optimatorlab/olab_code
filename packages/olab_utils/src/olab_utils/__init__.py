@@ -15,6 +15,10 @@ import os
 import math
 import socket, errno, time  # For checkPort() function
 
+import qrcode
+import qrcode.constants
+from PIL import Image, ImageColor
+
 # https://mavlink.io/en/messages/common.html#MAV_SEVERITY
 SEVERITY_EMERGENCY = 0  # System is unusable. This is a "panic" condition.
 SEVERITY_ALERT     = 1  # Action should be taken immediately. Indicates error in non-critical systems.
@@ -482,6 +486,289 @@ def decorateQR(img, corners, data, color=(0,0,255), addText=True):
 					0.5, color, 1, cv2.LINE_AA)
 	except Exception as e:
 		print(f'Error in decorateQR: {e}')
+
+
+_QR_ECC_MAP = {
+	'L': qrcode.constants.ERROR_CORRECT_L,
+	'M': qrcode.constants.ERROR_CORRECT_M,
+	'Q': qrcode.constants.ERROR_CORRECT_Q,
+	'H': qrcode.constants.ERROR_CORRECT_H,
+}
+
+# Lossless-only -- a lossy format (e.g. JPEG) can corrupt sharp module edges,
+# undermining decodability independent of DPI. PNG is the recommended default.
+_QR_OUTPUT_EXTENSIONS = {'.png', '.tif', '.tiff', '.bmp'}
+
+# Fixed render box_size (px/module) before the final cv2.resize() to the
+# exact target size -- generous enough to keep resize a downscale/mild
+# upscale rather than a large magnification, which would blur module edges.
+_QR_RENDER_BOX_SIZE = 10
+
+
+def _normalizeColorToRGB(color):
+	'''
+	Accepts a PIL-recognized name/hex string (e.g. 'red', '#ff0000'), or an
+	RGB 3-tuple/list of ints 0-255 (e.g. (255, 0, 0)) -- NOT a 4-tuple/RGBA.
+	Deliberately does not just call PIL.ImageColor.getrgb() on every input:
+	getrgb() only accepts strings and raises AttributeError on a tuple.
+	'''
+	if isinstance(color, str):
+		return ImageColor.getrgb(color)
+	if (isinstance(color, (tuple, list)) and len(color) == 3
+			and all(isinstance(c, int) and not isinstance(c, bool) and 0 <= c <= 255 for c in color)):
+		return tuple(color)
+	raise TypeError(f"color must be a name/hex string or an RGB 3-tuple of ints 0-255, got {color!r}")
+
+
+def _qrRoundTripOk(img, payload):
+	'''
+	Thin, separately-named wrapper around cv2.QRCodeDetector so tests have a
+	seam to force the "logo broke decoding" failure branch deterministically
+	(via monkeypatch), instead of hunting for a payload/ECC/logo combination
+	that happens to break real OpenCV decoding (version/build-dependent).
+
+	Pads `img` with a temporary white margin before decoding -- NOT saved or
+	returned, purely so cv2.QRCodeDetector isn't confused by the array
+	having literally zero pixels beyond its own edge (an artifact of
+	testing the bare in-memory array; empirically confirmed real
+	printed/photographed tags with default border=0 decode fine once any
+	ordinary surrounding whitespace, e.g. a printed page's own margins, is
+	present -- this padding just reproduces that minimal condition for the
+	in-memory check).
+	'''
+	pad = max(1, round(img.shape[0] * 0.15))
+	canvas = np.full((img.shape[0] + 2 * pad, img.shape[1] + 2 * pad, 3), 255, dtype=np.uint8)
+	canvas[pad:pad + img.shape[0], pad:pad + img.shape[1]] = img
+
+	detector = cv2.QRCodeDetector()
+	(data, points, _) = detector.detectAndDecode(canvas)
+	return bool(data) and (points is not None) and (data == payload)
+
+
+def generateQR(payload, tag_size_inches, dpi=300, ecc='H', border=0,
+			   fill_color='black', back_color='white', label=None,
+			   logo=None, logo_scale=0.2, outputFile=None):
+	'''
+	Generate a printable QR-code tag image, for use as a physical fiducial
+	with olab_camera's QR detection/pose pipeline (_QRCode/arucoFindPose()).
+
+	payload -- str, non-empty. The data to encode.
+	tag_size_inches -- physical size of the QR symbol itself. With the
+		default border=0, the saved image IS the QR symbol (no baked-in
+		margin), so this is exactly what any ordinary print dialog's
+		"actual size"/100% setting, or an image editor's "set image size",
+		controls -- and exactly what a ruler measures on the printed page.
+		Pass this same value into arucoFindPose()'s objectPoints for this
+		printed tag, REGARDLESS of `border` (see `border` below -- a
+		nonzero border only adds extra file size on top of this, it never
+		changes what tag_size_inches itself means or the pose value to
+		use). The QR symbol occupies round(tag_size_inches * dpi) pixels,
+		within +/-1 pixel (exact-pixel sizing isn't achievable in general,
+		since both module counts and final pixel dimensions must be
+		integers).
+	dpi -- int > 0. See tag_size_inches above, and outputFile below.
+	ecc -- one of 'L'/'M'/'Q'/'H' (error-correction level). Default 'H'
+		(~30% recoverable) for resilience of a printed tag viewed at an
+		angle/distance/partial occlusion.
+	border -- int >= 0 (extra quiet-zone width in modules baked INTO THE
+		FILE itself, on top of tag_size_inches). Default 0: the saved
+		image is exactly the QR symbol -- no baked-in margin -- so the
+		file's own size always equals tag_size_inches exactly, matching
+		what any print/sizing tool operates on. A QR code's quiet-zone
+		requirement is about the physical scanning environment having
+		clean white space around the printed symbol -- not about the file
+		containing that space itself -- so with the default border=0,
+		leave a reasonable plain white margin around the tag when you
+		print/place it (an ordinary printed page's own margins are already
+		more than enough for a single tag printed on its own sheet; don't
+		crop tight to the black pixels or tile tags edge-to-edge with no
+		gap). Pass a nonzero border only if you specifically want that
+		margin baked into the file itself (e.g. to composite the tag into
+		a larger design that doesn't otherwise leave it any white space)
+		-- doing so makes the FILE larger than tag_size_inches (the QR
+		symbol itself still prints at exactly tag_size_inches; the border
+		is added on top, not carved out of it), so a nonzero border no
+		longer gives you "whole file = what I asked for" -- you're
+		explicitly trading that property away for baked-in margin.
+	fill_color / back_color -- a name/hex string (e.g. 'red', '#ff0000') or
+		an RGB 3-tuple/list of ints 0-255 (e.g. (255, 0, 0)) -- not RGBA.
+	label -- optional str drawn below the QR symbol, on extra canvas
+		appended outside tag_size_inches (does not alter or shrink the QR
+		symbol itself).
+	logo -- optional path (str/os.PathLike) or numpy.ndarray (grayscale,
+		BGR, or BGRA, dtype uint8) composited centered over the QR, inside
+		an opaque back_color backing square. logo_scale is a *side-length*
+		fraction of the QR symbol bounding that backing square (the actual
+		occlusion footprint, margin included) -- area coverage is
+		logo_scale ** 2, capped at 0.5 (25% area). After compositing, the
+		result is verified to still decode to `payload`; raises
+		RuntimeError if the logo broke decodability.
+	outputFile -- optional path (str/os.PathLike). If given, the image is
+		also saved via Pillow with `dpi` embedded as real file metadata
+		(the returned numpy array itself carries no DPI -- only outputFile
+		gets correct physical-print sizing). Extension must be one of
+		.png/.tif/.tiff/.bmp (lossless only -- PNG recommended). Print
+		outputFile at actual size / 100% scale (no "fit to page"/"scale to
+		fit"), and measure the printed tag with a ruler before trusting it
+		for pose.
+
+	Returns a BGR uint8 numpy array.
+	'''
+	# ---- Validation (before any rendering or file I/O) ----
+	if not isinstance(payload, str):
+		raise TypeError(f"payload must be a str, got {type(payload).__name__}")
+	if payload == '':
+		raise ValueError("payload must not be empty")
+
+	if not (isinstance(tag_size_inches, (int, float)) and not isinstance(tag_size_inches, bool)):
+		raise TypeError(f"tag_size_inches must be an int or float, got {type(tag_size_inches).__name__}")
+	if not math.isfinite(tag_size_inches):
+		raise ValueError(f"tag_size_inches must be finite, got {tag_size_inches}")
+	if tag_size_inches <= 0:
+		raise ValueError(f"tag_size_inches must be > 0, got {tag_size_inches}")
+
+	if not (isinstance(dpi, int) and not isinstance(dpi, bool)):
+		raise TypeError(f"dpi must be an int, got {type(dpi).__name__}")
+	if dpi <= 0:
+		raise ValueError(f"dpi must be > 0, got {dpi}")
+
+	if not isinstance(ecc, str):
+		raise TypeError(f"ecc must be a str, got {type(ecc).__name__}")
+	if ecc not in _QR_ECC_MAP:
+		raise ValueError(f"ecc must be one of {sorted(_QR_ECC_MAP)}, got {ecc!r}")
+
+	if not (isinstance(border, int) and not isinstance(border, bool)):
+		raise TypeError(f"border must be an int, got {type(border).__name__}")
+	if border < 0:
+		raise ValueError(f"border must be >= 0, got {border}")
+
+	fill_rgb = _normalizeColorToRGB(fill_color)
+	back_rgb = _normalizeColorToRGB(back_color)
+
+	if (label is not None) and not isinstance(label, str):
+		raise TypeError(f"label must be a str or None, got {type(label).__name__}")
+
+	logoImg = None
+	if logo is not None:
+		if not (isinstance(logo_scale, (int, float)) and not isinstance(logo_scale, bool)):
+			raise TypeError(f"logo_scale must be an int or float, got {type(logo_scale).__name__}")
+		if not math.isfinite(logo_scale):
+			raise ValueError(f"logo_scale must be finite, got {logo_scale}")
+		if not (0 < logo_scale <= 0.5):
+			raise ValueError(f"logo_scale must be > 0 and <= 0.5 (25% area), got {logo_scale}")
+
+		if isinstance(logo, (str, os.PathLike)):
+			logoImg = cv2.imread(str(logo), cv2.IMREAD_UNCHANGED)
+			if logoImg is None:
+				raise ValueError(f"could not read logo image from {logo!r}")
+		elif isinstance(logo, np.ndarray):
+			logoImg = logo
+			if logoImg.dtype != np.uint8:
+				raise TypeError(f"logo array must have dtype uint8, got {logoImg.dtype}")
+			if 0 in logoImg.shape:
+				raise ValueError(f"logo array must not have a zero-length dimension, got shape {logoImg.shape}")
+			if logoImg.ndim not in (2, 3):
+				raise ValueError(f"logo array must be 2-D (grayscale) or 3-D (BGR/BGRA), got ndim={logoImg.ndim}")
+			if (logoImg.ndim == 3) and (logoImg.shape[2] not in (3, 4)):
+				raise ValueError(f"logo array's last dimension must be 3 (BGR) or 4 (BGRA), got {logoImg.shape[2]}")
+		else:
+			raise TypeError(f"logo must be a str/os.PathLike path or a numpy.ndarray, got {type(logo).__name__}")
+
+		if logoImg.ndim == 2:
+			logoImg = cv2.cvtColor(logoImg, cv2.COLOR_GRAY2BGR)
+
+	if outputFile is not None:
+		if not isinstance(outputFile, (str, os.PathLike)):
+			raise TypeError(f"outputFile must be a str or os.PathLike, got {type(outputFile).__name__}")
+		ext = os.path.splitext(str(outputFile))[1].lower()
+		if ext not in _QR_OUTPUT_EXTENSIONS:
+			raise ValueError(f"outputFile extension {ext!r} not supported; use one of {sorted(_QR_OUTPUT_EXTENSIONS)}")
+
+	# ---- Build the QR matrix, then render at a fixed box_size and resize
+	# the whole canvas to an exact pixel target (see plan/reviewer notes:
+	# an integer box_size alone can't hit an exact target -- module_count *
+	# box_size can differ from dpi * tag_size_inches by up to half a module) ----
+	qr = qrcode.QRCode(error_correction=_QR_ECC_MAP[ecc], border=border, box_size=_QR_RENDER_BOX_SIZE)
+	qr.add_data(payload)
+	qr.make(fit=True)
+	module_count = qr.modules_count
+
+	target_symbol_px = round(dpi * tag_size_inches)
+	if target_symbol_px < module_count:
+		raise ValueError(
+			f"tag_size_inches={tag_size_inches} at dpi={dpi} yields {target_symbol_px}px, "
+			f"too small to render {module_count} modules (need >= 1px/module)")
+
+	pilImg = qr.make_image(fill_color=fill_rgb, back_color=back_rgb).get_image().convert('RGB')
+	img = cv2.cvtColor(np.array(pilImg), cv2.COLOR_RGB2BGR)
+
+	full_modules = module_count + 2 * border
+	target_full_px = round(target_symbol_px * full_modules / module_count)
+	img = cv2.resize(img, (target_full_px, target_full_px), interpolation=cv2.INTER_NEAREST)
+
+	# ---- Optional logo compositing ----
+	if logo is not None:
+		back_bgr = back_rgb[::-1]
+
+		# logo_scale bounds the backing square (the true opaque occlusion
+		# footprint, margin included), not just the logo's own pixels.
+		backing_square_px = round(logo_scale * target_symbol_px)
+		margin_px = round(0.08 * backing_square_px)
+		inner_px = max(1, backing_square_px - 2 * margin_px)
+
+		(logoH, logoW) = logoImg.shape[:2]
+		scale = inner_px / max(logoH, logoW)
+		newW = max(1, round(logoW * scale))
+		newH = max(1, round(logoH * scale))
+		resizedLogo = cv2.resize(logoImg, (newW, newH), interpolation=cv2.INTER_AREA)
+
+		(cy, cx) = (target_full_px // 2, target_full_px // 2)
+		half = backing_square_px // 2
+		(bx0, by0) = (cx - half, cy - half)
+		(bx1, by1) = (bx0 + backing_square_px, by0 + backing_square_px)
+		cv2.rectangle(img, (bx0, by0), (bx1, by1), back_bgr, thickness=-1)
+
+		(lx0, ly0) = (cx - newW // 2, cy - newH // 2)
+		(lx1, ly1) = (lx0 + newW, ly0 + newH)
+
+		if resizedLogo.shape[2] == 4:
+			alpha = resizedLogo[:, :, 3:4].astype(np.float32) / 255.0
+			logoBgr = resizedLogo[:, :, :3].astype(np.float32)
+			roi = img[ly0:ly1, lx0:lx1].astype(np.float32)
+			img[ly0:ly1, lx0:lx1] = (alpha * logoBgr + (1 - alpha) * roi).astype(np.uint8)
+		else:
+			img[ly0:ly1, lx0:lx1] = resizedLogo
+
+		if not _qrRoundTripOk(img, payload):
+			raise RuntimeError(
+				f"logo overlay broke QR decodability for payload {payload!r} "
+				f"(logo_scale={logo_scale}, ecc={ecc}); try a smaller logo_scale or a higher ecc")
+
+	# ---- Optional label (extra canvas below the QR square -- not part of
+	# tag_size_inches or the quiet zone) ----
+	if label is not None:
+		labelHeight = max(20, round(0.15 * target_full_px))
+		labelCanvas = np.full((labelHeight, target_full_px, 3), back_rgb[::-1], dtype=np.uint8)
+
+		thickness = max(1, round(labelHeight / 20))
+		fontScale = 0.5
+		while True:
+			((textW, textH), _baseline) = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, fontScale + 0.1, thickness)
+			if (textW > 0.9 * target_full_px) or (textH > 0.6 * labelHeight):
+				break
+			fontScale += 0.1
+		((textW, textH), _baseline) = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, fontScale, thickness)
+		textPos = (max(0, (target_full_px - textW) // 2), (labelHeight + textH) // 2)
+		drawText(labelCanvas, label, textPos, fontScale=fontScale, thickness=thickness, color=fill_rgb[::-1])
+
+		img = np.vstack([img, labelCanvas])
+
+	# ---- Optional file output (DPI embedded, lossless formats only) ----
+	if outputFile is not None:
+		rgbOut = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+		Image.fromarray(rgbOut).save(str(outputFile), dpi=(dpi, dpi))
+
+	return img
 
 
 def decorateCalibrate(img, checkerboard, corners, count, img_x_y, orig_x_y, addText=True):

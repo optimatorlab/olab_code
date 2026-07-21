@@ -12,6 +12,7 @@ readme = "README.md"
 dependencies = [
     "numpy>=1.21.0",
     "opencv-contrib-python>=4.10.0",
+    "qrcode[pil]>=7.4.2",
 ]
 
 [project.optional-dependencies]

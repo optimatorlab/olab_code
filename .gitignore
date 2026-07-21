@@ -7,4 +7,4 @@ dist/
 .venv/
 venv/
 .pairwork/
-examples/
+examples/**/*.ipynb

@@ -240,6 +240,64 @@ camera.barcode['default'].stop()
 
 ---
 
+### Generate a printable QR tag
+
+`olab_utils.generateQR()` generates a printable QR-code tag image for use as
+a physical fiducial with the detection/pose pipeline below.
+
+```python
+# Generate a 4.25-inch QR tag at 300 DPI, saved as a lossless PNG (the only
+# formats accepted are .png/.tif/.tiff/.bmp -- a lossy format like JPEG can
+# corrupt the sharp module edges QR decoding depends on):
+img = olab_utils.generateQR(
+    payload='PAD_A',
+    tag_size_inches=4.25,
+    dpi=300,
+    outputFile='pad_a_tag.png')
+```
+
+- `tag_size_inches` sizes **the QR symbol itself**. With the default
+  `border=0`, the saved file *is* the QR symbol -- no extra white margin
+  baked in -- so the file's own size always equals `tag_size_inches`
+  exactly, matching what a print dialog's "actual size"/100% setting, or
+  an image editor's "set image size", controls, and exactly what a ruler
+  measures on the printed page. No separate "which edge do I measure" step
+  is needed.
+- **Print `outputFile` at actual size / 100% scale**, with any "fit to
+  page"/"scale to fit" print option turned **off**. The file has `dpi`
+  embedded as real metadata, but a print dialog's "fit to page" ignores
+  that and resamples the image to the page size regardless -- so DPI
+  metadata alone does not guarantee the printed tag is the size you asked
+  for.
+- After printing, **physically measure the printed tag with a ruler**
+  before trusting it for pose -- it should match `tag_size_inches` (within
+  +/-1 pixel, at the `dpi` you generated it with); confirming it with a
+  ruler catches any print-pipeline scaling that DPI metadata alone
+  couldn't prevent. This same `tag_size_inches` value is what to pass into
+  `arucoFindPose()`'s `objectPoints` below (see `TAG_SIZE_INCHES`).
+- The default `border=0` means the *file* has no quiet zone baked in --
+  a QR code's quiet-zone requirement is about the physical scanning
+  environment having clean white space around the tag, not about the file
+  containing that space itself. An ordinary printed page's own margins
+  already provide this for a single tag printed on its own sheet; just
+  don't crop tight to the black pixels or place the tag immediately
+  against other dark content. Pass a nonzero `border` only if you need
+  that margin baked into the file itself (e.g. compositing the tag into a
+  design that doesn't otherwise leave it any white space) -- doing so
+  makes the file **larger** than `tag_size_inches` (the QR symbol still
+  prints at exactly `tag_size_inches`; the border is added on top, not
+  carved out of it), so `arucoFindPose()`'s `objectPoints` should still
+  use `tag_size_inches` unchanged -- a nonzero border only affects the
+  saved file's total size, never what `tag_size_inches` means.
+- Optional `logo=<path or numpy image>` embeds a logo centered on the tag
+  (composited inside an opaque backing square, capped at `logo_scale`,
+  verified to still decode after compositing); optional `label=<str>`
+  prints a human-readable caption below the tag (e.g. the payload itself).
+  See the function's docstring for the full parameter set (error
+  correction level, colors, quiet-zone width, etc).
+
+---
+
 ### QR Codes
 
 `addQR()` is QR-only (unlike `addBarcode()`, which scans any symbology pyzbar
