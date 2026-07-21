@@ -247,6 +247,37 @@ supports) and lets you pick the decoder. It reports the same shape of thing
 ArUco/barcode do -- payload data + corners each cycle -- and, like ArUco,
 does not compute distance/pose itself.
 
+- **NOTE**: `decoder='cv2'` (the default) may print a native OpenCV warning
+  like `QR: ECI is not supported properly` for QR codes that embed an ECI
+  segment (common -- many phone/web QR generators add one to declare
+  UTF-8). It's benign: decoding still succeeds despite the warning. If it's
+  too noisy (it repeats every detection cycle a tag with ECI is in view),
+  suppress OpenCV's own logging once, near the top of your notebook/script.
+  The API moved between OpenCV versions -- newer builds (roughly 4.11+)
+  only expose `cv2.utils.logging.setLogLevel()`; older builds only expose
+  the now-removed top-level `cv2.setLogLevel()` -- so try both and fall
+  back gracefully:
+  ```python
+  def suppress_cv2_warnings():
+      try:
+          import cv2.utils.logging as cvlog
+          cvlog.setLogLevel(cvlog.LOG_LEVEL_ERROR)
+          return True
+      except (ImportError, AttributeError):
+          pass
+      try:
+          cv2.setLogLevel(2)   # 2 == LOG_LEVEL_ERROR numerically, stable across versions
+          return True
+      except AttributeError:
+          return False
+
+  suppress_cv2_warnings()
+  ```
+  This is a process-wide OpenCV setting (not specific to QR detection), so
+  it also quiets any other OpenCV WARNING-level messages elsewhere in your
+  session -- pass `LOG_LEVEL_WARNING`/`3` instead of `LOG_LEVEL_ERROR`/`2`
+  if you need those back.
+
 ```python
 # Create a function that will be called each time a QR code is detected:
 def postQR(argsDict):
