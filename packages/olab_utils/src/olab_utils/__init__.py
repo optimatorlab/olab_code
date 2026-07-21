@@ -328,28 +328,28 @@ def arucoDrawDetections(img, corners, ids, centers=[], rotations=[], config=ARUC
 		We will update the image itself.
 	corners - output from arucoDetectMarkers.  np INT array    FIXME -- Maybe it shouldn't be
 	ids - output from arucoDetectMarkers.  np array of size n (number of detected markers)
-	
+
 	'''
-	
+
 	try:
 		for i in range(0, len(corners)):
 			# Draw bounding box:
 			if (config['borderDraw']):
 				cv2.polylines(img, corners[i].astype('int'), True, config['borderColor'], 2, cv2.LINE_AA)
-			
+
 			# Add label to bounding box (top right corner)
 			if (config['textDraw']):
 				cv2.putText(img, str(ids[i]),
 					(int(corners[i][0][1][0]), int(corners[i][0][1][1]) - 7),
 					cv2.FONT_HERSHEY_SIMPLEX,
-					config['textScale'], config['textColor'], config['textThicknessPx'], cv2.LINE_AA)		
+					config['textScale'], config['textColor'], config['textThicknessPx'], cv2.LINE_AA)
 
 
 		if ((config['centerDraw']) or (config['arrowDraw'])):
 			for i in range(0, len(centers)):
 				pt1 = (centers[i][0], centers[i][1])
 				# Draw a center marker
-				if (config['centerDraw']): 
+				if (config['centerDraw']):
 					drawCircle(img, pt1, config['centerRadiusPx'], color=config['centerColor'])
 				if (config['arrowDraw']):
 					# Draw an arrow marker
@@ -357,7 +357,8 @@ def arucoDrawDetections(img, corners, ids, centers=[], rotations=[], config=ARUC
 					drawArrow(img, pt1, (int(pt2[0]), int(pt2[1])), config['arrowColor'], config['arrowThicknessPx'], config['arrowTipLength'])
 	except Exception as e:
 		print(f'ERROR in arucoDrawDetections:  {e}')
-		
+
+
 def arucoDetectMarkers(img, arucoDict, arucoParams, img_x_y=None, orig_x_y=None):
 	'''
 	Detect ArUco markers in the input frame
@@ -458,6 +459,30 @@ def decorateBarcode(img, corners, data, color=(0,0,255), addText=True):
 			'''
 	except Exception as e:
 		print(f'Error in decorateBarcode: {e}')
+
+
+def decorateQR(img, corners, data, color=(0,0,255), addText=True):
+	'''
+	img is a numpy array of the cv2 image.
+		We will update the image itself.
+	corners -- list of 4x2 arrays (per detected QR code), in the decoder's own native
+		corner order.
+	data -- list of decoded payload strings, same length/order as corners.
+	'''
+	try:
+		for i in range(0, len(corners)):
+			pts = np.asarray(corners[i], dtype=np.int32).reshape((-1, 1, 2))
+			cv2.polylines(img, [pts], True, color, 2, cv2.LINE_AA)
+
+			if (addText):
+				topPoint = corners[i][0]
+				cv2.putText(img, str(data[i]),
+					(int(topPoint[0]), int(topPoint[1]) - 7),
+					cv2.FONT_HERSHEY_SIMPLEX,
+					0.5, color, 1, cv2.LINE_AA)
+	except Exception as e:
+		print(f'Error in decorateQR: {e}')
+
 
 def decorateCalibrate(img, checkerboard, corners, count, img_x_y, orig_x_y, addText=True):
 	try:
@@ -893,22 +918,181 @@ def arucoFindPose(objPoints, corners, cameraMatrix, dist, flags=cv2.SOLVEPNP_IPP
 	
 # self.camera.intrinsics['matrix'], self.camera.intrinsics['dist']
 
-def arucoFindPoseGlobal():
+# Fixed rotation from ROS camera-link convention (x forward, y left, z up --
+# an FLU frame, same handedness as the vehicle body frame) to OpenCV's
+# optical convention (x right, y down, z forward), as used by cv2.solvePnP()/
+# arucoFindPose(). This is a constant fact about the two conventions
+# (REP-103 / image_geometry), not a per-robot calibration value:
+#   optical_x = -link_y, optical_y = -link_z, optical_z = link_x
+_R_OPTICAL_FROM_CAMERALINK = np.array([
+	[0.0, -1.0,  0.0],
+	[0.0,  0.0, -1.0],
+	[1.0,  0.0,  0.0],
+])
+_R_CAMERALINK_FROM_OPTICAL = _R_OPTICAL_FROM_CAMERALINK.T
+
+
+def _rpyToMatrix(roll, pitch, yaw):
 	'''
-	NOTE: This wouldn't really be an aruco-specific function.
-	
-	Estimate the location of an object in the Global/World frame
-	
-	Need to know 
-	- location and orientation of camera (in WORLD coords)
-	- location of object (x, y, and z distance from camera)
-		This would come from arucoFindPoseLocal.tvecs
-		
-	Returns location of object in WORLD coords	
-	'''	
-	
-	print('FIXME -- Do we already have this function somewhere?')
-	
+	ZYX (yaw-pitch-roll) intrinsic Tait-Bryan angles -> rotation matrix,
+	mapping vectors expressed in a body-style frame (FLU: x forward, y left,
+	z up) into the parent frame -- the convention used by
+	arucoFindPoseGlobal()/arucoFindCameraPoseGlobal() (ROS REP-103, ENU
+	world frame).
+	'''
+	cr, sr = math.cos(roll),  math.sin(roll)
+	cp, sp = math.cos(pitch), math.sin(pitch)
+	cy, sy = math.cos(yaw),   math.sin(yaw)
+	Rx = np.array([[1.0, 0.0, 0.0], [0.0, cr, -sr], [0.0, sr, cr]])
+	Ry = np.array([[cp, 0.0, sp], [0.0, 1.0, 0.0], [-sp, 0.0, cp]])
+	Rz = np.array([[cy, -sy, 0.0], [sy, cy, 0.0], [0.0, 0.0, 1.0]])
+	return Rz @ Ry @ Rx
+
+
+def _matrixToRpy(R):
+	'''
+	Inverse of _rpyToMatrix(). At pitch = +/-90 degrees (gimbal lock), roll
+	and yaw are not individually recoverable from R -- only their sum or
+	difference is -- so this fixes roll=0 and folds the whole rotation into
+	yaw. The specific (roll, yaw) split returned there may not match whatever
+	values originally produced R, but _rpyToMatrix(*_matrixToRpy(R)) always
+	reconstructs the same rotation matrix R, which is what
+	arucoFindPoseGlobal()/arucoFindCameraPoseGlobal() (which only ever
+	compose via rotation matrices internally, converting to/from RPY at
+	their input/output boundary) actually rely on.
+	'''
+	sp = max(-1.0, min(1.0, -R[2, 0]))
+
+	# |cos(pitch)|, computed directly from matrix entries (R[2,1] = cp*sin(roll),
+	# R[2,2] = cp*cos(roll), so hypot(R[2,1], R[2,2]) = cp exactly, given an
+	# exact R) rather than via cos(asin(sp)). This matters because sp is
+	# *quadratically* insensitive to the actual pitch deviation from the pole
+	# (sin(pi/2 - eps) = 1 - eps^2/2 + ...): thresholding on `1 - abs(sp)`
+	# directly (an earlier version of this function did) silently treated a
+	# real, valid attitude ~0.06 degrees from vertical as gimbal-locked and
+	# discarded its nonzero roll -- a genuine attitude error, not gimbal
+	# ambiguity. `cp` computed this way is linear in the deviation, so a
+	# small, numerically-justified threshold on it does not have that problem.
+	cp = math.hypot(R[2, 1], R[2, 2])
+	pitch = math.atan2(sp, cp)
+
+	# `cp` here is a magnitude derived from matrix entries that are each
+	# accurate to within a few ULPs of double precision, even after R has
+	# been composed through a handful of rotation-matrix multiplications (as
+	# in arucoFindCameraPoseGlobal()) -- so a threshold a few orders of
+	# magnitude above machine epsilon (but many orders below any physically
+	# meaningful attitude, like the ~1.7e-2 rad/~1 degree used in this
+	# module's tests) safely separates "exactly singular, perturbed only by
+	# floating-point roundoff" from "genuinely near, but not at, the pole".
+	if (cp > 1e-8):
+		roll = math.atan2(R[2, 1], R[2, 2])
+		yaw  = math.atan2(R[1, 0], R[0, 0])
+	else:
+		# Gimbal lock: fix roll = 0 and recover the remaining combined
+		# roll+yaw (or roll-yaw) rotation entirely as yaw.
+		roll = 0.0
+		if (sp > 0):   # pitch = +90 deg
+			yaw = math.atan2(R[1, 2], R[1, 1])
+		else:          # pitch = -90 deg
+			yaw = math.atan2(-R[0, 1], R[1, 1])
+
+	return (roll, pitch, yaw)
+
+
+def _identityPose():
+	return {'position': (0.0, 0.0, 0.0), 'orientation': (0.0, 0.0, 0.0)}
+
+
+def arucoFindPoseGlobal(cameraPose, rvec, tvec, cameraExtrinsics=None):
+	'''
+	Estimate a detected tag's pose in the world frame, given the camera's own
+	world-frame pose and the tag's pose relative to the camera (rvec/tvec,
+	from arucoFindPose()/cv2.solvePnP() -- OpenCV optical frame: x right, y
+	down, z forward).
+
+	NOTE: despite the "aruco" in the name (kept for continuity with
+	arucoFindPose(), which this builds on), this is not ArUco-specific --
+	it works for any single planar tag's rvec/tvec, including QR (see
+	olab_camera.addQR()).
+
+	cameraPose -- {'position': (x, y, z), 'orientation': (roll, pitch, yaw)}.
+		The vehicle body's pose in the world (ENU) frame: position in meters,
+		orientation in radians, FLU body convention (x forward, y left, z
+		up), per REP-103. This is typically camera.pose (see
+		olab_camera.Camera.setPose()) -- e.g. from flight-controller state,
+		not the camera's own pose.
+	rvec, tvec -- the tag's pose relative to the camera, in OpenCV's optical
+		frame, as returned by arucoFindPose()/cv2.solvePnP().
+	cameraExtrinsics -- {'position': (x, y, z), 'orientation': (roll, pitch, yaw)},
+		the camera's fixed mount pose relative to the vehicle body frame (same
+		units/convention as cameraPose). Typically camera.extrinsics (see
+		olab_camera.Camera.setExtrinsics()). None (default) is treated as
+		identity (camera at the body origin, boresight aligned with the
+		body's +x/forward axis).
+
+	Returns (position, orientation): position is (x, y, z) meters in world
+	(ENU). orientation is (roll, pitch, yaw) radians, describing the tag's
+	own local frame (z = tag normal, pointing out of its printed face) in
+	the same body-style RPY convention as cameraPose.
+	'''
+	if (cameraExtrinsics is None):
+		cameraExtrinsics = _identityPose()
+
+	R_wb = _rpyToMatrix(*cameraPose['orientation'])
+	t_wb = np.array(cameraPose['position'], dtype=np.float64)
+	R_bc = _rpyToMatrix(*cameraExtrinsics['orientation'])
+	t_bc = np.array(cameraExtrinsics['position'], dtype=np.float64)
+	R_co = _R_CAMERALINK_FROM_OPTICAL
+
+	R_ot, _ = cv2.Rodrigues(np.asarray(rvec, dtype=np.float64))
+	t_ot = np.asarray(tvec, dtype=np.float64).reshape(3)
+
+	R_wt = R_wb @ R_bc @ R_co @ R_ot
+	t_wt = t_wb + R_wb @ t_bc + R_wb @ R_bc @ R_co @ t_ot
+
+	return (tuple(t_wt.tolist()), _matrixToRpy(R_wt))
+
+
+def arucoFindCameraPoseGlobal(tagPose, rvec, tvec, cameraExtrinsics=None):
+	'''
+	Inverse of arucoFindPoseGlobal(): given a tag's *known* world-frame pose
+	and its pose relative to the camera in the current detection, estimate
+	the vehicle's world-frame pose (e.g. for precision landing).
+
+	tagPose -- {'position': (x, y, z), 'orientation': (roll, pitch, yaw)}, the
+		tag's known pose in the world (ENU) frame, in the same convention as
+		arucoFindPoseGlobal()'s returned orientation (the tag's orientation
+		expressed as if it were a body frame).
+	rvec, tvec -- the tag's pose relative to the camera (OpenCV optical
+		frame), from the current detection.
+	cameraExtrinsics -- see arucoFindPoseGlobal(); None defaults to identity.
+
+	Returns (position, orientation): the vehicle body's world pose -- the
+	same meaning as cameraPose in arucoFindPoseGlobal() (not the camera's
+	own pose; cameraExtrinsics and the fixed optical/body-frame conversion
+	are factored out automatically, since a precision-landing caller wants
+	vehicle pose, not camera-mount pose).
+	'''
+	if (cameraExtrinsics is None):
+		cameraExtrinsics = _identityPose()
+
+	R_bc = _rpyToMatrix(*cameraExtrinsics['orientation'])
+	t_bc = np.array(cameraExtrinsics['position'], dtype=np.float64)
+	R_co = _R_CAMERALINK_FROM_OPTICAL
+
+	R_ot, _ = cv2.Rodrigues(np.asarray(rvec, dtype=np.float64))
+	t_ot = np.asarray(tvec, dtype=np.float64).reshape(3)
+
+	R_wt = _rpyToMatrix(*tagPose['orientation'])
+	t_wt = np.array(tagPose['position'], dtype=np.float64)
+
+	R_chain = R_bc @ R_co @ R_ot   # body_T_optical_via_mount, rotation only
+	R_wb = R_wt @ R_chain.T
+	t_wb = t_wt - R_wb @ (t_bc + R_bc @ R_co @ t_ot)
+
+	return (tuple(t_wb.tolist()), _matrixToRpy(R_wb))
+
+
 
 def checkPort(port):
 	# Check if a given local port is available (returns True) or in use (returns False)

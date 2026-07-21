@@ -238,6 +238,101 @@ camera.addBarcode(fps_target=5,
 camera.barcode['default'].stop()
 ```
 
+---
+
+### QR Codes
+
+`addQR()` is QR-only (unlike `addBarcode()`, which scans any symbology pyzbar
+supports) and lets you pick the decoder. It reports the same shape of thing
+ArUco/barcode do -- payload data + corners each cycle -- and, like ArUco,
+does not compute distance/pose itself.
+
+```python
+# Create a function that will be called each time a QR code is detected:
+def postQR(argsDict):
+    idName = argsDict['idName']
+    for i in range(len(camera.qr[idName].deque[0]['data'])):
+        print(f"""data: {camera.qr[idName].deque[0]['data'][i]},
+                corners: {camera.qr[idName].deque[0]['corners'][i]}""")
+```
+
+```python
+# Start QR detection. decoder='cv2' (default) uses cv2.QRCodeDetector, which
+# is more robust to skewed/oblique viewing angles than pyzbar and is the
+# right choice if you plan to compute pose (see below). decoder='pyzbar' is
+# also available for generic use.
+camera.addQR(idName='default',
+             decoder='cv2',
+             postFunction=postQR,
+             postFunctionArgs={'idName': 'default'},
+             ids_of_interest=None)  # default is None, or provide a list of payloads to track
+```
+
+**Run the next cell when you're ready to stop QR detection:**
+```python
+camera.qr['default'].stop()
+```
+
+- **NOTE**: You will need to calibrate the camera if you want to be able to determine the distance from a tag.
+
+```python
+# Specify the size of the QR tag in inches (or enter `None` if unknown)
+TAG_SIZE_INCHES = 4.25   #  or None, or 4 + 3/16, etc
+```
+
+```python
+# Create the "callback" function to be called on each QR detection --
+# this is exactly the same pattern as `aruco_post_poses()` above:
+def qr_post_poses(argsDict):
+    idName = argsDict['idName']
+
+    if (TAG_SIZE_INCHES is not None):
+        res = f'{camera.res_cols}x{camera.res_rows}'
+        cameraMatrix = camera.intrinsics[res]['matrix']
+        dist = camera.intrinsics[res]['dist']
+
+        ml = olab_utils.inches2meters(TAG_SIZE_INCHES)
+        objPoints = np.array([[-ml/2,  ml/2, 0],
+                              [ ml/2,  ml/2, 0],
+                              [ ml/2, -ml/2, 0],
+                              [-ml/2, -ml/2, 0]])
+
+    corners = camera.qr[idName].deque[0]['corners']
+    data    = camera.qr[idName].deque[0]['data']
+    for i in range(len(corners)):
+        print(f"data: {data[i]}")
+
+        if (TAG_SIZE_INCHES is not None):
+            (ret, rvec, tvec) = olab_utils.arucoFindPose(objPoints, corners[i], cameraMatrix, dist, flags=cv2.SOLVEPNP_IPPE_SQUARE)
+            if (ret):
+                print(f"\tdistance [inches]: x: {olab_utils.meters2inches(tvec[0])}, y: {olab_utils.meters2inches(tvec[1])}, z: {olab_utils.meters2inches(tvec[2])}")
+
+                # For a world-frame position (e.g. precision landing), first
+                # tell the camera where it is (once, or whenever it changes):
+                #     camera.setPose(x=..., y=..., z=..., roll=..., pitch=..., yaw=...)
+                #     camera.setExtrinsics(x=..., y=..., z=..., roll=..., pitch=..., yaw=...)  # optional, defaults to identity mount
+                # then compose the tag's local pose into world coordinates:
+                if (camera.pose is not None):
+                    (tagWorldPos, tagWorldOrientation) = olab_utils.arucoFindPoseGlobal(camera.pose, rvec, tvec, camera.extrinsics)
+                    print(f"\tworld position: {tagWorldPos}")
+
+                    # And the inverse -- if you instead know the tag's own
+                    # world position (e.g. a landing pad at a known GPS/local
+                    # position), you can solve for the vehicle's own pose:
+                    tagPose = {'position': tagWorldPos, 'orientation': tagWorldOrientation}
+                    (vehiclePos, vehicleOrientation) = olab_utils.arucoFindCameraPoseGlobal(tagPose, rvec, tvec, camera.extrinsics)
+```
+
+```python
+# Start QR detection, pointing to the `qr_post_poses()` function:
+camera.addQR(idName='default',
+             decoder='cv2',
+             postFunction=qr_post_poses,
+             postFunctionArgs={'idName': 'default'})
+```
+
+- **NOTE**: `arucoFindPose()`/`arucoFindPoseGlobal()`/`arucoFindCameraPoseGlobal()` all work for ArUco markers too, despite the "aruco" in the name -- they operate on any single planar tag's 4 corners / solvePnP rvec+tvec, not just ArUco.
+
 
 ---
 
