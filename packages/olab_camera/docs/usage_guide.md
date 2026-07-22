@@ -153,7 +153,21 @@ def aruco_post_poses(argsDict):
     # This function gets called each time an aruco detection is run
     idName  = argsDict['idName']
 
+    ids     = camera.aruco[idName].deque[0]['ids']
+    corners = camera.aruco[idName].deque[0]['corners']
+    centers = camera.aruco[idName].deque[0]['centers']
+    for i in range(len(corners)):
+        # centers give the center point, in pixels, of the tag.
+        print(f"id: {ids[i]}")
+        print(f"\tcenter: {centers[i]}")
+
     if (TAG_SIZE_INCHES is not None):
+        '''
+        NOTE:
+        If you get an error like `Error in Aruco DICT_APRILTAG_36h11 thread: '640x480'`,
+        that likely means you have not the camera calibration
+        (or that you have calibrated your camera at a resolution other than '640x480'.
+        '''
         # Adjust based on resolution
         res = f'{camera.res_cols}x{camera.res_rows}'
         cameraMatrix = camera.intrinsics[res]['matrix']
@@ -164,36 +178,18 @@ def aruco_post_poses(argsDict):
         # ********************************************
         ml = olab_utils.inches2meters(TAG_SIZE_INCHES)
 
-        objPoints = np.array([[-ml/2,  ml/2, 0],
-                              [ ml/2,  ml/2, 0],
-                              [ ml/2, -ml/2, 0],
-                              [-ml/2, -ml/2, 0]])
-
-    corners = camera.aruco[idName].deque[0]['corners']
-    for i in range(len(corners)):
-        # centers give the center point, in pixels, of the tag.
-        print(f"id: {camera.aruco[idName].deque[0]['ids'][i]}")
-        print(f"\tcenter: {camera.aruco[idName].deque[0]['centers'][i]}")
-
-        if (TAG_SIZE_INCHES is not None):
-            '''
-            NOTE:
-            If you get an error like `Error in Aruco DICT_APRILTAG_36h11 thread: '640x480'`,
-            that likely means you have not the camera calibration
-            (or that you have calibrated your camera at a resolution other than '640x480'.
-            '''
-            (ret, rvecs, tvecs) = olab_utils.arucoFindPose(objPoints, corners[i], cameraMatrix, dist, flags=cv2.SOLVEPNP_IPPE_SQUARE)
-            # print(f"{ret=}, {rvecs=}, {tvecs=}.")
-            if (ret):
-                # rvecs is the 3D rotation vector.
-                # I don't think it's human interpretable, so we won't print it here.
-
-                # tvecs in the x/y/z translation of the marker from the origin (camera).
-                # It's in [meters], since we specified `ml` in [meters].
-                # tvecs[0] (x) is the distance left (-) or right (+) from the camera.
-                # tvecs[1] (y) is the distance above (-) or below (+) the camera.
-                # tvecs[2] (z) is the distance away from the camera.
-                print(f"\tdistance [inches]: x: {olab_utils.meters2inches(tvecs[0])}, y: {olab_utils.meters2inches(tvecs[1])}, z: {olab_utils.meters2inches(tvecs[2])}")
+        # olab_utils.findTagPoses() consolidates the loop/objPoints/solvePnP
+        # boilerplate a hand-rolled version of this used to need -- see
+        # https://github.com/optimatorlab/olab_code/issues/20.
+        for pose in olab_utils.findTagPoses(corners, ids, ml, cameraMatrix, dist):
+            # pose['tvec'] is the x/y/z translation of the marker from the origin (camera).
+            # It's in [meters], since we passed `ml` in [meters].
+            # tvec[0] (x) is the distance left (-) or right (+) from the camera.
+            # tvec[1] (y) is the distance above (-) or below (+) the camera.
+            # tvec[2] (z) is the distance away from the camera.
+            tvec = pose['tvec']
+            print(f"id: {pose['id']}")
+            print(f"\tdistance [inches]: x: {olab_utils.meters2inches(tvec[0])}, y: {olab_utils.meters2inches(tvec[1])}, z: {olab_utils.meters2inches(tvec[2])}")
 ```
 
 ```python
@@ -273,8 +269,9 @@ img = olab_utils.generateQR(
   before trusting it for pose -- it should match `tag_size_inches` (within
   +/-1 pixel, at the `dpi` you generated it with); confirming it with a
   ruler catches any print-pipeline scaling that DPI metadata alone
-  couldn't prevent. This same `tag_size_inches` value is what to pass into
-  `arucoFindPose()`'s `objectPoints` below (see `TAG_SIZE_INCHES`).
+  couldn't prevent. This same `tag_size_inches` value is what to pass (in
+  meters, via `inches2meters()`) into `findTagPose()`/`findTagPoses()`
+  below (see `TAG_SIZE_INCHES`).
 - The default `border=0` means the *file* has no quiet zone baked in --
   a QR code's quiet-zone requirement is about the physical scanning
   environment having clean white space around the tag, not about the file
@@ -286,9 +283,13 @@ img = olab_utils.generateQR(
   design that doesn't otherwise leave it any white space) -- doing so
   makes the file **larger** than `tag_size_inches` (the QR symbol still
   prints at exactly `tag_size_inches`; the border is added on top, not
-  carved out of it), so `arucoFindPose()`'s `objectPoints` should still
-  use `tag_size_inches` unchanged -- a nonzero border only affects the
-  saved file's total size, never what `tag_size_inches` means.
+  carved out of it), so the physical size you measure/use for pose is still
+  `tag_size_inches` unchanged -- a nonzero border only affects the saved
+  file's total size, never what `tag_size_inches` means. `findTagPoses()`
+  requires this value converted to **meters** (`olab_utils.inches2meters(tag_size_inches)`
+  -- see `TAG_SIZE_INCHES`/`ml` in the examples above); `findTagPose()`
+  itself is unit-agnostic and accepts whatever consistent unit system its
+  caller's `objPoints` use.
 - Optional `logo=<path or numpy image>` embeds a logo centered on the tag
   (composited inside an opaque backing square, capped at `logo_scale`,
   verified to still decode after compositing); optional `label=<str>`
@@ -375,41 +376,40 @@ TAG_SIZE_INCHES = 4.25   #  or None, or 4 + 3/16, etc
 def qr_post_poses(argsDict):
     idName = argsDict['idName']
 
+    corners = camera.qr[idName].deque[0]['corners']
+    data    = camera.qr[idName].deque[0]['data']
+    for i in range(len(corners)):
+        print(f"data: {data[i]}")
+
     if (TAG_SIZE_INCHES is not None):
         res = f'{camera.res_cols}x{camera.res_rows}'
         cameraMatrix = camera.intrinsics[res]['matrix']
         dist = camera.intrinsics[res]['dist']
 
         ml = olab_utils.inches2meters(TAG_SIZE_INCHES)
-        objPoints = np.array([[-ml/2,  ml/2, 0],
-                              [ ml/2,  ml/2, 0],
-                              [ ml/2, -ml/2, 0],
-                              [-ml/2, -ml/2, 0]])
 
-    corners = camera.qr[idName].deque[0]['corners']
-    data    = camera.qr[idName].deque[0]['data']
-    for i in range(len(corners)):
-        print(f"data: {data[i]}")
+        # For a world-frame position (e.g. precision landing), first tell the
+        # camera where it is (once, or whenever it changes):
+        #     camera.setPose(x=..., y=..., z=..., roll=..., pitch=..., yaw=...)
+        #     camera.setExtrinsics(x=..., y=..., z=..., roll=..., pitch=..., yaw=...)  # optional, defaults to identity mount
+        # olab_utils.findTagPoses() composes to world coordinates automatically
+        # once camera.pose is set (worldPosition/worldOrientation are None
+        # otherwise) -- see https://github.com/optimatorlab/olab_code/issues/20.
+        poses = olab_utils.findTagPoses(corners, data, ml, cameraMatrix, dist,
+                                         cameraPose=camera.pose, cameraExtrinsics=camera.extrinsics)
+        for pose in poses:
+            tvec = pose['tvec']
+            print(f"data: {pose['id']}")
+            print(f"\tdistance [inches]: x: {olab_utils.meters2inches(tvec[0])}, y: {olab_utils.meters2inches(tvec[1])}, z: {olab_utils.meters2inches(tvec[2])}")
 
-        if (TAG_SIZE_INCHES is not None):
-            (ret, rvec, tvec) = olab_utils.arucoFindPose(objPoints, corners[i], cameraMatrix, dist, flags=cv2.SOLVEPNP_IPPE_SQUARE)
-            if (ret):
-                print(f"\tdistance [inches]: x: {olab_utils.meters2inches(tvec[0])}, y: {olab_utils.meters2inches(tvec[1])}, z: {olab_utils.meters2inches(tvec[2])}")
+            if (pose['worldPosition'] is not None):
+                print(f"\tworld position: {pose['worldPosition']}")
 
-                # For a world-frame position (e.g. precision landing), first
-                # tell the camera where it is (once, or whenever it changes):
-                #     camera.setPose(x=..., y=..., z=..., roll=..., pitch=..., yaw=...)
-                #     camera.setExtrinsics(x=..., y=..., z=..., roll=..., pitch=..., yaw=...)  # optional, defaults to identity mount
-                # then compose the tag's local pose into world coordinates:
-                if (camera.pose is not None):
-                    (tagWorldPos, tagWorldOrientation) = olab_utils.arucoFindPoseGlobal(camera.pose, rvec, tvec, camera.extrinsics)
-                    print(f"\tworld position: {tagWorldPos}")
-
-                    # And the inverse -- if you instead know the tag's own
-                    # world position (e.g. a landing pad at a known GPS/local
-                    # position), you can solve for the vehicle's own pose:
-                    tagPose = {'position': tagWorldPos, 'orientation': tagWorldOrientation}
-                    (vehiclePos, vehicleOrientation) = olab_utils.arucoFindCameraPoseGlobal(tagPose, rvec, tvec, camera.extrinsics)
+                # And the inverse -- if you instead know the tag's own world
+                # position (e.g. a landing pad at a known GPS/local position),
+                # you can solve for the vehicle's own pose:
+                tagPose = {'position': pose['worldPosition'], 'orientation': pose['worldOrientation']}
+                (vehiclePos, vehicleOrientation) = olab_utils.findCameraPoseGlobal(tagPose, pose['rvec'], pose['tvec'], camera.extrinsics)
 ```
 
 ```python
@@ -420,7 +420,12 @@ camera.addQR(idName='default',
              postFunctionArgs={'idName': 'default'})
 ```
 
-- **NOTE**: `arucoFindPose()`/`arucoFindPoseGlobal()`/`arucoFindCameraPoseGlobal()` all work for ArUco markers too, despite the "aruco" in the name -- they operate on any single planar tag's 4 corners / solvePnP rvec+tvec, not just ArUco.
+- **NOTE**: `findTagPose()`/`findTagPoseGlobal()`/`findCameraPoseGlobal()`/`findTagPoses()`
+  work for ArUco markers too -- they operate on any single planar tag's 4
+  corners / solvePnP rvec+tvec, not just QR. (These were formerly named
+  `arucoFindPose()`/`arucoFindPoseGlobal()`/`arucoFindCameraPoseGlobal()`;
+  the old names still work but are deprecated -- see
+  https://github.com/optimatorlab/olab_code/issues/21.)
 
 
 ---

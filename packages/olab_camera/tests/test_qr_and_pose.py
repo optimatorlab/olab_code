@@ -1,12 +1,12 @@
 """Tests for the QR tag support added in this task: the new _QRCode class
 (corners-only detection, like _Aruco/_Barcode) and the Camera.pose/
-Camera.extrinsics attributes that feed olab_utils.arucoFindPoseGlobal()/
-arucoFindCameraPoseGlobal() from a user's own postFunction -- see
+Camera.extrinsics attributes that feed olab_utils.findTagPoseGlobal()/
+findCameraPoseGlobal() from a user's own postFunction -- see
 docs/usage_guide.md's "QR Codes" section for the full worked pattern this
 mirrors.
 
 NOTE: _Aruco itself is untouched by this task (no changes needed -- pose was
-already available via the pre-existing olab_utils.arucoFindPose(), called
+already available via the pre-existing olab_utils.findTagPose(), called
 from a user's postFunction, per docs/usage_guide.md). These tests therefore
 only cover the new _QRCode class and the pose-composition helpers.
 """
@@ -75,10 +75,10 @@ def test_setPose_and_setExtrinsics_store_public_attributes():
     assert cam.extrinsics == {'position': (0.1, 0.0, -0.05), 'orientation': (0.0, 0.5, 0.0)}
 
 
-def test_camera_pose_feeds_arucoFindPoseGlobal_round_trip():
+def test_camera_pose_feeds_findTagPoseGlobal_round_trip():
     # Mirrors docs/usage_guide.md's precision-landing pattern: camera.pose/
     # camera.extrinsics are read directly by the user's own postFunction and
-    # passed into olab_utils.arucoFindPoseGlobal()/arucoFindCameraPoseGlobal().
+    # passed into olab_utils.findTagPoseGlobal()/findCameraPoseGlobal().
     import olab_utils
 
     cam = Camera({'res_rows': 480, 'res_cols': 640, 'fps_target': 5})
@@ -88,9 +88,9 @@ def test_camera_pose_feeds_arucoFindPoseGlobal_round_trip():
     rvec = np.array([0.05, 0.3, -0.1]).reshape(3, 1)
     tvec = np.array([0.2, -0.1, 2.0]).reshape(3, 1)
 
-    (tagPos, tagRpy) = olab_utils.arucoFindPoseGlobal(cam.pose, rvec, tvec, cam.extrinsics)
+    (tagPos, tagRpy) = olab_utils.findTagPoseGlobal(cam.pose, rvec, tvec, cam.extrinsics)
     tagPose = {'position': tagPos, 'orientation': tagRpy}
-    (bodyPos, bodyRpy) = olab_utils.arucoFindCameraPoseGlobal(tagPose, rvec, tvec, cam.extrinsics)
+    (bodyPos, bodyRpy) = olab_utils.findCameraPoseGlobal(tagPose, rvec, tvec, cam.extrinsics)
 
     assert np.allclose(bodyPos, (10.0, -5.0, 2.0), atol=1e-6)
     assert np.allclose(bodyRpy, (0.1, -0.2, 1.0), atol=1e-6)
@@ -113,9 +113,9 @@ def test_addQR_cv2_decoder_decodes_skewed_tag():
     assert d['corners'][idx].shape == (4, 2)
 
 
-def test_addQR_cv2_decoder_corners_usable_for_pose_via_arucoFindPose():
+def test_addQR_cv2_decoder_corners_usable_for_pose_via_findTagPose():
     # Proves the corners _QRCode reports are directly usable with the
-    # existing, established arucoFindPose() helper -- the same pattern shown
+    # existing, established findTagPose() helper -- the same pattern shown
     # for ArUco in docs/usage_guide.md -- to get a sane distance.
     import olab_utils
 
@@ -137,7 +137,7 @@ def test_addQR_cv2_decoder_corners_usable_for_pose_via_arucoFindPose():
     half = tag_size / 2
     objPoints = np.array([[-half, half, 0], [half, half, 0], [half, -half, 0], [-half, -half, 0]])
 
-    (ret, rvec, tvec) = olab_utils.arucoFindPose(objPoints, d['corners'][idx], cameraMatrix, dist)
+    (ret, rvec, tvec) = olab_utils.findTagPose(objPoints, d['corners'][idx], cameraMatrix, dist)
     assert ret
     assert tvec[2] > 0   # tag is in front of the camera, some positive z distance
 

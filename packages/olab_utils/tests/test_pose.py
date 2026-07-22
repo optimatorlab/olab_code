@@ -26,32 +26,32 @@ def _project_synthetic_tag(rvec, tvec):
     return imagePoints.reshape(4, 2), objectPoints
 
 
-def test_arucoFindPose_recovers_head_on_pose():
+def test_findTagPose_recovers_head_on_pose():
     rvec_true = np.zeros((3, 1))
     tvec_true = np.array([0.0, 0.0, 1.5]).reshape(3, 1)
     corners, objectPoints = _project_synthetic_tag(rvec_true, tvec_true)
 
     # Default flags (cv2.SOLVEPNP_IPPE_SQUARE), matching docs/usage_guide.md's example.
-    (ret, rvec, tvec) = olab_utils.arucoFindPose(objectPoints, corners, CAMERA_MATRIX, DIST_COEFFS)
+    (ret, rvec, tvec) = olab_utils.findTagPose(objectPoints, corners, CAMERA_MATRIX, DIST_COEFFS)
 
     assert ret
     assert np.allclose(rvec.flatten(), rvec_true.flatten(), atol=1e-3)
     assert np.allclose(tvec.flatten(), tvec_true.flatten(), atol=1e-3)
 
 
-def test_arucoFindPose_recovers_nonzero_yaw_pose():
+def test_findTagPose_recovers_nonzero_yaw_pose():
     rvec_true = np.array([0.1, 0.5, 0.05]).reshape(3, 1)
     tvec_true = np.array([0.05, -0.02, 1.0]).reshape(3, 1)
     corners, objectPoints = _project_synthetic_tag(rvec_true, tvec_true)
 
-    (ret, rvec, tvec) = olab_utils.arucoFindPose(objectPoints, corners, CAMERA_MATRIX, DIST_COEFFS)
+    (ret, rvec, tvec) = olab_utils.findTagPose(objectPoints, corners, CAMERA_MATRIX, DIST_COEFFS)
 
     assert ret
     assert np.allclose(rvec.flatten(), rvec_true.flatten(), atol=1e-3)
     assert np.allclose(tvec.flatten(), tvec_true.flatten(), atol=1e-3)
 
 
-def test_arucoFindPoseGlobal_and_inverse_round_trip_with_nonidentity_pose_and_extrinsics():
+def test_findTagPoseGlobal_and_inverse_round_trip_with_nonidentity_pose_and_extrinsics():
     # A non-identity vehicle attitude and a nonzero camera mount offset --
     # the identity case alone would not catch a body/optical frame-convention bug.
     cameraPose = {'position': (10.0, -5.0, 2.0), 'orientation': (0.1, -0.2, 1.0)}
@@ -60,16 +60,16 @@ def test_arucoFindPoseGlobal_and_inverse_round_trip_with_nonidentity_pose_and_ex
     rvec = np.array([0.05, 0.3, -0.1]).reshape(3, 1)
     tvec = np.array([0.2, -0.1, 2.0]).reshape(3, 1)
 
-    (tagPos, tagRpy) = olab_utils.arucoFindPoseGlobal(cameraPose, rvec, tvec, cameraExtrinsics)
+    (tagPos, tagRpy) = olab_utils.findTagPoseGlobal(cameraPose, rvec, tvec, cameraExtrinsics)
     tagPose = {'position': tagPos, 'orientation': tagRpy}
-    (bodyPos, bodyRpy) = olab_utils.arucoFindCameraPoseGlobal(tagPose, rvec, tvec, cameraExtrinsics)
+    (bodyPos, bodyRpy) = olab_utils.findCameraPoseGlobal(tagPose, rvec, tvec, cameraExtrinsics)
 
     assert np.allclose(bodyPos, cameraPose['position'], atol=1e-6)
     assert np.allclose(bodyRpy, cameraPose['orientation'], atol=1e-6)
 
 
 @pytest.mark.parametrize('pitch_true', [math.pi / 2, -math.pi / 2])
-def test_arucoFindPoseGlobal_round_trip_recovers_correct_rotation_matrix_at_gimbal_lock(pitch_true):
+def test_findTagPoseGlobal_round_trip_recovers_correct_rotation_matrix_at_gimbal_lock(pitch_true):
     '''
     At pitch = +/-90 degrees (gimbal lock), roll and yaw are not individually
     recoverable from a rotation matrix -- only their sum/difference is -- so
@@ -84,9 +84,9 @@ def test_arucoFindPoseGlobal_round_trip_recovers_correct_rotation_matrix_at_gimb
     rvec = np.array([0.05, 0.3, -0.1]).reshape(3, 1)
     tvec = np.array([0.2, -0.1, 2.0]).reshape(3, 1)
 
-    (tagPos, tagRpy) = olab_utils.arucoFindPoseGlobal(cameraPose, rvec, tvec, cameraExtrinsics)
+    (tagPos, tagRpy) = olab_utils.findTagPoseGlobal(cameraPose, rvec, tvec, cameraExtrinsics)
     tagPose = {'position': tagPos, 'orientation': tagRpy}
-    (bodyPos, bodyRpy) = olab_utils.arucoFindCameraPoseGlobal(tagPose, rvec, tvec, cameraExtrinsics)
+    (bodyPos, bodyRpy) = olab_utils.findCameraPoseGlobal(tagPose, rvec, tvec, cameraExtrinsics)
 
     R_true = olab_utils._rpyToMatrix(*cameraPose['orientation'])
     R_recovered = olab_utils._rpyToMatrix(*bodyRpy)
@@ -119,17 +119,56 @@ def test_matrixToRpy_preserves_roll_near_but_not_at_gimbal_lock(pitch_offset):
         assert np.allclose([roll, pitch, yaw], [0.4, pitch_true, -0.7], atol=1e-9)
 
 
-def test_arucoFindPoseGlobal_defaults_to_identity_extrinsics():
+def test_findTagPoseGlobal_defaults_to_identity_extrinsics():
     cameraPose = {'position': (0.0, 0.0, 1.0), 'orientation': (0.0, 0.0, 0.0)}
     rvec = np.zeros((3, 1))
     tvec = np.array([0.0, 0.0, 2.0]).reshape(3, 1)
 
-    (tagPos, tagRpy) = olab_utils.arucoFindPoseGlobal(cameraPose, rvec, tvec)   # cameraExtrinsics omitted
+    (tagPos, tagRpy) = olab_utils.findTagPoseGlobal(cameraPose, rvec, tvec)   # cameraExtrinsics omitted
     tagPose = {'position': tagPos, 'orientation': tagRpy}
-    (bodyPos, bodyRpy) = olab_utils.arucoFindCameraPoseGlobal(tagPose, rvec, tvec)   # cameraExtrinsics omitted
+    (bodyPos, bodyRpy) = olab_utils.findCameraPoseGlobal(tagPose, rvec, tvec)   # cameraExtrinsics omitted
 
     assert np.allclose(bodyPos, (0.0, 0.0, 1.0), atol=1e-6)
     assert np.allclose(bodyRpy, (0.0, 0.0, 0.0), atol=1e-6)
+
+
+# ─── Deprecated aliases (issue #21) ────────────────────────────────────────
+
+def test_arucoFindPose_deprecated_alias_still_works_and_warns():
+    rvec_true = np.zeros((3, 1))
+    tvec_true = np.array([0.0, 0.0, 1.5]).reshape(3, 1)
+    corners, objectPoints = _project_synthetic_tag(rvec_true, tvec_true)
+
+    with pytest.warns(DeprecationWarning):
+        (ret, rvec, tvec) = olab_utils.arucoFindPose(objectPoints, corners, CAMERA_MATRIX, DIST_COEFFS)
+
+    assert ret
+    assert np.allclose(tvec.flatten(), tvec_true.flatten(), atol=1e-3)
+
+
+def test_arucoFindPoseGlobal_deprecated_alias_still_works_and_warns():
+    cameraPose = {'position': (0.0, 0.0, 1.0), 'orientation': (0.0, 0.0, 0.0)}
+    rvec = np.zeros((3, 1))
+    tvec = np.array([0.0, 0.0, 2.0]).reshape(3, 1)
+
+    with pytest.warns(DeprecationWarning):
+        (tagPos, tagRpy) = olab_utils.arucoFindPoseGlobal(cameraPose, rvec, tvec)
+
+    # Cross-check against calling the new name directly, rather than
+    # hand-deriving the optical/cameralink frame conversion here.
+    (expectedPos, _) = olab_utils.findTagPoseGlobal(cameraPose, rvec, tvec)
+    assert np.allclose(tagPos, expectedPos, atol=1e-6)
+
+
+def test_arucoFindCameraPoseGlobal_deprecated_alias_still_works_and_warns():
+    tagPose = {'position': (0.0, 0.0, 3.0), 'orientation': (0.0, 0.0, 0.0)}
+    rvec = np.zeros((3, 1))
+    tvec = np.array([0.0, 0.0, 2.0]).reshape(3, 1)
+
+    with pytest.warns(DeprecationWarning):
+        (bodyPos, bodyRpy) = olab_utils.arucoFindCameraPoseGlobal(tagPose, rvec, tvec)
+
+    assert np.allclose(bodyPos, (0.0, 0.0, 1.0), atol=1e-6)
 
 
 def _synthetic_qr_image(payload, skew_frac=0.0):
@@ -168,7 +207,7 @@ def test_cv2_qr_corner_order_is_symbol_frame_anchored(rotation_k):
     cv2.QRCodeDetector's corner order tracks the physical tag's own
     finder-pattern-derived frame, not the image/viewing frame -- this is why
     addQR()'s docstring recommends decoder='cv2' when a caller intends to
-    compute pose (via arucoFindPose()) from the returned corners: reordering
+    compute pose (via findTagPose()) from the returned corners: reordering
     by image position would make recovered yaw jump by multiples of 90
     degrees depending on viewing angle instead of tracking the physical tag.
     Verify: physically rotating the same QR image by 90-degree increments
@@ -199,7 +238,7 @@ def test_pyzbar_qr_polygon_order_verification_documents_limitation():
     NOT reliably anchored to the QR symbol's own frame across physical
     rotations -- justifying addQR()'s docstring recommendation to prefer
     decoder='cv2' when a caller intends to compute pose (orientation) from
-    the returned corners via arucoFindPose(). It does not assert a specific
+    the returned corners via findTagPose(). It does not assert a specific
     (unstable) corner order; it only asserts that pyzbar successfully
     locates the tag's four corners at each rotation, so a caller can
     independently confirm the limitation still holds if zbar's algorithm

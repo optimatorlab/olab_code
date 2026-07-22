@@ -76,14 +76,8 @@ class _Aruco():
 			self.deque = deque(maxlen=1)
 			self.deque.append({'ids': None, 'corners': [], 'centers': [], 'rotations': []})
 
-			(major, minor, sub) = cv2.__version__.split(".")[:3]
-			if ((int(major) >= 4) and (int(minor) >= 7)):
-				self.cv2dict   = cv2.aruco.getPredefinedDictionary(olab_utils.ARUCO_DICT[idName]['dict'])
-				self.cv2params = cv2.aruco.DetectorParameters()
-			else:
-				# This is old:
-				self.cv2dict   = cv2.aruco.Dictionary_get(olab_utils.ARUCO_DICT[idName]['dict'])
-				self.cv2params = cv2.aruco.DetectorParameters_create()
+			(self.cv2dict, self.cv2params) = olab_utils._resolveArucoDictAndParams(
+				olab_utils.ARUCO_DICT[idName]['dict'])
 					
 			self.isThreadActive = False
 
@@ -757,11 +751,11 @@ class _QRCode():
 	Unlike `_Barcode` (generic pyzbar-based 1D/2D scanning), this class decodes only
 	QR codes and lets you pick the decoder. Like `_Aruco` and `_Barcode`, it reports
 	raw detections only (payload data + corners) -- it does NOT compute distance or
-	pose itself. To get distance/pose, call olab_utils.arucoFindPose() (and, for a
-	world-frame position, olab_utils.arucoFindPoseGlobal()/arucoFindCameraPoseGlobal())
+	pose itself. To get distance/pose, call olab_utils.findTagPose() (and, for a
+	world-frame position, olab_utils.findTagPoseGlobal()/findCameraPoseGlobal())
 	from your own postFunction with your own known tag size, exactly the way ArUco
-	pose is computed in docs/usage_guide.md -- despite the "aruco" in those names,
-	they work for any single planar tag's 4 corners, ArUco or QR.
+	pose is computed in docs/usage_guide.md -- these work for any single planar
+	tag's 4 corners, ArUco or QR.
 
 	Corner order matters if you compute pose from `corners` yourself: it must be
 	anchored to the QR symbol's own frame, not to image-space geometry, or recovered

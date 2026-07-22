@@ -62,12 +62,12 @@ Basic Usage:
 
     # Like ArUco/barcode, addQR() only reports raw detections (payload data +
     # corners) each cycle -- it does not compute distance or pose itself. To
-    # get distance/pose, call olab_utils.arucoFindPose() (and, for a
-    # world-frame position, olab_utils.arucoFindPoseGlobal()) from your own
+    # get distance/pose, call olab_utils.findTagPose() (and, for a
+    # world-frame position, olab_utils.findTagPoseGlobal()) from your own
     # postFunction with your own known tag size, exactly the way it's done
     # for ArUco -- see docs/usage_guide.md for a full worked example,
     # including precision-landing-style pose composition via setPose()/
-    # setExtrinsics()/arucoFindCameraPoseGlobal().
+    # setExtrinsics()/findCameraPoseGlobal().
 
     # Start ROS publishing
     camera.startROStopic()

@@ -222,8 +222,8 @@ class Camera():
 
 		# self.pose: the vehicle body's own world-frame pose (set via setPose()),
 		# used the same way camera.intrinsics is: read directly by your own
-		# postFunction and passed into olab_utils.arucoFindPoseGlobal()/
-		# arucoFindCameraPoseGlobal(). None until setPose() is called.
+		# postFunction and passed into olab_utils.findTagPoseGlobal()/
+		# findCameraPoseGlobal(). None until setPose() is called.
 		self.pose = None
 		# self.extrinsics: the camera's fixed mount pose relative to the vehicle
 		# body frame (set via setExtrinsics()). Defaults to identity (camera at
@@ -409,7 +409,7 @@ class Camera():
 			- Detection results include marker corners, IDs, centers, and optionally rotations.
 			- Uses camera intrinsics for undistortion if available.
 			- To get distance/3D pose (not just the in-plane `rotations` angle), call
-			  olab_utils.arucoFindPose() from your own postFunction with your own known
+			  olab_utils.findTagPose() from your own postFunction with your own known
 			  marker size -- see docs/usage_guide.md's ArUco section for a full example.
 		"""
 		# ids_of_interest None --> we don't have any specific IDs we're looking for.
@@ -452,10 +452,9 @@ class Camera():
 		frames -- unlike addBarcode()/pyzbar's generic 1D/2D scanning, this is QR-only and
 		lets you pick the decoder. Results (payload data + corners) are stored in
 		self.qr[idName], exactly the way ArUco/barcode results are stored -- this does NOT
-		compute distance or pose itself; call olab_utils.arucoFindPose() from your own
+		compute distance or pose itself; call olab_utils.findTagPose() from your own
 		postFunction with your own known tag size, the same way it's done for ArUco (see
-		docs/usage_guide.md) -- despite the "aruco" in the name, it works for any single
-		planar tag's 4 corners.
+		docs/usage_guide.md) -- it works for any single planar tag's 4 corners.
 
 		This is independent of addBarcode(): both may run at once and may both detect the
 		same physical QR codes if both are started -- that's the caller's choice, not
@@ -520,7 +519,7 @@ class Camera():
 		camera's own pose -- see setExtrinsics() for the camera's fixed mount offset
 		relative to the vehicle body. Stored on self.pose (mirrors how self.intrinsics is
 		stored/read directly), for your own postFunction to read and pass into
-		olab_utils.arucoFindPoseGlobal()/arucoFindCameraPoseGlobal() -- see
+		olab_utils.findTagPoseGlobal()/findCameraPoseGlobal() -- see
 		docs/usage_guide.md's ArUco section for the equivalent local-pose pattern this
 		builds on.
 

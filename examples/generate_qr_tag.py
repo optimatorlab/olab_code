@@ -126,7 +126,7 @@ print(
     "  - After printing, measure the printed tag with a ruler before\n"
     "    trusting it for pose. It should match tag_size_inches (within\n"
     "    +/-1 pixel at the dpi used to generate it) -- pass that same\n"
-    "    tag_size_inches value into olab_utils.arucoFindPose()'s\n"
+    "    tag_size_inches value into olab_utils.findTagPose()'s\n"
     "    objectPoints, exactly as shown in\n"
     "    packages/olab_camera/docs/usage_guide.md's QR Codes section.\n"
     "  - The default border=0 means there's no quiet-zone margin baked\n"

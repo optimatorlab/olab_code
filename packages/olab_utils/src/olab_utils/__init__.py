@@ -14,6 +14,7 @@ import cv2
 import os
 import math
 import socket, errno, time  # For checkPort() function
+import warnings  # For deprecated-alias warnings (see findTagPose() etc., issue #21)
 
 import qrcode
 import qrcode.constants
@@ -157,6 +158,27 @@ ARUCO_DICT = {
 	"DICT_APRILTAG_36h10": {"dict": cv2.aruco.DICT_APRILTAG_36h10, "color": (3, 3, 252)}, 	 # red
 	"DICT_APRILTAG_36h11": {"dict": cv2.aruco.DICT_APRILTAG_36h11, "color": (3, 186, 252)}   # orange
 }
+
+
+def _resolveArucoDictAndParams(dictID, cv2_module=cv2):
+	'''
+	Return (dict, params) for the given ARUCO_DICT[...]['dict'] value, using
+	cv2_module.aruco.getPredefinedDictionary()/DetectorParameters() when
+	present (OpenCV >=4.7), falling back to the deprecated
+	Dictionary_get()/DetectorParameters_create() otherwise.
+
+	Feature-detected via hasattr() rather than parsing cv2.__version__, which
+	broke outright on OpenCV 5.x (major=5, minor=0 fails a "minor >= 7"
+	check and fell into the deprecated branch, which no longer exists in
+	5.x) -- the same fix _resolveTrackerFactory() applies to trackers.
+
+	`cv2_module` is injectable for testing; real callers should never pass it.
+	'''
+	aruco = cv2_module.aruco
+	if hasattr(aruco, 'getPredefinedDictionary'):
+		return (aruco.getPredefinedDictionary(dictID), aruco.DetectorParameters())
+	return (aruco.Dictionary_get(dictID), aruco.DetectorParameters_create())
+
 
 ARUCO_DRAWING_DEFAULTS = {'borderDraw': True, 'borderColor': (3, 186, 252), 
 						  'centerDraw': True, 'centerColor': (3, 186, 252), 'centerRadiusPx':   2, 
@@ -550,7 +572,7 @@ def generateQR(payload, tag_size_inches, dpi=300, ecc='H', border=0,
 			   logo=None, logo_scale=0.2, outputFile=None):
 	'''
 	Generate a printable QR-code tag image, for use as a physical fiducial
-	with olab_camera's QR detection/pose pipeline (_QRCode/arucoFindPose()).
+	with olab_camera's QR detection/pose pipeline (_QRCode/findTagPose()).
 
 	payload -- str, non-empty. The data to encode.
 	tag_size_inches -- physical size of the QR symbol itself. With the
@@ -558,7 +580,7 @@ def generateQR(payload, tag_size_inches, dpi=300, ecc='H', border=0,
 		margin), so this is exactly what any ordinary print dialog's
 		"actual size"/100% setting, or an image editor's "set image size",
 		controls -- and exactly what a ruler measures on the printed page.
-		Pass this same value into arucoFindPose()'s objectPoints for this
+		Pass this same value into findTagPose()'s objectPoints for this
 		printed tag, REGARDLESS of `border` (see `border` below -- a
 		nonzero border only adds extra file size on top of this, it never
 		changes what tag_size_inches itself means or the pose value to
@@ -1186,29 +1208,42 @@ def arucoFindTagCenterPixels(corners):
 		return ()
 """	
 
-def arucoFindPose(objPoints, corners, cameraMatrix, dist, flags=cv2.SOLVEPNP_IPPE_SQUARE):
+def findTagPose(objPoints, corners, cameraMatrix, dist, flags=cv2.SOLVEPNP_IPPE_SQUARE):
 	'''
 	markerLength = 0.45  # [meters], but you can choose any unit you wish
-	objPoints = np.array([[-markerLength/2,  markerLength/2, 0], 
-						  [ markerLength/2,  markerLength/2, 0], 
-						  [ markerLength/2, -markerLength/2, 0], 
+	objPoints = np.array([[-markerLength/2,  markerLength/2, 0],
+						  [ markerLength/2,  markerLength/2, 0],
+						  [ markerLength/2, -markerLength/2, 0],
 						  [-markerLength/2, -markerLength/2, 0]])
 
 	corners **for a single tag**
 	cameraMatrix is 3x3, containing fx, fy, cx, and cy
 	dist is the array of distortion coefficients
+
+	Not ArUco-specific despite the historical name of its deprecated alias
+	(arucoFindPose()) -- works for any single planar tag's 4 corners, ArUco
+	or QR.
 	'''
 	(ret, rvecs, tvecs) = cv2.solvePnP(objPoints, corners, cameraMatrix, dist, flags)
-	
+
 	return (ret, rvecs, tvecs)
-	
-	
+
+
+def arucoFindPose(*args, **kwargs):
+	'''Deprecated alias for findTagPose() -- see issue #21. Kept working indefinitely.'''
+	warnings.warn(
+		"olab_utils.arucoFindPose() is deprecated; use findTagPose() instead "
+		"(not ArUco-specific -- see issue #21).",
+		DeprecationWarning, stacklevel=2)
+	return findTagPose(*args, **kwargs)
+
+
 # self.camera.intrinsics['matrix'], self.camera.intrinsics['dist']
 
 # Fixed rotation from ROS camera-link convention (x forward, y left, z up --
 # an FLU frame, same handedness as the vehicle body frame) to OpenCV's
 # optical convention (x right, y down, z forward), as used by cv2.solvePnP()/
-# arucoFindPose(). This is a constant fact about the two conventions
+# findTagPose(). This is a constant fact about the two conventions
 # (REP-103 / image_geometry), not a per-robot calibration value:
 #   optical_x = -link_y, optical_y = -link_z, optical_z = link_x
 _R_OPTICAL_FROM_CAMERALINK = np.array([
@@ -1224,7 +1259,7 @@ def _rpyToMatrix(roll, pitch, yaw):
 	ZYX (yaw-pitch-roll) intrinsic Tait-Bryan angles -> rotation matrix,
 	mapping vectors expressed in a body-style frame (FLU: x forward, y left,
 	z up) into the parent frame -- the convention used by
-	arucoFindPoseGlobal()/arucoFindCameraPoseGlobal() (ROS REP-103, ENU
+	findTagPoseGlobal()/findCameraPoseGlobal() (ROS REP-103, ENU
 	world frame).
 	'''
 	cr, sr = math.cos(roll),  math.sin(roll)
@@ -1244,7 +1279,7 @@ def _matrixToRpy(R):
 	yaw. The specific (roll, yaw) split returned there may not match whatever
 	values originally produced R, but _rpyToMatrix(*_matrixToRpy(R)) always
 	reconstructs the same rotation matrix R, which is what
-	arucoFindPoseGlobal()/arucoFindCameraPoseGlobal() (which only ever
+	findTagPoseGlobal()/findCameraPoseGlobal() (which only ever
 	compose via rotation matrices internally, converting to/from RPY at
 	their input/output boundary) actually rely on.
 	'''
@@ -1266,7 +1301,7 @@ def _matrixToRpy(R):
 	# `cp` here is a magnitude derived from matrix entries that are each
 	# accurate to within a few ULPs of double precision, even after R has
 	# been composed through a handful of rotation-matrix multiplications (as
-	# in arucoFindCameraPoseGlobal()) -- so a threshold a few orders of
+	# in findCameraPoseGlobal()) -- so a threshold a few orders of
 	# magnitude above machine epsilon (but many orders below any physically
 	# meaningful attitude, like the ~1.7e-2 rad/~1 degree used in this
 	# module's tests) safely separates "exactly singular, perturbed only by
@@ -1290,17 +1325,15 @@ def _identityPose():
 	return {'position': (0.0, 0.0, 0.0), 'orientation': (0.0, 0.0, 0.0)}
 
 
-def arucoFindPoseGlobal(cameraPose, rvec, tvec, cameraExtrinsics=None):
+def findTagPoseGlobal(cameraPose, rvec, tvec, cameraExtrinsics=None):
 	'''
 	Estimate a detected tag's pose in the world frame, given the camera's own
 	world-frame pose and the tag's pose relative to the camera (rvec/tvec,
-	from arucoFindPose()/cv2.solvePnP() -- OpenCV optical frame: x right, y
+	from findTagPose()/cv2.solvePnP() -- OpenCV optical frame: x right, y
 	down, z forward).
 
-	NOTE: despite the "aruco" in the name (kept for continuity with
-	arucoFindPose(), which this builds on), this is not ArUco-specific --
-	it works for any single planar tag's rvec/tvec, including QR (see
-	olab_camera.addQR()).
+	Not ArUco-specific -- works for any single planar tag's rvec/tvec,
+	including QR (see olab_camera.addQR()).
 
 	cameraPose -- {'position': (x, y, z), 'orientation': (roll, pitch, yaw)}.
 		The vehicle body's pose in the world (ENU) frame: position in meters,
@@ -1309,7 +1342,7 @@ def arucoFindPoseGlobal(cameraPose, rvec, tvec, cameraExtrinsics=None):
 		olab_camera.Camera.setPose()) -- e.g. from flight-controller state,
 		not the camera's own pose.
 	rvec, tvec -- the tag's pose relative to the camera, in OpenCV's optical
-		frame, as returned by arucoFindPose()/cv2.solvePnP().
+		frame, as returned by findTagPose()/cv2.solvePnP().
 	cameraExtrinsics -- {'position': (x, y, z), 'orientation': (roll, pitch, yaw)},
 		the camera's fixed mount pose relative to the vehicle body frame (same
 		units/convention as cameraPose). Typically camera.extrinsics (see
@@ -1340,22 +1373,31 @@ def arucoFindPoseGlobal(cameraPose, rvec, tvec, cameraExtrinsics=None):
 	return (tuple(t_wt.tolist()), _matrixToRpy(R_wt))
 
 
-def arucoFindCameraPoseGlobal(tagPose, rvec, tvec, cameraExtrinsics=None):
+def arucoFindPoseGlobal(*args, **kwargs):
+	'''Deprecated alias for findTagPoseGlobal() -- see issue #21. Kept working indefinitely.'''
+	warnings.warn(
+		"olab_utils.arucoFindPoseGlobal() is deprecated; use findTagPoseGlobal() instead "
+		"(not ArUco-specific -- see issue #21).",
+		DeprecationWarning, stacklevel=2)
+	return findTagPoseGlobal(*args, **kwargs)
+
+
+def findCameraPoseGlobal(tagPose, rvec, tvec, cameraExtrinsics=None):
 	'''
-	Inverse of arucoFindPoseGlobal(): given a tag's *known* world-frame pose
+	Inverse of findTagPoseGlobal(): given a tag's *known* world-frame pose
 	and its pose relative to the camera in the current detection, estimate
 	the vehicle's world-frame pose (e.g. for precision landing).
 
 	tagPose -- {'position': (x, y, z), 'orientation': (roll, pitch, yaw)}, the
 		tag's known pose in the world (ENU) frame, in the same convention as
-		arucoFindPoseGlobal()'s returned orientation (the tag's orientation
+		findTagPoseGlobal()'s returned orientation (the tag's orientation
 		expressed as if it were a body frame).
 	rvec, tvec -- the tag's pose relative to the camera (OpenCV optical
 		frame), from the current detection.
-	cameraExtrinsics -- see arucoFindPoseGlobal(); None defaults to identity.
+	cameraExtrinsics -- see findTagPoseGlobal(); None defaults to identity.
 
 	Returns (position, orientation): the vehicle body's world pose -- the
-	same meaning as cameraPose in arucoFindPoseGlobal() (not the camera's
+	same meaning as cameraPose in findTagPoseGlobal() (not the camera's
 	own pose; cameraExtrinsics and the fixed optical/body-frame conversion
 	are factored out automatically, since a precision-landing caller wants
 	vehicle pose, not camera-mount pose).
@@ -1379,6 +1421,99 @@ def arucoFindCameraPoseGlobal(tagPose, rvec, tvec, cameraExtrinsics=None):
 
 	return (tuple(t_wb.tolist()), _matrixToRpy(R_wb))
 
+
+def arucoFindCameraPoseGlobal(*args, **kwargs):
+	'''Deprecated alias for findCameraPoseGlobal() -- see issue #21. Kept working indefinitely.'''
+	warnings.warn(
+		"olab_utils.arucoFindCameraPoseGlobal() is deprecated; use findCameraPoseGlobal() instead "
+		"(not ArUco-specific -- see issue #21).",
+		DeprecationWarning, stacklevel=2)
+	return findCameraPoseGlobal(*args, **kwargs)
+
+
+def findTagPoses(corners_list, ids_or_data, tag_size, cameraMatrix, dist,
+				  cameraPose=None, cameraExtrinsics=None, flags=cv2.SOLVEPNP_IPPE_SQUARE):
+	'''
+	Reusable postFunction boilerplate for ArUco/QR pose: for each detection
+	(corners_list[i] paired with ids_or_data[i]), builds objPoints from
+	tag_size and computes local pose via findTagPose(), and -- when
+	cameraPose is given -- also the world-frame pose via findTagPoseGlobal().
+	Works identically for camera.aruco[idName].deque[0] (ids_or_data =
+	['ids']) and camera.qr[idName].deque[0] (ids_or_data = ['data']), since
+	both expose the same corners shape. See docs/usage_guide.md's ArUco/QR
+	sections for full worked examples.
+
+	corners_list -- per-detection corner arrays, e.g.
+		camera.aruco[idName].deque[0]['corners'] or
+		camera.qr[idName].deque[0]['corners'].
+	ids_or_data -- parallel list identifying each detection: ArUco numeric
+		ids or QR payload strings. Must be the same length as corners_list.
+	tag_size -- physical size of the tag's printed square, in **meters**
+		(use inches2meters() if you have inches), applied to every
+		detection in this call. Must be a finite, positive real number
+		(not a bool).
+	cameraMatrix, dist -- camera intrinsics, e.g.
+		camera.intrinsics[res]['matrix']/['dist'].
+	cameraPose, cameraExtrinsics -- optional; see findTagPoseGlobal(). When
+		cameraPose is omitted, worldPosition/worldOrientation are None.
+	flags -- passed through to findTagPose()/cv2.solvePnP().
+
+	Returns a list of dicts, one per detection whose solvePnP call
+	succeeded (a failed detection -- ret=False -- is silently omitted, the
+	same way today's hand-rolled `if (ret):` examples just skip printing on
+	failure):
+		{'id': ..., 'rvec': ..., 'tvec': ..., 'distance': ...,
+		 'worldPosition': ..., 'worldOrientation': ...}
+	'tvec' carries the raw per-axis (x, y, z) camera-frame offsets in
+	meters. 'distance' is the Euclidean norm of tvec (straight-line range,
+	not just z-depth). 'worldPosition'/'worldOrientation' are None unless
+	cameraPose is given.
+
+	Raises ValueError (before any solvePnP call) if len(corners_list) !=
+	len(ids_or_data), or if tag_size is not a finite, positive real numeric
+	scalar (bool is explicitly rejected, since bool is an int subclass in
+	Python and would otherwise silently coerce True/False to 1/0).
+	'''
+	if (len(corners_list) != len(ids_or_data)):
+		raise ValueError(
+			f'corners_list and ids_or_data must be the same length, '
+			f'got {len(corners_list)} and {len(ids_or_data)}.')
+
+	if isinstance(tag_size, bool) or not isinstance(tag_size, (int, float, np.integer, np.floating)):
+		raise ValueError(f'tag_size must be a real numeric scalar (int or float), got {type(tag_size)!r}.')
+	if (not math.isfinite(tag_size)) or (tag_size <= 0):
+		raise ValueError(f'tag_size must be finite and positive, got {tag_size!r}.')
+
+	ml = tag_size
+	objPoints = np.array([[-ml/2,  ml/2, 0],
+						  [ ml/2,  ml/2, 0],
+						  [ ml/2, -ml/2, 0],
+						  [-ml/2, -ml/2, 0]])
+
+	results = []
+	for i in range(len(corners_list)):
+		(ret, rvec, tvec) = findTagPose(objPoints, corners_list[i], cameraMatrix, dist, flags=flags)
+		if not ret:
+			continue
+
+		tvecFlat = np.asarray(tvec, dtype=np.float64).reshape(3)
+		distance = float(np.linalg.norm(tvecFlat))
+
+		worldPosition = None
+		worldOrientation = None
+		if (cameraPose is not None):
+			(worldPosition, worldOrientation) = findTagPoseGlobal(cameraPose, rvec, tvec, cameraExtrinsics)
+
+		results.append({
+			'id': ids_or_data[i],
+			'rvec': rvec,
+			'tvec': tvec,
+			'distance': distance,
+			'worldPosition': worldPosition,
+			'worldOrientation': worldOrientation,
+		})
+
+	return results
 
 
 def checkPort(port):
