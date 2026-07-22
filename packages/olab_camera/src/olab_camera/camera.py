@@ -618,11 +618,11 @@ class Camera():
 			self.logger.log(f'Error in addCalibrate: {e}.', severity=olab_utils.SEVERITY_ERROR)
 
 
-	def addFaceDetect(self, res_rows=None, res_cols=None, fps_target=5, postFunction=None, postFunctionArgs={}, color=(0,255,255), conf_threshold=0.7, dnn='caffe', device='cpu', modelPath=None):
-		"""Start face detection using OpenCV DNN-based models.
+	def addFaceDetect(self, res_rows=None, res_cols=None, fps_target=5, postFunction=None, postFunctionArgs={}, color=(0,255,255), conf_threshold=0.7, model_name='face_detection_yunet_2023mar.onnx', device='cpu', modelPath=None):
+		"""Start face detection using OpenCV's built-in YuNet DNN model (cv2.FaceDetectorYN).
 
-		Creates and starts a _FaceDetect instance that detects faces in camera frames using
-		deep neural network models (Caffe or TensorFlow).
+		Creates and starts a _FaceDetect instance that detects faces (plus 5 facial
+		landmark points per face) in camera frames.
 
 		Args:
 			res_rows (int, optional): Processing resolution height. Defaults to camera's res_rows.
@@ -632,27 +632,34 @@ class Camera():
 			postFunctionArgs (dict): Additional keyword arguments passed to postFunction.
 			color (tuple): BGR color for drawing face bounding boxes. Default (0,255,255) yellow.
 			conf_threshold (float): Minimum confidence threshold for detections. Default 0.7.
-			dnn (str): DNN framework to use ('caffe' or 'tensorflow'). Default 'caffe'.
+			model_name (str): YuNet ONNX model filename, resolved against modelPath. Default
+				'face_detection_yunet_2023mar.onnx' (fp32, higher accuracy). Pass
+				'face_detection_yunet_2023mar_int8.onnx' for lower resource usage (e.g. on
+				a Raspberry Pi).
 			device (str): Compute device ('cpu' or 'gpu'). Default 'cpu'.
 			modelPath (str, optional): Custom path to DNN model files. If None, uses default
-				models from olab_utils.
+				models bundled with olab_camera.
+
+		Raises:
+			Exception: any failure resolving/loading the YuNet model propagates directly
+				(see _FaceDetect.__init__) -- caught here and logged as a single error;
+				no entry is left in self.facedetect and no thread is started.
 
 		Notes:
 			- Only one face detection instance ('default') can run at a time.
-			- Detection results include bounding boxes and confidence scores.
-			- Caffe models typically offer better performance on CPU.
+			- Detection results include bounding boxes, confidence scores, and landmarks.
 		"""
-		# Start an openCV DNN-based face detector
+		# Start a cv2.FaceDetectorYN (YuNet)-based face detector
 		try:
 			# self.facedetect is a dictionary.  We'll limit ourselves to just 1 face detection thread. though.
 			idName = 'default'
-			
+
 			res_rows  = self.defaultFromNone(res_rows,  self.res_rows,   int)
 			res_cols  = self.defaultFromNone(res_cols,  self.res_cols,   int)
-			
-			self.facedetect[idName] = _FaceDetect(self, idName, res_rows, res_cols, int(fps_target), postFunction, postFunctionArgs, color, conf_threshold, dnn, device, modelPath)
-			self.facedetect[idName].start() 
-			
+
+			self.facedetect[idName] = _FaceDetect(self, idName, res_rows, res_cols, int(fps_target), postFunction, postFunctionArgs, color, conf_threshold, model_name, device, modelPath)
+			self.facedetect[idName].start()
+
 		except Exception as e:
 			self.logger.log(f'Error in addFaceDetect: {e}.', severity=olab_utils.SEVERITY_ERROR)
 		

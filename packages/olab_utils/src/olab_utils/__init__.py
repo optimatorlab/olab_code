@@ -162,22 +162,21 @@ ARUCO_DICT = {
 
 def _resolveArucoDictAndParams(dictID, cv2_module=cv2):
 	'''
-	Return (dict, params) for the given ARUCO_DICT[...]['dict'] value, using
-	cv2_module.aruco.getPredefinedDictionary()/DetectorParameters() when
-	present (OpenCV >=4.7), falling back to the deprecated
-	Dictionary_get()/DetectorParameters_create() otherwise.
+	Return (dict, params) for the given ARUCO_DICT[...]['dict'] value, via
+	cv2_module.aruco.getPredefinedDictionary()/DetectorParameters().
 
-	Feature-detected via hasattr() rather than parsing cv2.__version__, which
-	broke outright on OpenCV 5.x (major=5, minor=0 fails a "minor >= 7"
-	check and fell into the deprecated branch, which no longer exists in
-	5.x) -- the same fix _resolveTrackerFactory() applies to trackers.
+	Requires OpenCV >=4.7 (the modern cv2.aruco dict/params API) -- both
+	packages' pyproject.toml already declare opencv-contrib-python>=4.10.0,
+	well past that boundary, and the deprecated Dictionary_get()/
+	DetectorParameters_create() API this used to fall back to no longer
+	exists at all on OpenCV 5.x. Raises AttributeError (via cv2_module.aruco)
+	rather than silently limping along on the wrong API shape if that
+	minimum isn't actually met.
 
 	`cv2_module` is injectable for testing; real callers should never pass it.
 	'''
 	aruco = cv2_module.aruco
-	if hasattr(aruco, 'getPredefinedDictionary'):
-		return (aruco.getPredefinedDictionary(dictID), aruco.DetectorParameters())
-	return (aruco.Dictionary_get(dictID), aruco.DetectorParameters_create())
+	return (aruco.getPredefinedDictionary(dictID), aruco.DetectorParameters())
 
 
 ARUCO_DRAWING_DEFAULTS = {'borderDraw': True, 'borderColor': (3, 186, 252), 
@@ -385,36 +384,43 @@ def arucoDrawDetections(img, corners, ids, centers=[], rotations=[], config=ARUC
 		print(f'ERROR in arucoDrawDetections:  {e}')
 
 
-def arucoDetectMarkers(img, arucoDict, arucoParams, img_x_y=None, orig_x_y=None):
+def arucoDetectMarkers(img, arucoDict, arucoParams, img_x_y=None, orig_x_y=None, detector=None):
 	'''
 	Detect ArUco markers in the input frame
 	See https://pyimagesearch.com/2020/12/21/detecting-aruco-markers-with-opencv-and-python/
-	
+
 	img is a numpy array of the cv2 image
-	arucoDict comes from cv2.aruco.Dictionary_get()
-	arucoParams comes from cv2.aruco.DetectorParameters_create()
+	arucoDict comes from cv2.aruco.getPredefinedDictionary()
+	arucoParams comes from cv2.aruco.DetectorParameters()
 	img_x_y is a tuple of form (width, height), describing size of img
 	orig_x_y is also (width, height), describing size of original image (before scaling)
-	
+	detector -- an already-built cv2.aruco.ArucoDetector(arucoDict, arucoParams), for
+		callers (like _Aruco) that construct/cache one once and reuse it across many
+		calls. When None (the default), one is built fresh internally from arucoDict/
+		arucoParams -- fine for one-shot callers like countArucoInImage(), since
+		ArucoDetector construction is cheap relative to detectMarkers() itself.
+
 	For example:
-		self.arucoDict   = {'RPi':      cv2.aruco.Dictionary_get(ARUCO_DICT['DICT_APRILTAG_16h5']), 
-							'HiRes':    cv2.aruco.Dictionary_get(ARUCO_DICT['DICT_APRILTAG_16h5']),
-							'Tracking': cv2.aruco.Dictionary_get(ARUCO_DICT['DICT_APRILTAG_16h5'])}
-		self.arucoParams = {'RPi':      cv2.aruco.DetectorParameters_create(), 
-							'HiRes':    cv2.aruco.DetectorParameters_create(), 
-							'Tracking': cv2.aruco.DetectorParameters_create()}
-							
+		self.arucoDict   = {'RPi':      cv2.aruco.getPredefinedDictionary(ARUCO_DICT['DICT_APRILTAG_16h5']),
+							'HiRes':    cv2.aruco.getPredefinedDictionary(ARUCO_DICT['DICT_APRILTAG_16h5']),
+							'Tracking': cv2.aruco.getPredefinedDictionary(ARUCO_DICT['DICT_APRILTAG_16h5'])}
+		self.arucoParams = {'RPi':      cv2.aruco.DetectorParameters(),
+							'HiRes':    cv2.aruco.DetectorParameters(),
+							'Tracking': cv2.aruco.DetectorParameters()}
+
 	See https://docs.opencv.org/4.x/d2/d1a/classcv_1_1aruco_1_1ArucoDetector.html#a0c1d14251bf1cbb06277f49cfe1c9b61
 	NOTE (from above link): The function does not correct lens distortion or takes it into account. It's recommended to undistort input image with corresponding camera model, if camera parameters are known.
 
 	centers -- n x 2 integer array denoting the [x, y] center coords for each of n identified markers.
 	rotations -- n x 1 float array denoting each marker's rotation.  0 is up, pi/4 is right.
-	corners -- n x 1 x 4 x 2 float array.  
+	corners -- n x 1 x 4 x 2 float array.
 	'''
 	try:
 		centers   = np.array([], dtype='int')
 		rotations = np.array([])
-		(corners, ids, rejected) = cv2.aruco.detectMarkers(img, arucoDict, parameters=arucoParams)
+		if (detector is None):
+			detector = cv2.aruco.ArucoDetector(arucoDict, arucoParams)
+		(corners, ids, rejected) = detector.detectMarkers(img)
 		if (len(corners) > 0):
 			corners = np.array(corners)
 			ids = ids.flatten()
@@ -823,7 +829,9 @@ def decorateFaceDetect(img, confidence, corners, color=(0, 255, 255), addText=Tr
 	img is a numpy array of the cv2 image.
 		We will update the image itself.
 	confidence - array of confidence values
-	corners - output from ???.  np INT32 array of arrays.
+	corners - output from olab_utils.detectFaces(): a list of
+		[(x1,y1),(x2,y2)] int-pixel-coordinate pairs per face (top-left,
+		bottom-right).
 	'''
 	try:
 		for i in range(0, len(corners)):
@@ -833,7 +841,7 @@ def decorateFaceDetect(img, confidence, corners, color=(0, 255, 255), addText=Tr
 			cv2.rectangle(img, corners[i][0], corners[i][1],
 				color, 2, cv2.LINE_AA)
 
-			
+
 			'''
 			FIXME -- This is giving an error about index 1..
 			# Add label to bounding box (top right corner)
@@ -841,12 +849,95 @@ def decorateFaceDetect(img, confidence, corners, color=(0, 255, 255), addText=Tr
 				cv2.putText(img, str(data[i]),
 					(corners[i][0][1][0], corners[i][0][1][1] - 7),
 					cv2.FONT_HERSHEY_SIMPLEX,
-					0.5, color, 1, cv2.LINE_AA)		
+					0.5, color, 1, cv2.LINE_AA)
 			'''
 	except Exception as e:
 		print(f'Error in decorateFaceDetect: {e}')
-	
-	
+
+
+def _resolveFaceDetector(modelFile, input_size, score_threshold, backend_id, target_id, cv2_module=cv2):
+	'''
+	Build a cv2.FaceDetectorYN (YuNet) for the given model file.
+
+	modelFile -- full path to a YuNet ONNX model file (e.g.
+		".../cv2_dnn_models/face_detection_yunet_2023mar.onnx").
+	input_size -- (width, height) of the image detect() will be called with.
+		Required at construction time by cv2.FaceDetectorYN.create() -- there
+		is no way to create a detector without it, unlike the deprecated
+		Caffe/TensorFlow DNN API this replaces.
+	score_threshold -- passed through as create()'s score_threshold.
+	backend_id, target_id -- passed through as create()'s backend_id/target_id
+		(e.g. cv2.dnn.DNN_BACKEND_DEFAULT/DNN_TARGET_CPU for CPU inference,
+		cv2.dnn.DNN_BACKEND_CUDA/DNN_TARGET_CUDA for GPU).
+
+	`cv2_module` is injectable for testing; real callers should never pass it.
+	'''
+	return cv2_module.FaceDetectorYN.create(
+		modelFile, '', input_size,
+		score_threshold=score_threshold,
+		backend_id=backend_id, target_id=target_id)
+
+
+def detectFaces(img, detector, img_x_y=None, orig_x_y=None):
+	'''
+	Run face detection on `img` using an already-built cv2.FaceDetectorYN
+	(see _resolveFaceDetector()), returning (confidence, corners, landmarks).
+
+	detector.detect(img) returns (retval, faces), where faces is either None
+	(no detections) or an [num_faces, 15] array per face:
+		[x, y, w, h, x_re, y_re, x_le, y_le, x_nt, y_nt, x_rmc, y_rmc, x_lmc, y_lmc, score]
+	(bbox top-left + width/height, right eye, left eye, nose tip, right mouth
+	corner, left mouth corner, score).
+
+	confidence -- list of scores, one per detected face.
+	corners -- list of [(x1,y1),(x2,y2)] int-pixel-coordinate pairs per face
+		(top-left, bottom-right) -- same shape decorateFaceDetect() expects,
+		and the same contract the old SSD-based detector published (ints,
+		regardless of any resizing).
+	landmarks -- list of 5 (x,y) int-pixel-coordinate tuples per face (right
+		eye, left eye, nose tip, right mouth corner, left mouth corner).
+
+	img_x_y -- (width, height) of `img` (the frame actually passed to
+		detect()), if it differs from the original capture resolution.
+	orig_x_y -- (width, height) of the original capture resolution.
+	When img_x_y != orig_x_y, every (x,y) point (bbox corners and landmarks
+	alike) is scaled from img_x_y back to orig_x_y -- same xscale/yscale
+	approach as arucoDetectMarkers() -- before being rounded to int. YuNet
+	always returns floats regardless of whether any scaling is needed, so
+	the int(round(...)) conversion happens unconditionally.
+	'''
+	(ret, faces) = detector.detect(img)
+	if (faces is None):
+		return ([], [], [])
+
+	if (img_x_y is not None) and (orig_x_y is not None) and (img_x_y != orig_x_y):
+		xscale = orig_x_y[0] / img_x_y[0]
+		yscale = orig_x_y[1] / img_x_y[1]
+	else:
+		xscale = 1.0
+		yscale = 1.0
+
+	def _scalePoint(x, y):
+		return (int(round(x * xscale)), int(round(y * yscale)))
+
+	confidence = []
+	corners    = []
+	landmarks  = []
+	for face in faces:
+		(x, y, w, h) = face[0:4]
+		confidence.append(face[14])
+		corners.append([_scalePoint(x, y), _scalePoint(x + w, y + h)])
+		landmarks.append([
+			_scalePoint(face[4],  face[5]),   # right eye
+			_scalePoint(face[6],  face[7]),   # left eye
+			_scalePoint(face[8],  face[9]),   # nose tip
+			_scalePoint(face[10], face[11]),  # right mouth corner
+			_scalePoint(face[12], face[13]),  # left mouth corner
+		])
+
+	return (confidence, corners, landmarks)
+
+
 def decorateOptFlow(img, shift):
 	'''
 	shift[0] x direction

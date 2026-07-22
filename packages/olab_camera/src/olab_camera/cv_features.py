@@ -78,7 +78,8 @@ class _Aruco():
 
 			(self.cv2dict, self.cv2params) = olab_utils._resolveArucoDictAndParams(
 				olab_utils.ARUCO_DICT[idName]['dict'])
-					
+			self.arucoDetector = cv2.aruco.ArucoDetector(self.cv2dict, self.cv2params)
+
 			self.isThreadActive = False
 
 		except Exception as e:
@@ -123,11 +124,12 @@ class _Aruco():
 				img = self.camObject.getFrameCopy(colorOption='gray', resOption=resOption)
 								
 				# `corners` will be of same scale as original (captured) image
-				(corners, ids, rejected, centers, rotations) = olab_utils.arucoDetectMarkers(img, 
-																		 self.cv2dict, 
+				(corners, ids, rejected, centers, rotations) = olab_utils.arucoDetectMarkers(img,
+																		 self.cv2dict,
 																		 self.cv2params,
 																		 img_x_y  = img_x_y,
-																		 orig_x_y = orig_x_y)
+																		 orig_x_y = orig_x_y,
+																		 detector = self.arucoDetector)
 	
 				'''
 				centers = []
@@ -1013,11 +1015,12 @@ class _QRCode():
 
 
 class _FaceDetect():
-	"""Internal face detection feature class using OpenCV DNN models.
+	"""Internal face detection feature class using cv2.FaceDetectorYN (YuNet).
 
-	This class detects human faces in camera frames using pre-trained deep neural
-	network models (Caffe or TensorFlow). Detection runs continuously in a separate
-	thread at a specified frame rate, supporting both CPU and GPU inference.
+	This class detects human faces (plus 5 facial landmark points per face) in
+	camera frames using OpenCV's built-in YuNet DNN model. Detection runs
+	continuously in a separate thread at a specified frame rate, supporting
+	both CPU and GPU inference.
 
 	Attributes:
 		camObject: Parent Camera instance managing this face detector.
@@ -1029,9 +1032,10 @@ class _FaceDetect():
 		postFunctionArgs (dict): Arguments passed to the post-processing callback.
 		color (tuple): RGB color for visualization of detected faces.
 		conf_threshold (float): Minimum confidence threshold for face detections.
-		dnn (str): DNN backend type ("caffe" or "tensorflow").
+		model_name (str): YuNet ONNX model filename (e.g. "face_detection_yunet_2023mar.onnx").
 		device (str): Computation device ("cpu" or "gpu").
 		modelPath (str): Directory path containing DNN model files.
+		faceDetector (cv2.FaceDetectorYN): Cached detector, built once at construction.
 		deque (collections.deque): Thread-safe storage for latest detection results.
 		fps (dict): Frame rate tracking metrics for this detector.
 		isThreadActive (bool): Flag indicating if detection thread is running.
@@ -1040,7 +1044,7 @@ class _FaceDetect():
 		start(): Launches face detection thread.
 		stop(): Terminates detection thread and cleans up resources.
 	"""
-	def __init__(self, camObject, idName, res_rows, res_cols, fps_target, postFunction, postFunctionArgs, color, conf_threshold, dnn, device, modelPath):
+	def __init__(self, camObject, idName, res_rows, res_cols, fps_target, postFunction, postFunctionArgs, color, conf_threshold, model_name, device, modelPath):
 		"""Initialize face detection feature.
 
 		Args:
@@ -1053,96 +1057,82 @@ class _FaceDetect():
 			postFunctionArgs (dict): Arguments for post-processing callback.
 			color (tuple): RGB color tuple for face bounding box visualization.
 			conf_threshold (float): Minimum confidence (0.0-1.0) for detections.
-			dnn (str): Neural network backend ("caffe" or "tensorflow").
+			model_name (str): YuNet ONNX model filename, resolved against modelPath
+				(e.g. "face_detection_yunet_2023mar.onnx" (fp32, default) or
+				"face_detection_yunet_2023mar_int8.onnx" (smaller/faster, lower accuracy)).
 			device (str): Computation device ("cpu" or "gpu").
 			modelPath (str): Path to directory containing model files, or None for default.
+
+		Raises:
+			Exception: any failure while resolving/loading the YuNet model (missing/
+				corrupt file, unsupported OpenCV build, unavailable GPU device, etc)
+				propagates directly -- deliberately not caught/logged-only here, so a
+				broken construction can never leave a live entry in
+				Camera.facedetect with no started thread. Camera.addFaceDetect()'s own
+				try/except is the single place this surfaces as one actionable error.
 		"""
-		try:
-			# https://learnopencv.com/face-detection-opencv-dlib-and-deep-learning-c-python/
-			# https://pyimagesearch.com/2018/02/26/face-detection-with-opencv-and-deep-learning/
-			# https://pyimagesearch.com/2018/09/24/opencv-face-recognition/
-			# https://github.com/spmallick/learnopencv/tree/master/FaceDetectionComparison
-				
-			self.camObject = camObject  # This is the parent!
-								
-			self.idName   = idName
-			self.decorationID = None
-			
-			self.res_rows = res_rows
-			self.res_cols = res_cols		
-			self.resolution = f'{res_cols}x{res_rows}'
+		# https://docs.opencv.org/4.x/df/d20/classcv_1_1FaceDetectorYN.html
+		# https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet
 
-			self.fps_target  = fps_target		# Hz
-			self.threadSleep = 1/fps_target		# seconds
-				
-			self.postFunctionArgs = postFunctionArgs
-			self.postFunctionArgs['idName'] = idName
-			if (postFunction is None):
-				self.postFunction = olab_utils._passFunction
-			else:
-				self.postFunction = postFunction
+		self.camObject = camObject  # This is the parent!
 
-			if (modelPath):
-				self.modelPath = modelPath
-			else:
-				# Use DNN models from the package installation directory
-				module_dir = os.path.dirname(os.path.abspath(__file__))
-				self.modelPath = os.path.join(module_dir, 'cv2_dnn_models')
+		self.idName   = idName
+		self.decorationID = None
 
+		self.res_rows = res_rows
+		self.res_cols = res_cols
+		self.resolution = f'{res_cols}x{res_rows}'
 
-			self.color = color
-			
-			self.conf_threshold = conf_threshold
-			self.dnn            = dnn
-			self.device         = device
-			
-			self.fps = _make_fps_dict(recheckInterval=5)
+		self.fps_target  = fps_target		# Hz
+		self.threadSleep = 1/fps_target		# seconds
 
-			self.deque = deque(maxlen=1)
-			self.deque.append({'confidence': [], 'corners': [], 'color': self.color})
-														
-			self.isThreadActive = False
+		self.postFunctionArgs = postFunctionArgs
+		self.postFunctionArgs['idName'] = idName
+		if (postFunction is None):
+			self.postFunction = olab_utils._passFunction
+		else:
+			self.postFunction = postFunction
 
-		except Exception as e:
-			self.camObject.logger.log(f'Error in facedetect init: {e}.', severity=olab_utils.SEVERITY_ERROR)
+		if (modelPath):
+			self.modelPath = modelPath
+		else:
+			# Use DNN models from the package installation directory
+			module_dir = os.path.dirname(os.path.abspath(__file__))
+			self.modelPath = os.path.join(module_dir, 'cv2_dnn_models')
+
+		self.color = color
+
+		self.conf_threshold = conf_threshold
+		self.model_name      = model_name
+		self.device          = device
+
+		self.fps = _make_fps_dict(recheckInterval=5)
+
+		self.deque = deque(maxlen=1)
+		self.deque.append({'confidence': [], 'corners': [], 'landmarks': [], 'color': self.color})
+
+		self.isThreadActive = False
+
+		if (device == 'cpu'):
+			backend_id = cv2.dnn.DNN_BACKEND_DEFAULT
+			target_id  = cv2.dnn.DNN_TARGET_CPU
+		else:
+			backend_id = cv2.dnn.DNN_BACKEND_CUDA
+			target_id  = cv2.dnn.DNN_TARGET_CUDA
+
+		modelFile = os.path.join(self.modelPath, model_name)
+		self.faceDetector = olab_utils._resolveFaceDetector(
+			modelFile, (res_cols, res_rows), conf_threshold, backend_id, target_id)
 
 
 	def _decorate(self, img, **kwargs):
 		# print('idName:', idName, 'facedetect[idName]:', self.facedetect[idName].deque[0])
 		# print(self.facedetect[idName].deque[0])
-		olab_utils.decorateFaceDetect(img, 
-								   self.deque[0]['confidence'], 
-								   self.deque[0]['corners'], 
+		olab_utils.decorateFaceDetect(img,
+								   self.deque[0]['confidence'],
+								   self.deque[0]['corners'],
 								   self.deque[0]['color'], addText=True)
 
-			
-	def _blobCaffe(self, frameCopy):
-		return cv2.dnn.blobFromImage(frameCopy, 1.0, (300, 300), [104, 117, 123], False, False,)
-		
-	def _blobTF(self, frameCopy):
-		return cv2.dnn.blobFromImage(frameCopy, 1.0, (300, 300), [104, 117, 123], True, False,)
-		
-	def _detectFaceOpenCVDnn(self, frameCopy, blobFunction, net):
-		frameHeight = frameCopy.shape[0]
-		frameWidth = frameCopy.shape[1]
-		blob = blobFunction(frameCopy)   # self._blobCaffe or self._blobTF
-
-		net.setInput(blob)
-		detections = net.forward()
-		confidence = []
-		bboxes     = []
-		for i in range(detections.shape[2]):
-			conf = detections[0, 0, i, 2]
-			if conf > self.conf_threshold:
-				x1 = int(detections[0, 0, i, 3] * frameWidth)
-				y1 = int(detections[0, 0, i, 4] * frameHeight)
-				x2 = int(detections[0, 0, i, 5] * frameWidth)
-				y2 = int(detections[0, 0, i, 6] * frameHeight)
-				bboxes.append([(x1, y1), (x2, y2)])
-				confidence.append(conf)
-
-		return confidence, bboxes
-    		
 
 	def _thread_FaceDetect(self):
 
@@ -1150,38 +1140,23 @@ class _FaceDetect():
 		THIS IS A THREAD
 		rate is in [Hz] (frames/second)
 		self.camObject is the parent (from Camera).
-		We are in self.camObject.facedetect['default] 
+		We are in self.camObject.facedetect['default]
 		'''
 		self.isThreadActive = True
 
-		# OpenCV DNN supports 2 networks.
-		# 1. FP16 version of the original Caffe implementation ( 5.4 MB )
-		# 2. 8 bit Quantized version using TensorFlow ( 2.7 MB )
-
-		if (self.dnn == "caffe"):
-			modelFile  = f"{self.modelPath}/res10_300x300_ssd_iter_140000_fp16.caffemodel"
-			configFile = f"{self.modelPath}/deploy.prototxt"
-			net = cv2.dnn.readNetFromCaffe(configFile, modelFile)
-			blobFunction = self._blobCaffe
+		img_x_y  = (self.res_cols, self.res_rows)
+		orig_x_y = (self.camObject.res_cols, self.camObject.res_rows)
+		if (img_x_y == orig_x_y):
+			resOption = None
 		else:
-			modelFile  = f"{self.modelPath}/opencv_face_detector_uint8.pb"
-			configFile = f"{self.modelPath}/opencv_face_detector.pbtxt"
-			net = cv2.dnn.readNetFromTensorflow(modelFile, configFile)
-			blobFunction = self._blobTF
-
-		if (self.device == "cpu"):
-			net.setPreferableBackend(cv2.dnn.DNN_TARGET_CPU)
-		else:
-			net.setPreferableBackend(cv2.dnn.DNN_BACKEND_CUDA)
-			net.setPreferableTarget(cv2.dnn.DNN_TARGET_CUDA)
-
+			resOption = img_x_y
 
 		while self.camObject.camOn:
 			try:
 				timeNow = time.time()
-							
+
 				# FIXME -- It would be nice to cut out the `if` statements...
-				
+
 				# Throttle things if we're going faster than capture speed
 				if (self.fps.actual >= self.camObject.fps['capture'].actual):
 					with self.camObject.condition:
@@ -1196,42 +1171,34 @@ class _FaceDetect():
 					# break
 				'''
 
-				confidence, corners = self._detectFaceOpenCVDnn(self.camObject.getFrameCopy(), blobFunction, net)
-				
-				'''
-				for detections in codeList:
-					data.append(str(detections.data, 'utf-8'))
-					codeTypes.append(detections.type)
-					qualities.append(detections.quality)
-					rect = [(int(detections.rect.left), int(detections.rect.top)), 
-							(int(detections.rect.left+detections.rect.width), int(detections.rect.top+detections.rect.height))]
-					corners.append(rect)
-				'''
-				
+				img = self.camObject.getFrameCopy(resOption=resOption)
+				(confidence, corners, landmarks) = olab_utils.detectFaces(
+					img, self.faceDetector, img_x_y=img_x_y, orig_x_y=orig_x_y)
+
 				# Add detection info to deque:
-				self.deque.append({'confidence': confidence, 'corners': corners, 'color': self.color})
-								
+				self.deque.append({'confidence': confidence, 'corners': corners, 'landmarks': landmarks, 'color': self.color})
+
 				# Do some post-processing:
 				self.postFunction(self.postFunctionArgs)
-				
+
 				self.camObject.calcFramerate(self.fps, 'facedetect')
 
 				self.camObject.reachback_pubCamStatus()
 			except Exception as e:
 				self.stop()
-				self.camObject.logger.log(f'Error in facedetect {self.idName} thread: {e}', severity=olab_utils.SEVERITY_ERROR)				
+				self.camObject.logger.log(f'Error in facedetect {self.idName} thread: {e}', severity=olab_utils.SEVERITY_ERROR)
 				break
-	
+
 			if (not self.isThreadActive):
 				self.stop()
 				self.camObject.logger.log(f'Stopping facedetect {self.idName} thread.', severity=olab_utils.SEVERITY_INFO)
 				break
-	
+
 			# Simplified version of rospy.sleep
 			delta = max(0, timeNow + self.threadSleep - time.time())
 			if (delta > 0):
 				time.sleep(delta)
-				
+
 		# If while loop stops, shut down facedetect:
 		self.stop()
 

@@ -432,12 +432,19 @@ camera.addQR(idName='default',
 
 ### Face Detection
 
+`addFaceDetect()` uses OpenCV's built-in YuNet DNN model (`cv2.FaceDetectorYN`)
+-- besides `confidence`/`corners` (a bounding box per face), it also reports
+`landmarks`: 5 `(x, y)` points per face (right eye, left eye, nose tip,
+right mouth corner, left mouth corner).
+
 ```python
 # Create a function that will be called each time a face is detected:
 def postFaceDetect(argsDict):
     # print(camera.facedetect['default'].deque[0])
     for i in range(len(camera.facedetect['default'].deque[0]['confidence'])):
-        print(f"{i} - confidence: {camera.facedetect['default'].deque[0]['confidence'][i]}, corners: {camera.facedetect['default'].deque[0]['corners'][i]}")
+        print(f"{i} - confidence: {camera.facedetect['default'].deque[0]['confidence'][i]}, "
+              f"corners: {camera.facedetect['default'].deque[0]['corners'][i]}, "
+              f"landmarks: {camera.facedetect['default'].deque[0]['landmarks'][i]}")
 ```
 
 ```python
@@ -449,7 +456,7 @@ modelPath = None
 camera.addFaceDetect(fps_target=5,
                      postFunction=postFaceDetect,
                      conf_threshold=0.7,
-                     dnn='caffe',    # 'caffe' (fp16) or 'pb' (8bit)
+                     model_name='face_detection_yunet_2023mar.onnx',  # or '..._int8.onnx' for lower resource usage
                      device='cpu',
                      modelPath=modelPath)
 ```
