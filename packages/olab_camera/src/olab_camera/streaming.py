@@ -7,6 +7,7 @@ need to import `Camera` itself.
 
 import asyncio
 import datetime
+import math
 import socketserver
 import ssl
 from http import server
@@ -164,12 +165,131 @@ class StreamingServer(socketserver.ThreadingMixIn, server.HTTPServer):
 	Multi-threaded HTTP server that handles multiple concurrent streaming clients.
 	Each client connection is handled in a separate daemon thread.
 
+	If `ssl_context` is given, the *listening* socket is left as plain TCP and
+	each accepted connection is individually TLS-wrapped on its own worker
+	thread (inside `process_request_thread()`, `ThreadingMixIn`'s actual
+	thread target) instead of wrapping the listening socket itself. Wrapping
+	the listening socket would make `accept()` perform the TLS handshake
+	synchronously in the single main accept loop, so one stalled/slow client
+	handshake would block every other client -- including brand-new
+	connections -- from being accepted at all. Per-connection wrapping keeps
+	the handshake confined to that connection's own thread, bounded by
+	`handshake_timeout`.
+
 	Attributes:
 		allow_reuse_address (bool): Allow immediate reuse of socket address.
 		daemon_threads (bool): All client threads are daemon threads.
+		ssl_context (ssl.SSLContext or None): If set, each accepted connection
+			is wrapped with this context. If None (default), the server is
+			plain HTTP -- unchanged from this class's original behavior.
+		log_handshake_failure (callable or None): Called as
+			`log_handshake_failure(client_address, exception)` when a client's
+			TLS handshake fails or times out. Exceptions raised by this
+			callback are swallowed -- a broken logger must not skip socket
+			cleanup or crash the worker thread.
+		handshake_timeout (float): Seconds a single client's TLS handshake may
+			take before being aborted. Only meaningful (and only validated)
+			when `ssl_context` is set. Default 5.0.
 	"""
 	allow_reuse_address = True
 	daemon_threads = True
+
+	def __init__(self, server_address, RequestHandlerClass, bind_and_activate=True,
+		*, ssl_context=None, log_handshake_failure=None, handshake_timeout=5.0):
+		"""Initialize the server, optionally with per-connection TLS wrapping.
+
+		Args:
+			server_address (tuple): (host, port) to bind and listen on.
+			RequestHandlerClass: Handler class instantiated per connection.
+			bind_and_activate (bool): Passed straight through to
+				`http.server.HTTPServer`. Default True.
+			ssl_context (ssl.SSLContext, optional): If given, each accepted
+				connection is TLS-wrapped individually. If None (default),
+				the server is plain HTTP.
+			log_handshake_failure (callable, optional): `(client_address, exc)
+				-> None`, called when a handshake fails/times out. Must be
+				callable if given.
+			handshake_timeout (float): Seconds allowed per handshake. Must be
+				a finite, strictly positive number when `ssl_context` is set;
+				ignored (unvalidated) when `ssl_context` is None. Default 5.0.
+
+		Raises:
+			ValueError: `ssl_context` is neither None nor an `ssl.SSLContext`;
+				`log_handshake_failure` is neither None nor callable; or
+				`ssl_context` is set and `handshake_timeout` is not a finite,
+				strictly positive number (this also rejects bool, since bool
+				is a subclass of int in Python).
+		"""
+		# Validate the whole TLS-related API boundary *before* calling
+		# super().__init__() (which binds/activates the socket) -- a
+		# misconfigured server should fail loudly at construction, not bind
+		# a port and then misbehave (or silently accept a useless timeout)
+		# on the first real connection.
+		if ssl_context is not None and not isinstance(ssl_context, ssl.SSLContext):
+			raise ValueError(f'ssl_context must be an ssl.SSLContext instance or None, got {ssl_context!r}')
+		if log_handshake_failure is not None and not callable(log_handshake_failure):
+			raise ValueError(f'log_handshake_failure must be callable or None, got {log_handshake_failure!r}')
+		if ssl_context is not None:
+			# handshake_timeout is only meaningful once TLS is configured --
+			# but must still be a finite, strictly positive real number, since
+			# 0/negative disables the intended bound and None/NaN/inf either
+			# raise deep inside socket.settimeout()/the handshake itself (as
+			# an unhandled ValueError, outside the (ssl.SSLError, OSError)
+			# path in process_request_thread) or silently mean "no timeout".
+			if (isinstance(handshake_timeout, bool)
+					or not isinstance(handshake_timeout, (int, float))
+					or not math.isfinite(handshake_timeout)
+					or handshake_timeout <= 0):
+				raise ValueError(
+					f'handshake_timeout must be a finite, positive number when '
+					f'ssl_context is set, got {handshake_timeout!r}')
+
+		super().__init__(server_address, RequestHandlerClass, bind_and_activate)
+		self.ssl_context = ssl_context
+		self.log_handshake_failure = log_handshake_failure
+		self.handshake_timeout = handshake_timeout
+
+	def process_request_thread(self, request, client_address):
+		"""Same as `ThreadingMixIn.process_request_thread()`, but TLS-wraps
+		`request` first when `ssl_context` is set.
+
+		Runs on the per-connection worker thread (not the accept loop), so a
+		stalled/failed handshake here cannot block other clients.
+		"""
+		if self.ssl_context is None:
+			# No TLS configured -- unchanged plain-HTTP behavior.
+			super().process_request_thread(request, client_address)
+			return
+
+		# Python >=3.10: socket.timeout is TimeoutError, a subclass of
+		# OSError -- no separate except clause or `import socket` needed.
+		wrapped = None
+		handshake_error = None
+		try:
+			request.settimeout(self.handshake_timeout)
+			wrapped = self.ssl_context.wrap_socket(request, server_side=True)
+			wrapped.settimeout(None)   # restore blocking mode for the actual HTTP work
+		except (ssl.SSLError, OSError) as e:
+			handshake_error = e
+		finally:
+			# Runs on *any* failure above -- including wrapped.settimeout(None)
+			# failing after a successful handshake -- and even if the
+			# caller-supplied log_handshake_failure callback itself raises,
+			# since that call is nested inside this same finally.
+			if handshake_error is not None:
+				if self.log_handshake_failure is not None:
+					try:
+						self.log_handshake_failure(client_address, handshake_error)
+					except Exception:
+						pass   # a broken logging callback must not skip socket cleanup
+				try:
+					(wrapped or request).close()
+				except OSError:
+					pass
+
+		if handshake_error is not None:
+			return
+		super().process_request_thread(wrapped, client_address)
 
 
 class WebSocketStreamingServer:

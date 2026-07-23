@@ -2,7 +2,6 @@
 
 import datetime
 import os
-import sys
 import threading
 import time
 from collections import deque
@@ -1305,24 +1304,23 @@ class Camera():
 
 				address = ('', portNumber)
 				handler = partial(StreamingHandler, self)				# self --> This CamUSB instance
-				server = StreamingServer(address, handler)
 
 				# --- make this server secure (ssl/https) ---
-				if ((sys.version_info.major == 3) and (sys.version_info.minor <= 7)):
-					# ssl.wrap_socket was deprecated in Python 3.7
-					# See https://github.com/eventlet/eventlet/issues/795
-					server.socket = ssl.wrap_socket(
-						server.socket,
-						keyfile  = f'{self.sslPath}/ca.key',
-						certfile = f'{self.sslPath}/ca.crt',
-						server_side=True)
-				else:
-					# This is the newer way:
-					ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-					ssl_context.load_cert_chain(
-						keyfile  = f'{self.sslPath}/ca.key',
-						certfile = f'{self.sslPath}/ca.crt')
-					server.socket = ssl_context.wrap_socket(server.socket, server_side = True)
+				# The listening socket itself stays plain TCP; StreamingServer
+				# TLS-wraps each accepted connection individually, on its own
+				# worker thread, so one stalled client handshake can't block
+				# the accept loop (and therefore every other client). See
+				# StreamingServer's class docstring for the full rationale.
+				ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+				ssl_context.load_cert_chain(
+					keyfile  = f'{self.sslPath}/ca.key',
+					certfile = f'{self.sslPath}/ca.crt')
+
+				def _log_handshake_failure(client_address, e):
+					self.logger.log(f'TLS handshake failed for {client_address}: {e}', severity=olab_utils.SEVERITY_WARNING)
+
+				server = StreamingServer(address, handler, ssl_context=ssl_context,
+					log_handshake_failure=_log_handshake_failure)
 				# -------------------------------------------
 
 				server.serve_forever()
