@@ -44,47 +44,43 @@ class _Aruco():
 		stop(): Stop the detection thread and cleanup
 	"""
 	def __init__(self, camObject, idName, res_rows, res_cols, fps_target, calcRotations, postFunction, postFunctionArgs, configDict, ids_of_interest):
-		try:
-			self.camObject = camObject  # This is the parent!
-								
-			self.idName   = idName
-			self.decorationID = None
-			
-			self.res_rows = res_rows
-			self.res_cols = res_cols		
-			self.resolution = f'{res_cols}x{res_rows}'
+		self.camObject = camObject  # This is the parent!
 
-			self.fps_target  = fps_target		# Hz
-			self.threadSleep = 1/fps_target		# seconds
-			
-			self.calcRotations = calcRotations
-				
-			self.postFunctionArgs = postFunctionArgs
-			self.postFunctionArgs['idName'] = idName
-			if (postFunction is None):
-				self.postFunction = olab_utils._passFunction
-			else:
-				self.postFunction = postFunction
+		self.idName   = idName
+		self.decorationID = None
 
-			self.config = configDict
-			# self.color = color
-			
-			self.ids_of_interest = ids_of_interest
-			
-			self.fps = _make_fps_dict(recheckInterval=5)
+		self.res_rows = res_rows
+		self.res_cols = res_cols
+		self.resolution = f'{res_cols}x{res_rows}'
 
-			self.deque = deque(maxlen=1)
-			self.deque.append({'ids': None, 'corners': [], 'centers': [], 'rotations': []})
+		self.fps_target  = fps_target		# Hz
+		self.threadSleep = 1/fps_target		# seconds
 
-			(self.cv2dict, self.cv2params) = olab_utils._resolveArucoDictAndParams(
-				olab_utils.ARUCO_DICT[idName]['dict'])
-			self.arucoDetector = cv2.aruco.ArucoDetector(self.cv2dict, self.cv2params)
+		self.calcRotations = calcRotations
 
-			self.isThreadActive = False
+		self.postFunctionArgs = postFunctionArgs
+		self.postFunctionArgs['idName'] = idName
+		if (postFunction is None):
+			self.postFunction = olab_utils._passFunction
+		else:
+			self.postFunction = postFunction
 
-		except Exception as e:
-			self.camObject.logger.log(f'Error in aruco init: {e}.', severity=olab_utils.SEVERITY_ERROR)
-		
+		self.config = configDict
+		# self.color = color
+
+		self.ids_of_interest = ids_of_interest
+
+		self.fps = _make_fps_dict(recheckInterval=5)
+
+		self.deque = deque(maxlen=1)
+		self.deque.append({'ids': None, 'corners': [], 'centers': [], 'rotations': []})
+
+		(self.cv2dict, self.cv2params) = olab_utils._resolveArucoDictAndParams(
+			olab_utils.ARUCO_DICT[idName]['dict'])
+		self.arucoDetector = cv2.aruco.ArucoDetector(self.cv2dict, self.cv2params)
+
+		self.isThreadActive = False
+
 
 	def _decorate(self, img, **kwargs):
 		olab_utils.arucoDrawDetections(img, self.deque[0]['corners'],
