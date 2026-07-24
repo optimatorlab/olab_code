@@ -12,7 +12,8 @@ Main Features:
         * WebRTC            (pip install olab-camera[webrtc])
     - ROS topic publishing (compressed and raw images)
     - ArUco marker detection and tracking
-    - Barcode/QR code detection
+    - QR code detection (skew-robust, selectable decoder)
+    - Barcode/QR code detection (generic pyzbar-based scanning)
     - Face detection
     - Camera calibration tools
     - Timelapse capture
@@ -55,6 +56,19 @@ Basic Usage:
     # Add ArUco marker detection
     camera.addAruco('DICT_APRILTAG_36h11', fps_target=20)
 
+    # Add QR code detection, robust to skewed/oblique viewing angles
+    # (cv2.QRCodeDetector by default; decoder='pyzbar' is also available):
+    camera.addQR('default')
+
+    # Like ArUco/barcode, addQR() only reports raw detections (payload data +
+    # corners) each cycle -- it does not compute distance or pose itself. To
+    # get distance/pose, call olab_utils.findTagPose() (and, for a
+    # world-frame position, olab_utils.findTagPoseGlobal()) from your own
+    # postFunction with your own known tag size, exactly the way it's done
+    # for ArUco -- see docs/usage_guide.md for a full worked example,
+    # including precision-landing-style pose composition via setPose()/
+    # setExtrinsics()/findCameraPoseGlobal().
+
     # Start ROS publishing
     camera.startROStopic()
     # Publishes to /camera/image/compressed and /camera/image/raw
@@ -77,7 +91,7 @@ try:
 except PackageNotFoundError:
 	__version__ = "0.0.0"
 
-from .cv_features import _Aruco, _Calibrate, _Barcode, _FaceDetect, _Timelapse, _ROI, _Ultralytics
+from .cv_features import _Aruco, _Calibrate, _Barcode, _QRCode, _FaceDetect, _Timelapse, _ROI, _Ultralytics
 from .streaming import (
 	StreamingHandler, StreamingServer, WebSocketStreamingServer, CameraVideoTrack,
 	WebRTCStreamingServer, _make_fps_dict, STREAM_MAX_WAIT_TIME_SEC,

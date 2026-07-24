@@ -51,6 +51,14 @@ jobs:
       - name: Install system prerequisites for olab_audio
         if: matrix.package == 'olab_audio'
         run: sudo apt-get update && sudo apt-get install -y portaudio19-dev
+      # pyzbar (olab_camera's default QR/barcode decoder) is a base
+      # dependency, not an opt-in extra, but it only wraps the native ZBar
+      # library -- it needs libzbar0 present at runtime, or decoding raises
+      # "Unable to find zbar shared library" (not caught by pip installing
+      # the pyzbar wheel itself).
+      - name: Install system prerequisites for olab_camera
+        if: matrix.package == 'olab_camera'
+        run: sudo apt-get update && sudo apt-get install -y libzbar0
       # olab_camera depends on olab_utils (a workspace-internal package, not
       # published anywhere pip can resolve it from by name) — install it
       # from its local path first so olab_camera's own install can find it.

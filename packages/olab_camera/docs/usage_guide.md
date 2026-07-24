@@ -153,7 +153,21 @@ def aruco_post_poses(argsDict):
     # This function gets called each time an aruco detection is run
     idName  = argsDict['idName']
 
+    ids     = camera.aruco[idName].deque[0]['ids']
+    corners = camera.aruco[idName].deque[0]['corners']
+    centers = camera.aruco[idName].deque[0]['centers']
+    for i in range(len(corners)):
+        # centers give the center point, in pixels, of the tag.
+        print(f"id: {ids[i]}")
+        print(f"\tcenter: {centers[i]}")
+
     if (TAG_SIZE_INCHES is not None):
+        '''
+        NOTE:
+        If you get an error like `Error in Aruco DICT_APRILTAG_36h11 thread: '640x480'`,
+        that likely means you have not the camera calibration
+        (or that you have calibrated your camera at a resolution other than '640x480'.
+        '''
         # Adjust based on resolution
         res = f'{camera.res_cols}x{camera.res_rows}'
         cameraMatrix = camera.intrinsics[res]['matrix']
@@ -164,36 +178,18 @@ def aruco_post_poses(argsDict):
         # ********************************************
         ml = olab_utils.inches2meters(TAG_SIZE_INCHES)
 
-        objPoints = np.array([[-ml/2,  ml/2, 0],
-                              [ ml/2,  ml/2, 0],
-                              [ ml/2, -ml/2, 0],
-                              [-ml/2, -ml/2, 0]])
-
-    corners = camera.aruco[idName].deque[0]['corners']
-    for i in range(len(corners)):
-        # centers give the center point, in pixels, of the tag.
-        print(f"id: {camera.aruco[idName].deque[0]['ids'][i]}")
-        print(f"\tcenter: {camera.aruco[idName].deque[0]['centers'][i]}")
-
-        if (TAG_SIZE_INCHES is not None):
-            '''
-            NOTE:
-            If you get an error like `Error in Aruco DICT_APRILTAG_36h11 thread: '640x480'`,
-            that likely means you have not the camera calibration
-            (or that you have calibrated your camera at a resolution other than '640x480'.
-            '''
-            (ret, rvecs, tvecs) = olab_utils.arucoFindPose(objPoints, corners[i], cameraMatrix, dist, flags=cv2.SOLVEPNP_IPPE_SQUARE)
-            # print(f"{ret=}, {rvecs=}, {tvecs=}.")
-            if (ret):
-                # rvecs is the 3D rotation vector.
-                # I don't think it's human interpretable, so we won't print it here.
-
-                # tvecs in the x/y/z translation of the marker from the origin (camera).
-                # It's in [meters], since we specified `ml` in [meters].
-                # tvecs[0] (x) is the distance left (-) or right (+) from the camera.
-                # tvecs[1] (y) is the distance above (-) or below (+) the camera.
-                # tvecs[2] (z) is the distance away from the camera.
-                print(f"\tdistance [inches]: x: {olab_utils.meters2inches(tvecs[0])}, y: {olab_utils.meters2inches(tvecs[1])}, z: {olab_utils.meters2inches(tvecs[2])}")
+        # olab_utils.findTagPoses() consolidates the loop/objPoints/solvePnP
+        # boilerplate a hand-rolled version of this used to need -- see
+        # https://github.com/optimatorlab/olab_code/issues/20.
+        for pose in olab_utils.findTagPoses(corners, ids, ml, cameraMatrix, dist):
+            # pose['tvec'] is the x/y/z translation of the marker from the origin (camera).
+            # It's in [meters], since we passed `ml` in [meters].
+            # tvec[0] (x) is the distance left (-) or right (+) from the camera.
+            # tvec[1] (y) is the distance above (-) or below (+) the camera.
+            # tvec[2] (z) is the distance away from the camera.
+            tvec = pose['tvec']
+            print(f"id: {pose['id']}")
+            print(f"\tdistance [inches]: x: {olab_utils.meters2inches(tvec[0])}, y: {olab_utils.meters2inches(tvec[1])}, z: {olab_utils.meters2inches(tvec[2])}")
 ```
 
 ```python
@@ -238,17 +234,217 @@ camera.addBarcode(fps_target=5,
 camera.barcode['default'].stop()
 ```
 
+---
+
+### Generate a printable QR tag
+
+`olab_utils.generateQR()` generates a printable QR-code tag image for use as
+a physical fiducial with the detection/pose pipeline below.
+
+```python
+# Generate a 4.25-inch QR tag at 300 DPI, saved as a lossless PNG (the only
+# formats accepted are .png/.tif/.tiff/.bmp -- a lossy format like JPEG can
+# corrupt the sharp module edges QR decoding depends on):
+img = olab_utils.generateQR(
+    payload='PAD_A',
+    tag_size_inches=4.25,
+    dpi=300,
+    outputFile='pad_a_tag.png')
+```
+
+- `tag_size_inches` sizes **the QR symbol itself**. With the default
+  `border=0`, the saved file *is* the QR symbol -- no extra white margin
+  baked in -- so the file's own size always equals `tag_size_inches`
+  exactly, matching what a print dialog's "actual size"/100% setting, or
+  an image editor's "set image size", controls, and exactly what a ruler
+  measures on the printed page. No separate "which edge do I measure" step
+  is needed.
+- **Print `outputFile` at actual size / 100% scale**, with any "fit to
+  page"/"scale to fit" print option turned **off**. The file has `dpi`
+  embedded as real metadata, but a print dialog's "fit to page" ignores
+  that and resamples the image to the page size regardless -- so DPI
+  metadata alone does not guarantee the printed tag is the size you asked
+  for.
+- After printing, **physically measure the printed tag with a ruler**
+  before trusting it for pose -- it should match `tag_size_inches` (within
+  +/-1 pixel, at the `dpi` you generated it with); confirming it with a
+  ruler catches any print-pipeline scaling that DPI metadata alone
+  couldn't prevent. This same `tag_size_inches` value is what to pass (in
+  meters, via `inches2meters()`) into `findTagPose()`/`findTagPoses()`
+  below (see `TAG_SIZE_INCHES`).
+- The default `border=0` means the *file* has no quiet zone baked in --
+  a QR code's quiet-zone requirement is about the physical scanning
+  environment having clean white space around the tag, not about the file
+  containing that space itself. An ordinary printed page's own margins
+  already provide this for a single tag printed on its own sheet; just
+  don't crop tight to the black pixels or place the tag immediately
+  against other dark content. Pass a nonzero `border` only if you need
+  that margin baked into the file itself (e.g. compositing the tag into a
+  design that doesn't otherwise leave it any white space) -- doing so
+  makes the file **larger** than `tag_size_inches` (the QR symbol still
+  prints at exactly `tag_size_inches`; the border is added on top, not
+  carved out of it), so the physical size you measure/use for pose is still
+  `tag_size_inches` unchanged -- a nonzero border only affects the saved
+  file's total size, never what `tag_size_inches` means. `findTagPoses()`
+  requires this value converted to **meters** (`olab_utils.inches2meters(tag_size_inches)`
+  -- see `TAG_SIZE_INCHES`/`ml` in the examples above); `findTagPose()`
+  itself is unit-agnostic and accepts whatever consistent unit system its
+  caller's `objPoints` use.
+- Optional `logo=<path or numpy image>` embeds a logo centered on the tag
+  (composited inside an opaque backing square, capped at `logo_scale`,
+  verified to still decode after compositing); optional `label=<str>`
+  prints a human-readable caption below the tag (e.g. the payload itself).
+  See the function's docstring for the full parameter set (error
+  correction level, colors, quiet-zone width, etc).
+
+---
+
+### QR Codes
+
+`addQR()` is QR-only (unlike `addBarcode()`, which scans any symbology pyzbar
+supports) and lets you pick the decoder. It reports the same shape of thing
+ArUco/barcode do -- payload data + corners each cycle -- and, like ArUco,
+does not compute distance/pose itself.
+
+- **NOTE**: `decoder='cv2'` (the default) may print a native OpenCV warning
+  like `QR: ECI is not supported properly` for QR codes that embed an ECI
+  segment (common -- many phone/web QR generators add one to declare
+  UTF-8). It's benign: decoding still succeeds despite the warning. If it's
+  too noisy (it repeats every detection cycle a tag with ECI is in view),
+  suppress OpenCV's own logging once, near the top of your notebook/script.
+  The API moved between OpenCV versions -- newer builds (roughly 4.11+)
+  only expose `cv2.utils.logging.setLogLevel()`; older builds only expose
+  the now-removed top-level `cv2.setLogLevel()` -- so try both and fall
+  back gracefully:
+  ```python
+  def suppress_cv2_warnings():
+      try:
+          import cv2.utils.logging as cvlog
+          cvlog.setLogLevel(cvlog.LOG_LEVEL_ERROR)
+          return True
+      except (ImportError, AttributeError):
+          pass
+      try:
+          cv2.setLogLevel(2)   # 2 == LOG_LEVEL_ERROR numerically, stable across versions
+          return True
+      except AttributeError:
+          return False
+
+  suppress_cv2_warnings()
+  ```
+  This is a process-wide OpenCV setting (not specific to QR detection), so
+  it also quiets any other OpenCV WARNING-level messages elsewhere in your
+  session -- pass `LOG_LEVEL_WARNING`/`3` instead of `LOG_LEVEL_ERROR`/`2`
+  if you need those back.
+
+```python
+# Create a function that will be called each time a QR code is detected:
+def postQR(argsDict):
+    idName = argsDict['idName']
+    for i in range(len(camera.qr[idName].deque[0]['data'])):
+        print(f"""data: {camera.qr[idName].deque[0]['data'][i]},
+                corners: {camera.qr[idName].deque[0]['corners'][i]}""")
+```
+
+```python
+# Start QR detection. decoder='cv2' (default) uses cv2.QRCodeDetector, which
+# is more robust to skewed/oblique viewing angles than pyzbar and is the
+# right choice if you plan to compute pose (see below). decoder='pyzbar' is
+# also available for generic use.
+camera.addQR(idName='default',
+             decoder='cv2',
+             postFunction=postQR,
+             postFunctionArgs={'idName': 'default'},
+             ids_of_interest=None)  # default is None, or provide a list of payloads to track
+```
+
+**Run the next cell when you're ready to stop QR detection:**
+```python
+camera.qr['default'].stop()
+```
+
+- **NOTE**: You will need to calibrate the camera if you want to be able to determine the distance from a tag.
+
+```python
+# Specify the size of the QR tag in inches (or enter `None` if unknown)
+TAG_SIZE_INCHES = 4.25   #  or None, or 4 + 3/16, etc
+```
+
+```python
+# Create the "callback" function to be called on each QR detection --
+# this is exactly the same pattern as `aruco_post_poses()` above:
+def qr_post_poses(argsDict):
+    idName = argsDict['idName']
+
+    corners = camera.qr[idName].deque[0]['corners']
+    data    = camera.qr[idName].deque[0]['data']
+    for i in range(len(corners)):
+        print(f"data: {data[i]}")
+
+    if (TAG_SIZE_INCHES is not None):
+        res = f'{camera.res_cols}x{camera.res_rows}'
+        cameraMatrix = camera.intrinsics[res]['matrix']
+        dist = camera.intrinsics[res]['dist']
+
+        ml = olab_utils.inches2meters(TAG_SIZE_INCHES)
+
+        # For a world-frame position (e.g. precision landing), first tell the
+        # camera where it is (once, or whenever it changes):
+        #     camera.setPose(x=..., y=..., z=..., roll=..., pitch=..., yaw=...)
+        #     camera.setExtrinsics(x=..., y=..., z=..., roll=..., pitch=..., yaw=...)  # optional, defaults to identity mount
+        # olab_utils.findTagPoses() composes to world coordinates automatically
+        # once camera.pose is set (worldPosition/worldOrientation are None
+        # otherwise) -- see https://github.com/optimatorlab/olab_code/issues/20.
+        poses = olab_utils.findTagPoses(corners, data, ml, cameraMatrix, dist,
+                                         cameraPose=camera.pose, cameraExtrinsics=camera.extrinsics)
+        for pose in poses:
+            tvec = pose['tvec']
+            print(f"data: {pose['id']}")
+            print(f"\tdistance [inches]: x: {olab_utils.meters2inches(tvec[0])}, y: {olab_utils.meters2inches(tvec[1])}, z: {olab_utils.meters2inches(tvec[2])}")
+
+            if (pose['worldPosition'] is not None):
+                print(f"\tworld position: {pose['worldPosition']}")
+
+                # And the inverse -- if you instead know the tag's own world
+                # position (e.g. a landing pad at a known GPS/local position),
+                # you can solve for the vehicle's own pose:
+                tagPose = {'position': pose['worldPosition'], 'orientation': pose['worldOrientation']}
+                (vehiclePos, vehicleOrientation) = olab_utils.findCameraPoseGlobal(tagPose, pose['rvec'], pose['tvec'], camera.extrinsics)
+```
+
+```python
+# Start QR detection, pointing to the `qr_post_poses()` function:
+camera.addQR(idName='default',
+             decoder='cv2',
+             postFunction=qr_post_poses,
+             postFunctionArgs={'idName': 'default'})
+```
+
+- **NOTE**: `findTagPose()`/`findTagPoseGlobal()`/`findCameraPoseGlobal()`/`findTagPoses()`
+  work for ArUco markers too -- they operate on any single planar tag's 4
+  corners / solvePnP rvec+tvec, not just QR. (These were formerly named
+  `arucoFindPose()`/`arucoFindPoseGlobal()`/`arucoFindCameraPoseGlobal()`;
+  the old names still work but are deprecated -- see
+  https://github.com/optimatorlab/olab_code/issues/21.)
+
 
 ---
 
 ### Face Detection
+
+`addFaceDetect()` uses OpenCV's built-in YuNet DNN model (`cv2.FaceDetectorYN`)
+-- besides `confidence`/`corners` (a bounding box per face), it also reports
+`landmarks`: 5 `(x, y)` points per face (right eye, left eye, nose tip,
+right mouth corner, left mouth corner).
 
 ```python
 # Create a function that will be called each time a face is detected:
 def postFaceDetect(argsDict):
     # print(camera.facedetect['default'].deque[0])
     for i in range(len(camera.facedetect['default'].deque[0]['confidence'])):
-        print(f"{i} - confidence: {camera.facedetect['default'].deque[0]['confidence'][i]}, corners: {camera.facedetect['default'].deque[0]['corners'][i]}")
+        print(f"{i} - confidence: {camera.facedetect['default'].deque[0]['confidence'][i]}, "
+              f"corners: {camera.facedetect['default'].deque[0]['corners'][i]}, "
+              f"landmarks: {camera.facedetect['default'].deque[0]['landmarks'][i]}")
 ```
 
 ```python
@@ -260,7 +456,7 @@ modelPath = None
 camera.addFaceDetect(fps_target=5,
                      postFunction=postFaceDetect,
                      conf_threshold=0.7,
-                     dnn='caffe',    # 'caffe' (fp16) or 'pb' (8bit)
+                     model_name='face_detection_yunet_2023mar.onnx',  # or '..._int8.onnx' for lower resource usage
                      device='cpu',
                      modelPath=modelPath)
 ```

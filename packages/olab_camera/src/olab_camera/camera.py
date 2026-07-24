@@ -2,7 +2,6 @@
 
 import datetime
 import os
-import sys
 import threading
 import time
 from collections import deque
@@ -18,7 +17,7 @@ import numpy as np
 
 import olab_utils				# A bunch of (somewhat) helpful functions and variables
 
-from .cv_features import _Aruco, _Calibrate, _Barcode, _FaceDetect, _Timelapse, _ROI, _Ultralytics
+from .cv_features import _Aruco, _Calibrate, _Barcode, _QRCode, _FaceDetect, _Timelapse, _ROI, _Ultralytics
 from .streaming import (
 	StreamingHandler, StreamingServer, WebSocketStreamingServer, WebRTCStreamingServer,
 	_make_fps_dict, STREAM_MAX_WAIT_TIME_SEC, _HAS_WEBSOCKETS, _HAS_WEBRTC,
@@ -220,9 +219,20 @@ class Camera():
 				
 		self.camTopicSubscriber = None    # Used by CameraROS (compressed image callback)
 
+		# self.pose: the vehicle body's own world-frame pose (set via setPose()),
+		# used the same way camera.intrinsics is: read directly by your own
+		# postFunction and passed into olab_utils.findTagPoseGlobal()/
+		# findCameraPoseGlobal(). None until setPose() is called.
+		self.pose = None
+		# self.extrinsics: the camera's fixed mount pose relative to the vehicle
+		# body frame (set via setExtrinsics()). Defaults to identity (camera at
+		# the body origin, boresight aligned with the body's +x/forward axis).
+		self.extrinsics = {'position': (0.0, 0.0, 0.0), 'orientation': (0.0, 0.0, 0.0)}
+
 		self.aruco       = {}
 		self.roi         = {}
 		self.barcode     = {}
+		self.qr          = {}
 		self.calibrate   = {}
 		self.timelapse   = {}
 		self.facedetect  = {}
@@ -397,18 +407,21 @@ class Camera():
 			- Prevents starting multiple instances with the same idName.
 			- Detection results include marker corners, IDs, centers, and optionally rotations.
 			- Uses camera intrinsics for undistortion if available.
+			- To get distance/3D pose (not just the in-plane `rotations` angle), call
+			  olab_utils.findTagPose() from your own postFunction with your own known
+			  marker size -- see docs/usage_guide.md's ArUco section for a full example.
 		"""
 		# ids_of_interest None --> we don't have any specific IDs we're looking for.
 		# Otherwise, this should be a list of integer IDs we're looking for.
 
 		# Set colors to `None` to use the default colors from olab_utils.ARUCO_DICT
 		configDefaults = olab_utils.ARUCO_DRAWING_DEFAULTS
-								  
+
 		try:
 			if (idName is None):
 				self.logger.log('Error in addAruco: idName is None', severity=olab_utils.SEVERITY_ERROR)
 				return
-			
+
 			if (idName in self.aruco):
 				if (self.aruco[idName].isThreadActive):
 					self.logger.log(f'An aruco thread for {idName} is already running.', severity=olab_utils.SEVERITY_ERROR)
@@ -419,16 +432,119 @@ class Camera():
 				configDict[k] = v
 				if ('Color' in k):
 					configDict[k] = self.defaultFromNone(v, olab_utils.ARUCO_DICT[idName]['color'], None)
-					
+
 			res_rows  = self.defaultFromNone(res_rows,  self.res_rows,   int)
 			res_cols  = self.defaultFromNone(res_cols,  self.res_cols,   int)
-						
+
 			self.aruco[idName] = _Aruco(self, idName, res_rows, res_cols, int(fps_target), calcRotations, postFunction, postFunctionArgs, configDict, ids_of_interest)
-			
+
 			self.aruco[idName].start()
-				
+
 		except Exception as e:
 			self.logger.log(f'Error in addAruco: {e}.', severity=olab_utils.SEVERITY_ERROR)
+
+	def addQR(self, idName=None, decoder='cv2', ids_of_interest=None,
+			  res_rows=None, res_cols=None, fps_target=5, postFunction=None, postFunctionArgs=None, color=(0,0,255)):
+		"""Start QR-code detection in a separate thread.
+
+		Creates and starts a _QRCode instance that continuously decodes QR codes in camera
+		frames -- unlike addBarcode()/pyzbar's generic 1D/2D scanning, this is QR-only and
+		lets you pick the decoder. Results (payload data + corners) are stored in
+		self.qr[idName], exactly the way ArUco/barcode results are stored -- this does NOT
+		compute distance or pose itself; call olab_utils.findTagPose() from your own
+		postFunction with your own known tag size, the same way it's done for ArUco (see
+		docs/usage_guide.md) -- it works for any single planar tag's 4 corners.
+
+		This is independent of addBarcode(): both may run at once and may both detect the
+		same physical QR codes if both are started -- that's the caller's choice, not
+		prevented. Use addQR() when you need reliable skewed-tag reads and/or a decoder
+		choice; use addBarcode() for generic multi-symbology 1D/2D scanning.
+
+		Args:
+			idName (str): Unique identifier for this QR detection instance.
+			decoder (str): 'cv2' (default) uses cv2.QRCodeDetector, which does its own
+				perspective correction and whose corner order is anchored to the QR
+				symbol's own finder-pattern structure -- safe to use for pose. 'pyzbar'
+				uses the pyzbar library; its corner order is not reliably anchored to the
+				symbol's frame, so if you compute pose from its corners, only
+				distance/position are meaningful, not orientation -- see _QRCode's
+				docstring.
+			ids_of_interest (list, optional): If given, only these decoded payload
+				strings are reported at all -- same parameter name/purpose as
+				addAruco()'s ids_of_interest, just filtering on payload text instead
+				of numeric marker IDs. If None, every decoded payload is reported.
+			res_rows (int, optional): Processing resolution height. Defaults to camera's res_rows.
+			res_cols (int, optional): Processing resolution width. Defaults to camera's res_cols.
+			fps_target (int): Target detection framerate. Default 5.
+			postFunction (callable, optional): Callback function executed after each detection.
+			postFunctionArgs (dict, optional): Additional keyword arguments passed to
+				postFunction. A copy is made internally before `idName` is added, so the
+				dict you pass in is never mutated, and each QR instance gets its own
+				independent args dict (never `None` or `{}` shared across instances).
+			color (tuple): BGR color for drawing QR outlines. Default (0,0,255) red.
+
+		Notes:
+			- Prevents starting multiple instances with the same idName.
+			- Detection results include payload data and corners.
+		"""
+		try:
+			if (idName is None):
+				self.logger.log('Error in addQR: idName is None', severity=olab_utils.SEVERITY_ERROR)
+				return
+
+			if (decoder not in ('cv2', 'pyzbar')):
+				self.logger.log(f"Error in addQR: unknown decoder '{decoder}'; expected 'cv2' or 'pyzbar'", severity=olab_utils.SEVERITY_ERROR)
+				return
+
+			if (idName in self.qr):
+				if (self.qr[idName].isThreadActive):
+					self.logger.log(f'A QR thread for {idName} is already running.', severity=olab_utils.SEVERITY_ERROR)
+					return
+
+			res_rows  = self.defaultFromNone(res_rows,  self.res_rows,   int)
+			res_cols  = self.defaultFromNone(res_cols,  self.res_cols,   int)
+
+			self.qr[idName] = _QRCode(self, idName, decoder, ids_of_interest,
+									   res_rows, res_cols, int(fps_target), postFunction, postFunctionArgs, color)
+			self.qr[idName].start()
+
+		except Exception as e:
+			self.logger.log(f'Error in addQR: {e}.', severity=olab_utils.SEVERITY_ERROR)
+
+	def setPose(self, x, y, z, roll, pitch, yaw):
+		"""Set the vehicle body's pose in the world (ENU) frame.
+
+		This is the *vehicle's* pose (e.g. from flight-controller state), not the
+		camera's own pose -- see setExtrinsics() for the camera's fixed mount offset
+		relative to the vehicle body. Stored on self.pose (mirrors how self.intrinsics is
+		stored/read directly), for your own postFunction to read and pass into
+		olab_utils.findTagPoseGlobal()/findCameraPoseGlobal() -- see
+		docs/usage_guide.md's ArUco section for the equivalent local-pose pattern this
+		builds on.
+
+		Args:
+			x, y, z (float): Position of the body origin in the world (ENU) frame, meters.
+			roll, pitch, yaw (float): Orientation of the body frame (FLU: x forward, y
+				left, z up) relative to world (ENU), in radians, per REP-103.
+		"""
+		self.pose = {'position': (x, y, z), 'orientation': (roll, pitch, yaw)}
+
+	def setExtrinsics(self, x, y, z, roll, pitch, yaw):
+		"""Set the camera's fixed mount pose relative to the vehicle body frame.
+
+		This is a one-time hardware calibration (camera position/orientation on the
+		airframe) -- call it once after construction, or whenever the physical mount
+		changes, not per-frame. Same units/convention as setPose(): meters, radians RPY,
+		FLU-style relative frame. Stored on self.extrinsics, which defaults to identity
+		(camera at the body origin, boresight aligned with the body's +x/forward axis)
+		until this is called.
+
+		Args:
+			x, y, z (float): Position of the camera's mount origin in the body frame, meters.
+			roll, pitch, yaw (float): Orientation of the camera-link frame relative to the
+				body frame, in radians.
+		"""
+		self.extrinsics = {'position': (x, y, z), 'orientation': (roll, pitch, yaw)}
 
 	def addBarcode(self, res_rows=None, res_cols=None, fps_target=5, postFunction=None, postFunctionArgs={}, color=(0,0,255)):
 		"""Start barcode and QR code detection using pyzbar in a separate thread.
@@ -501,11 +617,11 @@ class Camera():
 			self.logger.log(f'Error in addCalibrate: {e}.', severity=olab_utils.SEVERITY_ERROR)
 
 
-	def addFaceDetect(self, res_rows=None, res_cols=None, fps_target=5, postFunction=None, postFunctionArgs={}, color=(0,255,255), conf_threshold=0.7, dnn='caffe', device='cpu', modelPath=None):
-		"""Start face detection using OpenCV DNN-based models.
+	def addFaceDetect(self, res_rows=None, res_cols=None, fps_target=5, postFunction=None, postFunctionArgs={}, color=(0,255,255), conf_threshold=0.7, model_name='face_detection_yunet_2023mar.onnx', device='cpu', modelPath=None):
+		"""Start face detection using OpenCV's built-in YuNet DNN model (cv2.FaceDetectorYN).
 
-		Creates and starts a _FaceDetect instance that detects faces in camera frames using
-		deep neural network models (Caffe or TensorFlow).
+		Creates and starts a _FaceDetect instance that detects faces (plus 5 facial
+		landmark points per face) in camera frames.
 
 		Args:
 			res_rows (int, optional): Processing resolution height. Defaults to camera's res_rows.
@@ -515,27 +631,34 @@ class Camera():
 			postFunctionArgs (dict): Additional keyword arguments passed to postFunction.
 			color (tuple): BGR color for drawing face bounding boxes. Default (0,255,255) yellow.
 			conf_threshold (float): Minimum confidence threshold for detections. Default 0.7.
-			dnn (str): DNN framework to use ('caffe' or 'tensorflow'). Default 'caffe'.
+			model_name (str): YuNet ONNX model filename, resolved against modelPath. Default
+				'face_detection_yunet_2023mar.onnx' (fp32, higher accuracy). Pass
+				'face_detection_yunet_2023mar_int8.onnx' for lower resource usage (e.g. on
+				a Raspberry Pi).
 			device (str): Compute device ('cpu' or 'gpu'). Default 'cpu'.
 			modelPath (str, optional): Custom path to DNN model files. If None, uses default
-				models from olab_utils.
+				models bundled with olab_camera.
+
+		Raises:
+			Exception: any failure resolving/loading the YuNet model propagates directly
+				(see _FaceDetect.__init__) -- caught here and logged as a single error;
+				no entry is left in self.facedetect and no thread is started.
 
 		Notes:
 			- Only one face detection instance ('default') can run at a time.
-			- Detection results include bounding boxes and confidence scores.
-			- Caffe models typically offer better performance on CPU.
+			- Detection results include bounding boxes, confidence scores, and landmarks.
 		"""
-		# Start an openCV DNN-based face detector
+		# Start a cv2.FaceDetectorYN (YuNet)-based face detector
 		try:
 			# self.facedetect is a dictionary.  We'll limit ourselves to just 1 face detection thread. though.
 			idName = 'default'
-			
+
 			res_rows  = self.defaultFromNone(res_rows,  self.res_rows,   int)
 			res_cols  = self.defaultFromNone(res_cols,  self.res_cols,   int)
-			
-			self.facedetect[idName] = _FaceDetect(self, idName, res_rows, res_cols, int(fps_target), postFunction, postFunctionArgs, color, conf_threshold, dnn, device, modelPath)
-			self.facedetect[idName].start() 
-			
+
+			self.facedetect[idName] = _FaceDetect(self, idName, res_rows, res_cols, int(fps_target), postFunction, postFunctionArgs, color, conf_threshold, model_name, device, modelPath)
+			self.facedetect[idName].start()
+
 		except Exception as e:
 			self.logger.log(f'Error in addFaceDetect: {e}.', severity=olab_utils.SEVERITY_ERROR)
 		
@@ -1181,24 +1304,23 @@ class Camera():
 
 				address = ('', portNumber)
 				handler = partial(StreamingHandler, self)				# self --> This CamUSB instance
-				server = StreamingServer(address, handler)
 
 				# --- make this server secure (ssl/https) ---
-				if ((sys.version_info.major == 3) and (sys.version_info.minor <= 7)):
-					# ssl.wrap_socket was deprecated in Python 3.7
-					# See https://github.com/eventlet/eventlet/issues/795
-					server.socket = ssl.wrap_socket(
-						server.socket,
-						keyfile  = f'{self.sslPath}/ca.key',
-						certfile = f'{self.sslPath}/ca.crt',
-						server_side=True)
-				else:
-					# This is the newer way:
-					ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-					ssl_context.load_cert_chain(
-						keyfile  = f'{self.sslPath}/ca.key',
-						certfile = f'{self.sslPath}/ca.crt')
-					server.socket = ssl_context.wrap_socket(server.socket, server_side = True)
+				# The listening socket itself stays plain TCP; StreamingServer
+				# TLS-wraps each accepted connection individually, on its own
+				# worker thread, so one stalled client handshake can't block
+				# the accept loop (and therefore every other client). See
+				# StreamingServer's class docstring for the full rationale.
+				ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+				ssl_context.load_cert_chain(
+					keyfile  = f'{self.sslPath}/ca.key',
+					certfile = f'{self.sslPath}/ca.crt')
+
+				def _log_handshake_failure(client_address, e):
+					self.logger.log(f'TLS handshake failed for {client_address}: {e}', severity=olab_utils.SEVERITY_WARNING)
+
+				server = StreamingServer(address, handler, ssl_context=ssl_context,
+					log_handshake_failure=_log_handshake_failure)
 				# -------------------------------------------
 
 				server.serve_forever()

@@ -44,52 +44,43 @@ class _Aruco():
 		stop(): Stop the detection thread and cleanup
 	"""
 	def __init__(self, camObject, idName, res_rows, res_cols, fps_target, calcRotations, postFunction, postFunctionArgs, configDict, ids_of_interest):
-		try:
-			self.camObject = camObject  # This is the parent!
-								
-			self.idName   = idName
-			self.decorationID = None
-			
-			self.res_rows = res_rows
-			self.res_cols = res_cols		
-			self.resolution = f'{res_cols}x{res_rows}'
+		self.camObject = camObject  # This is the parent!
 
-			self.fps_target  = fps_target		# Hz
-			self.threadSleep = 1/fps_target		# seconds
-			
-			self.calcRotations = calcRotations
-				
-			self.postFunctionArgs = postFunctionArgs
-			self.postFunctionArgs['idName'] = idName
-			if (postFunction is None):
-				self.postFunction = olab_utils._passFunction
-			else:
-				self.postFunction = postFunction
+		self.idName   = idName
+		self.decorationID = None
 
-			self.config = configDict
-			# self.color = color
-			
-			self.ids_of_interest = ids_of_interest
-			
-			self.fps = _make_fps_dict(recheckInterval=5)
+		self.res_rows = res_rows
+		self.res_cols = res_cols
+		self.resolution = f'{res_cols}x{res_rows}'
 
-			self.deque = deque(maxlen=1)
-			self.deque.append({'ids': None, 'corners': [], 'centers': [], 'rotations': []})
+		self.fps_target  = fps_target		# Hz
+		self.threadSleep = 1/fps_target		# seconds
 
-			(major, minor, sub) = cv2.__version__.split(".")[:3]
-			if ((int(major) >= 4) and (int(minor) >= 7)):
-				self.cv2dict   = cv2.aruco.getPredefinedDictionary(olab_utils.ARUCO_DICT[idName]['dict'])
-				self.cv2params = cv2.aruco.DetectorParameters()
-			else:
-				# This is old:
-				self.cv2dict   = cv2.aruco.Dictionary_get(olab_utils.ARUCO_DICT[idName]['dict'])
-				self.cv2params = cv2.aruco.DetectorParameters_create()
-					
-			self.isThreadActive = False
+		self.calcRotations = calcRotations
 
-		except Exception as e:
-			self.camObject.logger.log(f'Error in aruco init: {e}.', severity=olab_utils.SEVERITY_ERROR)
-		
+		self.postFunctionArgs = postFunctionArgs
+		self.postFunctionArgs['idName'] = idName
+		if (postFunction is None):
+			self.postFunction = olab_utils._passFunction
+		else:
+			self.postFunction = postFunction
+
+		self.config = configDict
+		# self.color = color
+
+		self.ids_of_interest = ids_of_interest
+
+		self.fps = _make_fps_dict(recheckInterval=5)
+
+		self.deque = deque(maxlen=1)
+		self.deque.append({'ids': None, 'corners': [], 'centers': [], 'rotations': []})
+
+		(self.cv2dict, self.cv2params) = olab_utils._resolveArucoDictAndParams(
+			olab_utils.ARUCO_DICT[idName]['dict'])
+		self.arucoDetector = cv2.aruco.ArucoDetector(self.cv2dict, self.cv2params)
+
+		self.isThreadActive = False
+
 
 	def _decorate(self, img, **kwargs):
 		olab_utils.arucoDrawDetections(img, self.deque[0]['corners'],
@@ -129,11 +120,12 @@ class _Aruco():
 				img = self.camObject.getFrameCopy(colorOption='gray', resOption=resOption)
 								
 				# `corners` will be of same scale as original (captured) image
-				(corners, ids, rejected, centers, rotations) = olab_utils.arucoDetectMarkers(img, 
-																		 self.cv2dict, 
+				(corners, ids, rejected, centers, rotations) = olab_utils.arucoDetectMarkers(img,
+																		 self.cv2dict,
 																		 self.cv2params,
 																		 img_x_y  = img_x_y,
-																		 orig_x_y = orig_x_y)
+																		 orig_x_y = orig_x_y,
+																		 detector = self.arucoDetector)
 	
 				'''
 				centers = []
@@ -263,7 +255,6 @@ class _Aruco():
 				self.color = color
 		except Exception as e:
 			self.camObject.logger.log(f'Error in aruco edit: {e}.', severity=olab_utils.SEVERITY_ERROR)
-
 
 class _Calibrate():
 	"""Internal camera calibration feature class using checkerboard pattern detection.
@@ -750,14 +741,282 @@ class _Barcode():
 		
 	def edit(self, fps_target=None, res_rows=None, res_cols=None):
 		self.camObject.logger.log('Sorry, barcode editing is not supported.', severity=olab_utils.SEVERITY_WARNING)
-		
+
+
+class _QRCode():
+	"""Internal QR-code detection feature class, using a selectable decoder.
+
+	Unlike `_Barcode` (generic pyzbar-based 1D/2D scanning), this class decodes only
+	QR codes and lets you pick the decoder. Like `_Aruco` and `_Barcode`, it reports
+	raw detections only (payload data + corners) -- it does NOT compute distance or
+	pose itself. To get distance/pose, call olab_utils.findTagPose() (and, for a
+	world-frame position, olab_utils.findTagPoseGlobal()/findCameraPoseGlobal())
+	from your own postFunction with your own known tag size, exactly the way ArUco
+	pose is computed in docs/usage_guide.md -- these work for any single planar
+	tag's 4 corners, ArUco or QR.
+
+	Corner order matters if you compute pose from `corners` yourself: it must be
+	anchored to the QR symbol's own frame, not to image-space geometry, or recovered
+	yaw will jump by multiples of 90 degrees depending on viewing angle instead of
+	tracking the physical tag.
+
+	- decoder='cv2' (default): cv2.QRCodeDetector's corner order is derived from the
+	  QR's finder patterns and is symbol-frame-anchored (empirically verified: rotating
+	  the physical tag rotates the *labeling* of the returned corners in lockstep, not
+	  their image-relative position). Safe to use for pose.
+	- decoder='pyzbar': its polygon corner order is NOT reliably symbol-frame-anchored
+	  (empirically inconsistent under physical rotation). Corners are still returned
+	  (and are fine for drawing/decoration, or for a "is a tag present" check), but if
+	  you compute pose from them, only distance/position are meaningful -- orientation
+	  will not reliably track the physical tag. Prefer decoder='cv2' when you need pose.
+
+	Attributes:
+		camObject: Parent Camera instance managing this QR detector.
+		idName (str): Unique identifier for this QR detection instance.
+		decoder (str): 'cv2' or 'pyzbar'.
+		ids_of_interest (list or None): If given, only these decoded payloads are
+			reported at all; None reports every decoded payload.
+		deque (collections.deque): Thread-safe storage for latest detection results --
+			{'data', 'corners', 'color'}, with 'data'/'corners' parallel lists.
+
+	Key Methods:
+		start(): Launches QR detection thread.
+		stop(): Terminates detection thread and cleans up resources.
+	"""
+	def __init__(self, camObject, idName, decoder, ids_of_interest,
+				 res_rows, res_cols, fps_target, postFunction, postFunctionArgs, color):
+		# Set first, unconditionally, so that even if construction fails
+		# partway through (e.g. an invalid decoder, below), this object is
+		# never left without the attribute addQR() checks on a later retry --
+		# a caller can just call addQR() again with a corrected decoder.
+		self.isThreadActive = False
+
+		try:
+			self.camObject = camObject  # This is the parent!
+
+			self.idName = idName
+			self.decorationID = None
+
+			self.decoder = decoder
+			if (self.decoder == 'cv2'):
+				self._qrDetector = cv2.QRCodeDetector()
+			elif (self.decoder == 'pyzbar'):
+				# https://pypi.org/project/pyzbar/
+				from pyzbar import pyzbar
+				self.pyzbar = pyzbar
+			else:
+				raise ValueError(f"Unknown QR decoder '{decoder}'; expected 'cv2' or 'pyzbar'")
+
+			self.ids_of_interest = ids_of_interest
+
+			self.res_rows = res_rows
+			self.res_cols = res_cols
+			self.resolution = f'{res_cols}x{res_rows}'
+
+			self.fps_target  = fps_target		# Hz
+			self.threadSleep = 1/fps_target		# seconds
+
+			# Copy (rather than mutate in place) so that a caller-supplied
+			# dict is never modified out from under them, and so that two
+			# QR instances started with the same default (None/{}) never end
+			# up sharing -- and clobbering -- the same 'idName' entry.
+			self.postFunctionArgs = dict(postFunctionArgs) if postFunctionArgs else {}
+			self.postFunctionArgs['idName'] = idName
+			if (postFunction is None):
+				self.postFunction = olab_utils._passFunction
+			else:
+				self.postFunction = postFunction
+
+			self.color = color
+
+			self.fps = _make_fps_dict(recheckInterval=5)
+
+			self.deque = deque(maxlen=1)
+			self.deque.append({'data': [], 'corners': [], 'color': self.color})
+
+		except Exception as e:
+			self.camObject.logger.log(f'Error in QRCode init: {e}.', severity=olab_utils.SEVERITY_ERROR)
+
+
+	def _decorate(self, img, **kwargs):
+		olab_utils.decorateQR(img, self.deque[0]['corners'], self.deque[0]['data'],
+							   self.deque[0]['color'], addText=True)
+
+
+	def _decodeCv2(self, img):
+		'''Returns a list of (payload, corners_4x2) tuples.'''
+		detections = []
+		ret, decoded_info, points, _ = self._qrDetector.detectAndDecodeMulti(img)
+		if ret and (points is not None):
+			for i, data in enumerate(decoded_info):
+				if not data:
+					continue   # located but not decoded -- nothing to report
+				corners = np.asarray(points[i], dtype=np.float64).reshape(4, 2)
+				detections.append((data, corners))
+		return detections
+
+
+	def _decodePyzbar(self, img):
+		'''Returns a list of (payload, corners_4x2) tuples.'''
+		detections = []
+		codeList = self.pyzbar.decode(img, symbols=[self.pyzbar.ZBarSymbol.QRCODE])
+		for d in codeList:
+			data = d.data.decode('utf-8')
+			poly = d.polygon
+			if (len(poly) == 4):
+				corners = np.array([[p.x, p.y] for p in poly], dtype=np.float64)
+			else:
+				# Not a clean quadrilateral -- fall back to the axis-aligned rect.
+				corners = np.array([
+					[d.rect.left,                  d.rect.top],
+					[d.rect.left + d.rect.width,   d.rect.top],
+					[d.rect.left + d.rect.width,   d.rect.top + d.rect.height],
+					[d.rect.left,                  d.rect.top + d.rect.height],
+				], dtype=np.float64)
+			detections.append((data, corners))
+		return detections
+
+
+	@staticmethod
+	def _scaleCorners(corners, img_x_y, orig_x_y):
+		'''
+		Scale corner coordinates from the (possibly downscaled) processing
+		resolution back to the original capture resolution -- same approach
+		as olab_utils.arucoDetectMarkers()'s xscale/yscale, so `corners` is
+		always reported in the original capture frame's coordinate system
+		regardless of res_rows/res_cols.
+		'''
+		xscale = orig_x_y[0] / img_x_y[0]
+		yscale = orig_x_y[1] / img_x_y[1]
+		scaled = corners.copy()
+		scaled[:, 0] *= xscale
+		scaled[:, 1] *= yscale
+		return scaled
+
+
+	def _thread_QRCode(self):
+		'''
+		THIS IS A THREAD
+		rate is in [Hz] (frames/second)
+		self.camObject is the parent (from Camera).
+		We are in self.camObject.qr[idName]
+		'''
+		self.isThreadActive = True
+
+		while self.camObject.camOn:
+			try:
+				timeNow = time.time()
+
+				# Throttle things if we're going faster than capture speed
+				if (self.fps.actual >= self.camObject.fps['capture'].actual):
+					with self.camObject.condition:
+						self.camObject.condition.wait(1)   # added a timeout, just to keep from getting permanently stuck here
+
+				# `corners` (below) will be scaled back to this original size.
+				img_x_y  = (self.res_cols, self.res_rows)
+				orig_x_y = (self.camObject.res_cols, self.camObject.res_rows)
+				if (img_x_y == orig_x_y):
+					resOption = None
+				else:
+					resOption = img_x_y
+
+				img = self.camObject.getFrameCopy(resOption=resOption)
+
+				if (self.decoder == 'cv2'):
+					rawDetections = self._decodeCv2(img)
+				else:
+					rawDetections = self._decodePyzbar(img)
+
+				data, corners = [], []
+				for (payload, cornerArr) in rawDetections:
+					if (self.ids_of_interest is not None) and (payload not in self.ids_of_interest):
+						continue
+					if (img_x_y != orig_x_y):
+						cornerArr = self._scaleCorners(cornerArr, img_x_y, orig_x_y)
+					data.append(payload)
+					corners.append(cornerArr)
+
+				# Add detection info to deque:
+				self.deque.append({'data': data, 'corners': corners, 'color': self.color})
+
+				# Do some post-processing:
+				self.postFunction(self.postFunctionArgs)
+
+				self.camObject.calcFramerate(self.fps, 'qr')
+
+				self.camObject.reachback_pubCamStatus()
+			except Exception as e:
+				self.stop()
+				self.camObject.logger.log(f'Error in QRCode {self.idName} thread: {e}', severity=olab_utils.SEVERITY_ERROR)
+				break
+
+			if (not self.isThreadActive):
+				self.stop()
+				self.camObject.logger.log(f'Stopping QRCode {self.idName} thread.', severity=olab_utils.SEVERITY_INFO)
+				break
+
+			# Simplified version of rospy.sleep
+			delta = max(0, timeNow + self.threadSleep - time.time())
+			if (delta > 0):
+				time.sleep(delta)
+
+		# If while loop stops, shut down QR code detection:
+		self.stop()
+
+
+	def start(self):
+		"""Start QR-code detection thread at the configured frame rate.
+
+		Launches a daemon thread that continuously captures frames, decodes QR codes,
+		and stores detection results (payload data + corners). The thread automatically
+		throttles itself to match the camera's capture rate. Registers a decoration
+		function to visualize detected QR codes on the video stream.
+		"""
+		try:
+			self.decorationID = int(time.time()*1000)
+			self.camObject.dec['dequeAdd'].append({'function': self._decorate, 'idName': self.idName, 'decorationID': self.decorationID})
+
+			self.camObject.logger.log(f'Starting QRCode {self.idName} thread at {self.fps_target} fps (decoder={self.decoder})', severity=olab_utils.SEVERITY_INFO)
+
+			qrThread = threading.Thread(target=self._thread_QRCode, args=())
+			qrThread.daemon = True    # Allows your main script to exit, shutting down this thread, too.
+			qrThread.start()
+
+		except Exception as e:
+			self.camObject.logger.log(f'Error in QRCode start: {e}.', severity=olab_utils.SEVERITY_ERROR)
+
+
+	def stop(self):
+		"""Stop QR-code detection thread and clean up resources.
+
+		Signals the detection thread to terminate, removes associated decorations,
+		and clears the detection deque. Safe to call multiple times.
+		"""
+		try:
+			if (self.idName in self.camObject.qr):
+				self.camObject.dec['dequeRemove'].append(self.decorationID)
+
+				self.camObject.logger.log(f'Stopping QRCode {self.idName} thread.', severity=olab_utils.SEVERITY_INFO)
+
+				self.isThreadActive = False
+				self.deque.clear()
+			else:
+				self.camObject.logger.log(f'In stop, QRCode {self.idName} name is not defined', severity=olab_utils.SEVERITY_ERROR)
+		except Exception as e:
+			self.camObject.logger.log(f'Error in QRCode stop: {e}.', severity=olab_utils.SEVERITY_ERROR)
+
+
+	def edit(self, fps_target=None, res_rows=None, res_cols=None):
+		self.camObject.logger.log('Sorry, QRCode editing is not supported.', severity=olab_utils.SEVERITY_WARNING)
+
 
 class _FaceDetect():
-	"""Internal face detection feature class using OpenCV DNN models.
+	"""Internal face detection feature class using cv2.FaceDetectorYN (YuNet).
 
-	This class detects human faces in camera frames using pre-trained deep neural
-	network models (Caffe or TensorFlow). Detection runs continuously in a separate
-	thread at a specified frame rate, supporting both CPU and GPU inference.
+	This class detects human faces (plus 5 facial landmark points per face) in
+	camera frames using OpenCV's built-in YuNet DNN model. Detection runs
+	continuously in a separate thread at a specified frame rate, supporting
+	both CPU and GPU inference.
 
 	Attributes:
 		camObject: Parent Camera instance managing this face detector.
@@ -769,9 +1028,10 @@ class _FaceDetect():
 		postFunctionArgs (dict): Arguments passed to the post-processing callback.
 		color (tuple): RGB color for visualization of detected faces.
 		conf_threshold (float): Minimum confidence threshold for face detections.
-		dnn (str): DNN backend type ("caffe" or "tensorflow").
+		model_name (str): YuNet ONNX model filename (e.g. "face_detection_yunet_2023mar.onnx").
 		device (str): Computation device ("cpu" or "gpu").
 		modelPath (str): Directory path containing DNN model files.
+		faceDetector (cv2.FaceDetectorYN): Cached detector, built once at construction.
 		deque (collections.deque): Thread-safe storage for latest detection results.
 		fps (dict): Frame rate tracking metrics for this detector.
 		isThreadActive (bool): Flag indicating if detection thread is running.
@@ -780,7 +1040,7 @@ class _FaceDetect():
 		start(): Launches face detection thread.
 		stop(): Terminates detection thread and cleans up resources.
 	"""
-	def __init__(self, camObject, idName, res_rows, res_cols, fps_target, postFunction, postFunctionArgs, color, conf_threshold, dnn, device, modelPath):
+	def __init__(self, camObject, idName, res_rows, res_cols, fps_target, postFunction, postFunctionArgs, color, conf_threshold, model_name, device, modelPath):
 		"""Initialize face detection feature.
 
 		Args:
@@ -793,96 +1053,82 @@ class _FaceDetect():
 			postFunctionArgs (dict): Arguments for post-processing callback.
 			color (tuple): RGB color tuple for face bounding box visualization.
 			conf_threshold (float): Minimum confidence (0.0-1.0) for detections.
-			dnn (str): Neural network backend ("caffe" or "tensorflow").
+			model_name (str): YuNet ONNX model filename, resolved against modelPath
+				(e.g. "face_detection_yunet_2023mar.onnx" (fp32, default) or
+				"face_detection_yunet_2023mar_int8.onnx" (smaller/faster, lower accuracy)).
 			device (str): Computation device ("cpu" or "gpu").
 			modelPath (str): Path to directory containing model files, or None for default.
+
+		Raises:
+			Exception: any failure while resolving/loading the YuNet model (missing/
+				corrupt file, unsupported OpenCV build, unavailable GPU device, etc)
+				propagates directly -- deliberately not caught/logged-only here, so a
+				broken construction can never leave a live entry in
+				Camera.facedetect with no started thread. Camera.addFaceDetect()'s own
+				try/except is the single place this surfaces as one actionable error.
 		"""
-		try:
-			# https://learnopencv.com/face-detection-opencv-dlib-and-deep-learning-c-python/
-			# https://pyimagesearch.com/2018/02/26/face-detection-with-opencv-and-deep-learning/
-			# https://pyimagesearch.com/2018/09/24/opencv-face-recognition/
-			# https://github.com/spmallick/learnopencv/tree/master/FaceDetectionComparison
-				
-			self.camObject = camObject  # This is the parent!
-								
-			self.idName   = idName
-			self.decorationID = None
-			
-			self.res_rows = res_rows
-			self.res_cols = res_cols		
-			self.resolution = f'{res_cols}x{res_rows}'
+		# https://docs.opencv.org/4.x/df/d20/classcv_1_1FaceDetectorYN.html
+		# https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet
 
-			self.fps_target  = fps_target		# Hz
-			self.threadSleep = 1/fps_target		# seconds
-				
-			self.postFunctionArgs = postFunctionArgs
-			self.postFunctionArgs['idName'] = idName
-			if (postFunction is None):
-				self.postFunction = olab_utils._passFunction
-			else:
-				self.postFunction = postFunction
+		self.camObject = camObject  # This is the parent!
 
-			if (modelPath):
-				self.modelPath = modelPath
-			else:
-				# Use DNN models from the package installation directory
-				module_dir = os.path.dirname(os.path.abspath(__file__))
-				self.modelPath = os.path.join(module_dir, 'cv2_dnn_models')
+		self.idName   = idName
+		self.decorationID = None
 
+		self.res_rows = res_rows
+		self.res_cols = res_cols
+		self.resolution = f'{res_cols}x{res_rows}'
 
-			self.color = color
-			
-			self.conf_threshold = conf_threshold
-			self.dnn            = dnn
-			self.device         = device
-			
-			self.fps = _make_fps_dict(recheckInterval=5)
+		self.fps_target  = fps_target		# Hz
+		self.threadSleep = 1/fps_target		# seconds
 
-			self.deque = deque(maxlen=1)
-			self.deque.append({'confidence': [], 'corners': [], 'color': self.color})
-														
-			self.isThreadActive = False
+		self.postFunctionArgs = postFunctionArgs
+		self.postFunctionArgs['idName'] = idName
+		if (postFunction is None):
+			self.postFunction = olab_utils._passFunction
+		else:
+			self.postFunction = postFunction
 
-		except Exception as e:
-			self.camObject.logger.log(f'Error in facedetect init: {e}.', severity=olab_utils.SEVERITY_ERROR)
+		if (modelPath):
+			self.modelPath = modelPath
+		else:
+			# Use DNN models from the package installation directory
+			module_dir = os.path.dirname(os.path.abspath(__file__))
+			self.modelPath = os.path.join(module_dir, 'cv2_dnn_models')
+
+		self.color = color
+
+		self.conf_threshold = conf_threshold
+		self.model_name      = model_name
+		self.device          = device
+
+		self.fps = _make_fps_dict(recheckInterval=5)
+
+		self.deque = deque(maxlen=1)
+		self.deque.append({'confidence': [], 'corners': [], 'landmarks': [], 'color': self.color})
+
+		self.isThreadActive = False
+
+		if (device == 'cpu'):
+			backend_id = cv2.dnn.DNN_BACKEND_DEFAULT
+			target_id  = cv2.dnn.DNN_TARGET_CPU
+		else:
+			backend_id = cv2.dnn.DNN_BACKEND_CUDA
+			target_id  = cv2.dnn.DNN_TARGET_CUDA
+
+		modelFile = os.path.join(self.modelPath, model_name)
+		self.faceDetector = olab_utils._resolveFaceDetector(
+			modelFile, (res_cols, res_rows), conf_threshold, backend_id, target_id)
 
 
 	def _decorate(self, img, **kwargs):
 		# print('idName:', idName, 'facedetect[idName]:', self.facedetect[idName].deque[0])
 		# print(self.facedetect[idName].deque[0])
-		olab_utils.decorateFaceDetect(img, 
-								   self.deque[0]['confidence'], 
-								   self.deque[0]['corners'], 
+		olab_utils.decorateFaceDetect(img,
+								   self.deque[0]['confidence'],
+								   self.deque[0]['corners'],
 								   self.deque[0]['color'], addText=True)
 
-			
-	def _blobCaffe(self, frameCopy):
-		return cv2.dnn.blobFromImage(frameCopy, 1.0, (300, 300), [104, 117, 123], False, False,)
-		
-	def _blobTF(self, frameCopy):
-		return cv2.dnn.blobFromImage(frameCopy, 1.0, (300, 300), [104, 117, 123], True, False,)
-		
-	def _detectFaceOpenCVDnn(self, frameCopy, blobFunction, net):
-		frameHeight = frameCopy.shape[0]
-		frameWidth = frameCopy.shape[1]
-		blob = blobFunction(frameCopy)   # self._blobCaffe or self._blobTF
-
-		net.setInput(blob)
-		detections = net.forward()
-		confidence = []
-		bboxes     = []
-		for i in range(detections.shape[2]):
-			conf = detections[0, 0, i, 2]
-			if conf > self.conf_threshold:
-				x1 = int(detections[0, 0, i, 3] * frameWidth)
-				y1 = int(detections[0, 0, i, 4] * frameHeight)
-				x2 = int(detections[0, 0, i, 5] * frameWidth)
-				y2 = int(detections[0, 0, i, 6] * frameHeight)
-				bboxes.append([(x1, y1), (x2, y2)])
-				confidence.append(conf)
-
-		return confidence, bboxes
-    		
 
 	def _thread_FaceDetect(self):
 
@@ -890,38 +1136,23 @@ class _FaceDetect():
 		THIS IS A THREAD
 		rate is in [Hz] (frames/second)
 		self.camObject is the parent (from Camera).
-		We are in self.camObject.facedetect['default] 
+		We are in self.camObject.facedetect['default]
 		'''
 		self.isThreadActive = True
 
-		# OpenCV DNN supports 2 networks.
-		# 1. FP16 version of the original Caffe implementation ( 5.4 MB )
-		# 2. 8 bit Quantized version using TensorFlow ( 2.7 MB )
-
-		if (self.dnn == "caffe"):
-			modelFile  = f"{self.modelPath}/res10_300x300_ssd_iter_140000_fp16.caffemodel"
-			configFile = f"{self.modelPath}/deploy.prototxt"
-			net = cv2.dnn.readNetFromCaffe(configFile, modelFile)
-			blobFunction = self._blobCaffe
+		img_x_y  = (self.res_cols, self.res_rows)
+		orig_x_y = (self.camObject.res_cols, self.camObject.res_rows)
+		if (img_x_y == orig_x_y):
+			resOption = None
 		else:
-			modelFile  = f"{self.modelPath}/opencv_face_detector_uint8.pb"
-			configFile = f"{self.modelPath}/opencv_face_detector.pbtxt"
-			net = cv2.dnn.readNetFromTensorflow(modelFile, configFile)
-			blobFunction = self._blobTF
-
-		if (self.device == "cpu"):
-			net.setPreferableBackend(cv2.dnn.DNN_TARGET_CPU)
-		else:
-			net.setPreferableBackend(cv2.dnn.DNN_BACKEND_CUDA)
-			net.setPreferableTarget(cv2.dnn.DNN_TARGET_CUDA)
-
+			resOption = img_x_y
 
 		while self.camObject.camOn:
 			try:
 				timeNow = time.time()
-							
+
 				# FIXME -- It would be nice to cut out the `if` statements...
-				
+
 				# Throttle things if we're going faster than capture speed
 				if (self.fps.actual >= self.camObject.fps['capture'].actual):
 					with self.camObject.condition:
@@ -936,42 +1167,34 @@ class _FaceDetect():
 					# break
 				'''
 
-				confidence, corners = self._detectFaceOpenCVDnn(self.camObject.getFrameCopy(), blobFunction, net)
-				
-				'''
-				for detections in codeList:
-					data.append(str(detections.data, 'utf-8'))
-					codeTypes.append(detections.type)
-					qualities.append(detections.quality)
-					rect = [(int(detections.rect.left), int(detections.rect.top)), 
-							(int(detections.rect.left+detections.rect.width), int(detections.rect.top+detections.rect.height))]
-					corners.append(rect)
-				'''
-				
+				img = self.camObject.getFrameCopy(resOption=resOption)
+				(confidence, corners, landmarks) = olab_utils.detectFaces(
+					img, self.faceDetector, img_x_y=img_x_y, orig_x_y=orig_x_y)
+
 				# Add detection info to deque:
-				self.deque.append({'confidence': confidence, 'corners': corners, 'color': self.color})
-								
+				self.deque.append({'confidence': confidence, 'corners': corners, 'landmarks': landmarks, 'color': self.color})
+
 				# Do some post-processing:
 				self.postFunction(self.postFunctionArgs)
-				
+
 				self.camObject.calcFramerate(self.fps, 'facedetect')
 
 				self.camObject.reachback_pubCamStatus()
 			except Exception as e:
 				self.stop()
-				self.camObject.logger.log(f'Error in facedetect {self.idName} thread: {e}', severity=olab_utils.SEVERITY_ERROR)				
+				self.camObject.logger.log(f'Error in facedetect {self.idName} thread: {e}', severity=olab_utils.SEVERITY_ERROR)
 				break
-	
+
 			if (not self.isThreadActive):
 				self.stop()
 				self.camObject.logger.log(f'Stopping facedetect {self.idName} thread.', severity=olab_utils.SEVERITY_INFO)
 				break
-	
+
 			# Simplified version of rospy.sleep
 			delta = max(0, timeNow + self.threadSleep - time.time())
 			if (delta > 0):
 				time.sleep(delta)
-				
+
 		# If while loop stops, shut down facedetect:
 		self.stop()
 
