@@ -43,33 +43,78 @@ write those frames to WAV through the existing recording API.
 1. In `packages/olab_audio/src/olab_audio/device.py`, add a public
    `get_loopback_input_devices()` helper. Query sinks and sources using a
    short-lived `pulsectl.Pulse` client, identify each sink's monitor source,
-   and return only monitor sources that can be matched to a safe PortAudio
-   capture device. Return the existing selection fields plus loopback metadata
-   such as `deviceType: "loopback"`, the friendly sink/source names, and an
-   `isDefault` flag for the server's default sink.
-2. Build the source-to-PortAudio matching in a small private helper with
-   deterministic normalization and no ambient device mutation. Enumerate only
-   through the existing safe `get_input_devices()` rules, so a monitor source
-   can never reintroduce filtered ALSA plugin names. If Pulse exposes a monitor
-   but PortAudio has no usable matching input device, omit it from the
-   selectable result and expose a diagnostic message/error rather than
-   returning an unusable index.
-3. Export the new helper from `olab_audio.__init__` and document it in the
-   package README with the normal lifecycle:
-   `loopback = get_loopback_input_devices()[0]`; `Mic(deviceID=loopback["deviceID"])`;
-   `start()`; optional `recordStart(filename=...)`; `recordStop()`; `stop()`.
-   Document that capture only receives audio routed to that sink, may be
-   silent when nothing is playing, and has the sink's native device rate.
-4. Keep `Mic`'s public constructor and callback semantics unchanged. A
-   loopback entry is simply a valid capture-device selection, so NumPy
-   reachback data, `mic.db`, time limits, channels, same-rate recording, and
-   the established cross-rate failure behavior work exactly as they do for a
-   microphone.
-5. If source/sink inspection reveals that stable source-to-PortAudio matching
-   needs an explicit PulseAudio source selection before opening the stream,
-   add that narrowly-scoped configuration API alongside the existing
-   source-port functions and require callers to stop capture before changing
-   it. Do not silently change the user's default source or sink.
+   and return them alongside the **one** shared, safe PortAudio capture
+   device that represents Pulse/PipeWire-routed audio on this host (the ALSA
+   host API's `pipewire`/`pulse`/`default` alias — confirmed during Stage 1
+   implementation planning that PortAudio's ALSA host API does not expose a
+   distinct device per Pulse sink/source, only this one shared alias; only
+   accept the alias when the host API is actually ALSA). Every returned
+   entry therefore shares the same `deviceID` — this is expected, not a
+   defect — since discovery alone cannot select between sinks. Return the
+   existing selection fields plus loopback metadata such as
+   `deviceType: "loopback"`, the friendly sink/source names, and an
+   `isDefault` flag for whether the sink is the server's default sink
+   (informational only — independent of which source is actually selected
+   for capture, see step 2).
+2. **Selection routes only this process's own capture stream -- it never
+   touches the server-wide default.** *(Revised after real PipeWire
+   hardware testing showed the earlier default-source-switch design didn't
+   actually work: the capture stream kept reading the physical microphone
+   even with the monitor source switched to default and at 100% volume.
+   The user's own successful manual workaround -- moving only their
+   recording app's active stream to the monitor via pavucontrol's
+   Recording tab -- pointed at the real mechanism: PulseAudio's per-stream
+   "source-output" object, not the source-wide default.)* Add
+   `start_loopback_capture(mic, source, *, timeout=2.0, poll_interval=0.05,
+   **mic_start_kwargs)` alongside the existing source-port functions. It
+   snapshots existing `pulsectl` source-outputs, calls
+   `mic.start(**mic_start_kwargs)` itself (so `mic` must not already be
+   started), then bounded-polls for the one new source-output positively
+   identified as this process's (PID match via its own or its owning
+   client's proplist -- an entry present in the snapshot, or one whose
+   identity can't be confirmed, is never a candidate), and moves *only*
+   that source-output to the target monitor via `pulsectl`'s
+   `source_output_move()`. Any failure (already started, `mic.start()`
+   failing, timeout, ambiguity, or `source_output_move()` itself raising)
+   stops `mic` and raises rather than leaving it silently capturing the
+   wrong source. A non-raising `source_output_move()` call is trusted as
+   successful on its own -- *(round-6 finding, from real PipeWire
+   hardware testing)* an earlier design additionally re-checked the
+   source-output's reported attached-source afterward, but that field was
+   found to be unreliable on at least one `pipewire-pulse` version (it
+   read identically before and after a `pactl move-source-output` that a
+   live-audio check confirmed had actually worked), so comparing against
+   it produced false failures and was removed rather than patched. No
+   restoration step exists or is needed: PulseAudio destroys the routed
+   source-output automatically when `mic.stop()` closes the stream, so
+   unlike the earlier default-switch design, nothing persists afterward.
+3. Export the new helpers from `olab_audio.__init__` and document them in the
+   package README with the real lifecycle:
+   `loopback = get_loopback_input_devices()[0]`;
+   `mic = Mic(deviceID=loopback["deviceID"])`;
+   `start_loopback_capture(mic, loopback)` (starts `mic` and routes only
+   this stream); optional `recordStart(filename=...)`; `recordStop()`;
+   `mic.stop()` (also removes this stream's source-output -- nothing to
+   restore). Document that all loopback entries share one `deviceID` and
+   `start_loopback_capture()` alone determines which sink is captured; that
+   only this stream's routing changes, never the system default or another
+   application's capture; that capture only receives audio routed to that
+   sink, may be silent when nothing is playing; and that it has the sink's
+   native device rate.
+4. Keep `Mic`'s public constructor and callback semantics unchanged --
+   confirmed on reconsideration after the redesign, not just carried
+   forward: `start_loopback_capture()` only calls `Mic`'s existing public
+   `start()`/`stop()`/`micOn`, so a loopback entry is still simply a valid
+   capture-device selection once routed. NumPy reachback data, `mic.db`,
+   time limits, channels, same-rate recording, and the established
+   cross-rate failure behavior work exactly as they do for a microphone.
+5. Simultaneous multi-sink capture is no longer architecturally excluded
+   (each `Mic`'s source-output routes independently, unlike the removed
+   single-default-source design) but is not tested or claimed as working
+   in this task -- a candidate for future manual verification, not a
+   promise made here. Not safe against another thread/process opening a
+   *new* capture stream during the snapshot-to-identify window -- handled
+   by failing closed (the ambiguity path), not locking.
 
 ## Implementation steps
 
@@ -96,9 +141,13 @@ write those frames to WAV through the existing recording API.
 - Run `pytest packages/olab_audio/tests -v` with fake device/Pulse fixtures;
   hardware-dependent monitor discovery must not run in generic CI.
 - Run the documented manual Linux matrix on at least PipeWire and, where
-  available, PulseAudio. Confirm the loopback device is selectable, records
-  speaker output, does not alter default routing, and leaves normal mic
-  enumeration/recording unchanged.
+  available, PulseAudio: play speaker audio while a person speaks near the
+  physical microphone; the saved WAV must contain the speaker audio and
+  exclude the room speech; verify via `pavucontrol` or `pactl list short
+  source-outputs` that *this process's* capture stream -- not the system
+  default source -- is attached to the monitor; confirm normal mic
+  recording and the system's actual default source are unaffected after a
+  loopback session ends.
 - Install/test core-only and `[resample]` environments to verify same-rate
   loopback WAV recording needs no new heavyweight dependency and cross-rate
   behavior remains explicit.
@@ -113,3 +162,8 @@ write those frames to WAV through the existing recording API.
 - A source may exist but produce silence because no audio is routed to its
   sink: report selection metadata and document this as expected runtime state,
   not a recording failure.
+- Identifying "this process's" newly-created source-output among possibly
+  several is inherently racy: mitigated by snapshotting before `mic.start()`,
+  requiring a positive PID match (own or owning-client proplist) rather than
+  guessing from uniqueness alone, and failing closed (stopping `mic`, raising)
+  on timeout or ambiguity instead of silently routing the wrong stream.

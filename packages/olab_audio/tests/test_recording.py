@@ -1,7 +1,9 @@
 import numpy as np
 import pytest
 
-from olab_audio.recording import Recording_bytes, Recording_np, append, saveAudio
+import pyaudio
+
+from olab_audio.recording import Recording_bytes, Recording_np, append, normalize_wav, saveAudio
 
 
 def test_append_concatenates_same_framerate_arrays():
@@ -338,3 +340,191 @@ def test_save_audio_bytes_list_uses_stdlib_wave(tmp_path):
     from wave import open as open_wave
     with open_wave(str(tmp_path / "out_bytes.wav"), "rb") as wf:
         assert wf.getframerate() == 8000
+
+
+def _read_wav_pcm(path):
+    from wave import open as open_wave
+    with open_wave(str(path), "rb") as wf:
+        raw = wf.readframes(wf.getnframes())
+    return np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32767.0
+
+
+def test_normalize_wav_scales_peak_to_0dbfs(tmp_path):
+    quiet = (np.array([0.0, 0.25, -0.25, 0.5, -0.5], dtype=np.float32) * 32767.0).astype(np.int16)
+    path = tmp_path / "quiet.wav"
+    from wave import open as open_wave
+    with open_wave(str(path), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(44100)
+        wf.writeframes(quiet.tobytes())
+
+    normalize_wav(str(path))
+
+    pcm = _read_wav_pcm(path)
+    assert np.max(np.abs(pcm)) == pytest.approx(1.0, abs=1e-4)
+    # Relative shape between samples must be preserved -- normalize_wav()
+    # is a pure gain change, not a redistribution of amplitudes.
+    assert pcm[1] == pytest.approx(-pcm[2], abs=1e-4)
+
+
+def test_normalize_wav_non_default_amp_reaches_exact_peak(tmp_path):
+    """Real bug found in review: np.clip(..., -1.0, 1.0) silently capped
+    any amp > 1.0 at 1.0, contradicting the "reaches +-amp" contract.
+    amp <= 1.0 must still reach that exact peak, uncapped."""
+    quiet = (np.array([0.1, -0.1], dtype=np.float32) * 32767.0).astype(np.int16)
+    path = tmp_path / "quiet.wav"
+    from wave import open as open_wave
+    with open_wave(str(path), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(44100)
+        wf.writeframes(quiet.tobytes())
+
+    normalize_wav(str(path), amp=0.5)
+
+    assert np.max(np.abs(_read_wav_pcm(path))) == pytest.approx(0.5, abs=1e-3)
+
+
+@pytest.mark.parametrize("bad_amp", [0, -1.0, 1.5, float('nan'), float('inf')])
+def test_normalize_wav_rejects_invalid_amp(tmp_path, bad_amp):
+    """amp > 1.0 can never actually be reached (16-bit PCM tops out at
+    1.0 == 0dBFS) and amp <= 0 / non-finite are meaningless -- all must
+    raise clearly rather than silently clip or misbehave."""
+    quiet = (np.array([0.1, -0.1], dtype=np.float32) * 32767.0).astype(np.int16)
+    path = tmp_path / "quiet.wav"
+    from wave import open as open_wave
+    with open_wave(str(path), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(44100)
+        wf.writeframes(quiet.tobytes())
+
+    with pytest.raises(ValueError, match="amp"):
+        normalize_wav(str(path), amp=bad_amp)
+
+
+def test_normalize_wav_can_write_to_a_separate_path(tmp_path):
+    quiet = (np.array([0.2, -0.2], dtype=np.float32) * 32767.0).astype(np.int16)
+    src = tmp_path / "in.wav"
+    dst = tmp_path / "out.wav"
+    from wave import open as open_wave
+    with open_wave(str(src), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(44100)
+        wf.writeframes(quiet.tobytes())
+
+    normalize_wav(str(src), out_filepath=str(dst))
+
+    assert np.max(np.abs(_read_wav_pcm(src))) == pytest.approx(0.2, abs=1e-4)  # untouched
+    assert np.max(np.abs(_read_wav_pcm(dst))) == pytest.approx(1.0, abs=1e-4)
+
+
+def test_normalize_wav_silent_file_is_a_no_op(tmp_path, capsys):
+    silent = np.zeros(10, dtype=np.int16)
+    path = tmp_path / "silent.wav"
+    from wave import open as open_wave
+    with open_wave(str(path), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(44100)
+        wf.writeframes(silent.tobytes())
+
+    normalize_wav(str(path))  # must not raise
+
+    assert "NOTE" in capsys.readouterr().out
+    assert np.max(np.abs(_read_wav_pcm(path))) == 0.0
+
+
+def test_recording_np_normalize_scales_peak_to_0dbfs():
+    rec = Recording_np(samplerateMic=44100, samplerateRec=44100)
+    rec.append(np.array([0.1, -0.1, 0.2, -0.2], dtype=np.float32))
+
+    rec.normalize()
+
+    assert np.max(np.abs(rec.ys)) == pytest.approx(1.0)
+    assert rec.ys[2] == pytest.approx(-rec.ys[3])
+
+
+def test_recording_np_normalize_flushes_resampler_tail_first():
+    """The resampler's still-buffered tail must be included in both the
+    peak search and the rescale -- otherwise normalize() would silently
+    leave unflushed samples at their original (unnormalized) level."""
+    pytest.importorskip("soxr", reason="soxr is not installed; install olab-audio[resample]")
+
+    rec = Recording_np(samplerateMic=44100, samplerateRec=22050)
+    rec.append(np.array([0.1] * 200, dtype=np.float32))
+
+    rec.normalize()
+
+    assert rec._flushed is True
+    assert np.max(np.abs(rec.ys)) == pytest.approx(1.0)
+
+
+def test_recording_bytes_normalize_scales_peak_to_0dbfs():
+    rec = Recording_bytes(samplerateMic=44100, samplerateRec=44100)
+    quiet = (np.array([0.1, -0.1, 0.2, -0.2], dtype=np.float32) * 32767.0).astype(np.int16)
+    rec.append(quiet.tobytes())
+
+    rec.normalize()
+
+    ys = rec._wave_ys()
+    assert np.max(np.abs(ys)) == pytest.approx(1.0, abs=1e-3)
+
+
+def test_recording_bytes_normalize_rejects_non_int16_format():
+    """Real bug found in review: normalize() unconditionally decoded/
+    re-encoded as int16 regardless of self.frmt, corrupting any other
+    PyAudio format (paInt24/paInt32/paFloat32/...) and leaving save()'s
+    WAV header (built from the original frmt) mismatched against the
+    now-int16 data. Must fail clearly instead."""
+    rec = Recording_bytes(samplerateMic=44100, samplerateRec=44100, frmt=pyaudio.paInt32)
+    rec.append(b'\x00\x00\x00\x00' * 4)
+
+    with pytest.raises(ValueError, match="paInt16"):
+        rec.normalize()
+
+
+@pytest.mark.parametrize("bad_amp", [0, -1.0, 1.5, float('nan'), float('inf')])
+def test_recording_np_normalize_rejects_invalid_amp(bad_amp):
+    rec = Recording_np(samplerateMic=44100, samplerateRec=44100)
+    rec.append(np.array([0.1, -0.1], dtype=np.float32))
+
+    with pytest.raises(ValueError, match="amp"):
+        rec.normalize(amp=bad_amp)
+
+
+def test_recording_np_normalize_non_default_amp_reaches_exact_peak():
+    rec = Recording_np(samplerateMic=44100, samplerateRec=44100)
+    rec.append(np.array([0.1, -0.1], dtype=np.float32))
+
+    rec.normalize(amp=0.5)
+
+    assert np.max(np.abs(rec.ys)) == pytest.approx(0.5)
+
+
+def test_recording_normalize_silent_recording_is_a_no_op(capsys):
+    rec = Recording_np(samplerateMic=44100, samplerateRec=44100)
+    rec.append(np.zeros(10, dtype=np.float32))
+
+    rec.normalize()  # must not raise
+
+    assert "NOTE" in capsys.readouterr().out
+    assert np.max(np.abs(rec.ys)) == 0.0
+
+
+def test_recording_np_normalize_before_save_writes_normalized_wav(tmp_path):
+    """The documented deferred-save workflow: recordStart() with no
+    filename, then Recording.normalize() before an explicit save()."""
+    rec = Recording_np(samplerateMic=44100, samplerateRec=44100,
+                        filepath=str(tmp_path), filename=None)
+    rec.append(np.array([0.1, -0.1], dtype=np.float32))
+
+    rec.save()  # no filename given anywhere -- no-op, matches recordStop()'s behavior
+    assert not (tmp_path / "deferred.wav").exists()
+
+    rec.normalize()
+    rec.save(filename="deferred.wav")
+
+    assert np.max(np.abs(_read_wav_pcm(tmp_path / "deferred.wav"))) == pytest.approx(1.0, abs=1e-3)
