@@ -29,6 +29,7 @@ Classes:
     Mic: Microphone capture -- device-safe enumeration, recording, dB level.
     Speaker: Simple playback.
     Recording / Recording_bytes / Recording_np: In-progress recording buffers.
+        `.normalize()` peak-normalizes the buffer in place, before save().
 
 Functions:
     get_input_devices / get_output_devices / get_connected_devices: Device
@@ -37,6 +38,14 @@ Functions:
     get_default_source_ports / set_default_source_port: PulseAudio/PipeWire
         port control for hardware exposing multiple mutually-exclusive
         ports on one physical source (e.g. a laptop's internal/jack mic).
+    get_loopback_input_devices / start_loopback_capture: PulseAudio/PipeWire
+        loopback (system-output) capture -- discover a sink's monitor
+        source, then start a `Mic` and route only that stream's own
+        PulseAudio source-output to it (never the server-wide default).
+    normalize_wav: Peak-normalize an already-saved WAV file in place (or to
+        a new path) -- the on-disk counterpart to Recording.normalize().
+    wav_to_mp3: Convert an uncompressed 16-bit PCM WAV file to MP3 (needs
+        the `mp3` extra).
     reinit_audio: Force PortAudio to re-probe hardware.
     terminate: Release PortAudio system resources.
     resample: Cross-rate PCM conversion (needs the `resample` extra to
@@ -59,13 +68,15 @@ from .device import (
 	get_connected_devices,
 	get_default_source_ports,
 	get_input_devices,
+	get_loopback_input_devices,
 	get_output_devices,
 	reinit_audio,
 	set_default_source_port,
+	start_loopback_capture,
 	terminate,
 )
 from .mic import Mic
-from .recording import Recording, Recording_bytes, Recording_np, append, saveAudio
+from .recording import Recording, Recording_bytes, Recording_np, append, normalize_wav, saveAudio, wav_to_mp3
 from .speaker import Speaker
 
 # Names that live in olab_audio.analysis (the `analysis` extra) but are
@@ -131,8 +142,10 @@ __all__ = [
 	"get_connected_devices",
 	"get_default_source_ports",
 	"get_input_devices",
+	"get_loopback_input_devices",
 	"get_output_devices",
 	"Mic",
+	"normalize_wav",
 	"np2bytes",
 	"np2np",
 	"reinit_audio",
@@ -143,7 +156,9 @@ __all__ = [
 	"saveAudio",
 	"set_default_source_port",
 	"Speaker",
+	"start_loopback_capture",
 	"StreamResampler",
 	"terminate",
+	"wav_to_mp3",
 	*sorted(_ANALYSIS_NAMES),
 ]

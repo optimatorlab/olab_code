@@ -1,11 +1,84 @@
+import os
 import time
 from wave import open as open_wave
 
 import numpy as np
 import pyaudio
 
-from ._constants import CHANNELS, FORMAT
+from ._constants import CHANNELS, FORMAT, ONE_OVER_MAX_INT16
 from ._util import defaultFromNone
+
+
+# LAME only writes these MPEG sample rates and constant-bit-rate values.  It
+# otherwise accepts other inputs and silently changes the encoded metadata,
+# which is worse than a clear failure for a recording API.
+_MP3_BITRATES = {
+	8000: (8, 16, 24, 32, 40, 48, 56, 64),
+	11025: (8, 16, 24, 32, 40, 48, 56, 64),
+	12000: (8, 16, 24, 32, 40, 48, 56, 64),
+	16000: (8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160),
+	22050: (8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160),
+	24000: (8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160),
+	32000: (32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320),
+	44100: (32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320),
+	48000: (32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320),
+}
+
+
+def _require_lameenc():
+	try:
+		import lameenc
+	except ImportError as exc:
+		raise RuntimeError(
+			"MP3 output needs the 'mp3' extra. "
+			"Install with: pip install olab-audio[mp3]"
+		) from exc
+	return lameenc
+
+
+def _validate_mp3_options(samplerate, channels, bitrate):
+	if samplerate not in _MP3_BITRATES:
+		supported = ', '.join(f'{rate / 1000:g}kHz' for rate in _MP3_BITRATES)
+		raise ValueError(
+			f'MP3 output does not support samplerate={samplerate!r}Hz; '
+			f'use one of: {supported}.'
+		)
+	if channels not in (1, 2):
+		raise ValueError(
+			f'MP3 output only supports mono or stereo (got channels={channels!r}).'
+		)
+	if bitrate is None:
+		bitrate = 64 if samplerate <= 12000 else 128
+	if bitrate not in _MP3_BITRATES[samplerate]:
+		valid = ', '.join(str(value) for value in _MP3_BITRATES[samplerate])
+		raise ValueError(
+			f'MP3 bitrate={bitrate!r} kbps is not valid at {samplerate}Hz; '
+			f'use one of: {valid} kbps.'
+		)
+	return bitrate
+
+
+def _encode_mp3(pcm16, samplerate, channels, bitrate=None):
+	bitrate = _validate_mp3_options(samplerate, channels, bitrate)
+	lameenc = _require_lameenc()
+	encoder = lameenc.Encoder()
+	encoder.set_bit_rate(bitrate)
+	encoder.set_in_sample_rate(samplerate)
+	encoder.set_channels(channels)
+	return encoder.encode(pcm16) + encoder.flush()
+
+
+def _mp3_pcm16_from_data(data, frmt):
+	if type(data) == list:
+		if frmt != pyaudio.paInt16:
+			raise ValueError(
+				f'MP3 output only supports paInt16 raw capture data (got frmt={frmt!r}).'
+			)
+		return b''.join(data)
+	if type(data) == np.ndarray:
+		pcm16 = np.clip(data, -1.0, 1.0)
+		return (pcm16 * 32767.0).astype(np.int16).tobytes()
+	raise TypeError(f'Unknown audio data type {type(data)}.')
 
 
 def append(ys, extra):
@@ -17,14 +90,15 @@ def append(ys, extra):
 	return np.concatenate((ys, extra))
 
 
-def saveAudio(filepath='.', filename=None, data=None, samplerate=None, frmt=FORMAT, channels=CHANNELS):
+def saveAudio(filepath='.', filename=None, data=None, samplerate=None, frmt=FORMAT, channels=CHANNELS, bitrate=None):
 	'''
-	Write audio data to a .wav file using only the stdlib `wave` module --
-	no `soundfile`/`analysis` extra required, so basic recording (the core
-	use case) never needs the DSP/teaching dependency stack.
+	Write audio data as WAV (or, for a `.mp3` filename, optional MP3 output).
+	WAV uses only the stdlib `wave` module, so basic recording (the core use
+	case) never needs the DSP/teaching dependency stack.
 
 	filepath:  Full filepath where the audio file will be saved.  Default '.' will save file in current directory.
-	filename:  Desired name of file.  Should end in `.wav`.
+	filename:  Desired name of file.  A `.mp3` suffix selects optional MP3
+		output; every other suffix retains WAV output for compatibility.
 	data:      list of raw bytes chunks, OR a `float32` numpy array containing audio data.
 	samplerate:  sample rate of the audio, in [Hz] (e.g., 44100).
 	'''
@@ -37,7 +111,12 @@ def saveAudio(filepath='.', filename=None, data=None, samplerate=None, frmt=FORM
 		raise Exception('saveAudio() missing samplerate')
 
 	try:
-		if (type(data) == list):
+		if filename.lower().endswith('.mp3'):
+			mp3 = _encode_mp3(_mp3_pcm16_from_data(data, frmt), samplerate, channels, bitrate)
+			with open(f'{filepath}/{filename}', 'wb') as f:
+				f.write(mp3)
+			print(f'Audio data saved as {filepath}/{filename} at {samplerate} Hz.')
+		elif (type(data) == list):
 			with open_wave(f'{filepath}/{filename}', "wb") as wf:
 				wf.setnchannels(channels)
 				wf.setsampwidth(pyaudio.get_sample_size(frmt))
@@ -63,6 +142,89 @@ def saveAudio(filepath='.', filename=None, data=None, samplerate=None, frmt=FORM
 			return
 	except Exception as e:
 		print(f'Error in saveAudio: {e}')
+
+
+def wav_to_mp3(filepath, out_filepath=None, bitrate=None):
+	'''Convert an uncompressed 16-bit PCM WAV file to MP3.
+
+	Requires the optional `mp3` extra.  `out_filepath` defaults to a sibling
+	file with the source's extension replaced by `.mp3`; `filepath` itself is
+	never overwritten.
+	'''
+	if out_filepath is None:
+		out_filepath = f'{os.path.splitext(filepath)[0]}.mp3'
+
+	with open_wave(filepath, 'rb') as wf:
+		if wf.getcomptype() != 'NONE' or wf.getsampwidth() != 2:
+			raise ValueError(
+				'wav_to_mp3 only supports uncompressed 16-bit PCM WAV files '
+				f'(got comptype={wf.getcomptype()!r}, sampwidth={wf.getsampwidth()}).'
+			)
+		channels = wf.getnchannels()
+		samplerate = wf.getframerate()
+		pcm16 = wf.readframes(wf.getnframes())
+
+	mp3 = _encode_mp3(pcm16, samplerate, channels, bitrate)
+	with open(out_filepath, 'wb') as f:
+		f.write(mp3)
+	print(f'Converted {filepath} -> {out_filepath} at {samplerate} Hz.')
+
+
+def _validate_amp(amp):
+	'''
+	amp must be a finite value in (0, 1.0] -- 1.0 (0dBFS) is the loudest
+	peak 16-bit PCM can represent at all, so amp > 1.0 could never actually
+	reach the peak it promises (it would silently hard-clip at 1.0
+	instead, contradicting the "loudest sample reaches +-amp" contract).
+	amp <= 0 or non-finite (NaN/inf) would produce a meaningless or
+	undefined rescale.
+	'''
+	if not np.isfinite(amp) or not (0 < amp <= 1.0):
+		raise ValueError(f'amp must be a finite value in (0, 1.0] (got {amp!r}) -- '
+						  f'1.0 (0dBFS) is the loudest peak 16-bit PCM can represent.')
+
+
+def normalize_wav(filepath, out_filepath=None, amp=1.0):
+	'''
+	Peak-normalize an existing 16-bit PCM WAV file so its loudest sample
+	reaches +-amp (amp=1.0, the default, is full digital scale / 0dBFS),
+	writing the result to `out_filepath` (defaults to overwriting
+	`filepath` in place). amp must be in (0, 1.0] -- see _validate_amp().
+
+	Useful for a recording captured at a lower level than expected -- e.g.
+	a loopback capture whose source application's PipeWire/PulseAudio
+	stream volume happened to be low at capture time (see the README's
+	loopback section) -- without needing to control or retry live
+	device/mixer state. Operates purely on the WAV's own samples. See
+	Recording.normalize() for the equivalent on an in-memory recording,
+	before it's ever saved.
+	'''
+	_validate_amp(amp)
+	if out_filepath is None:
+		out_filepath = filepath
+
+	with open_wave(filepath, "rb") as wf:
+		if wf.getsampwidth() != 2:
+			raise ValueError(f'normalize_wav only supports 16-bit PCM WAV files (got sampwidth={wf.getsampwidth()}).')
+		channels = wf.getnchannels()
+		samplerate = wf.getframerate()
+		raw = wf.readframes(wf.getnframes())
+
+	pcm = np.frombuffer(raw, dtype=np.int16).astype(np.float32) * ONE_OVER_MAX_INT16
+	peak = np.max(np.abs(pcm)) if len(pcm) else 0.0
+	if peak == 0:
+		print(f'NOTE in normalize_wav: {filepath} is silent, nothing to normalize.')
+		return
+
+	pcm16 = np.clip(pcm * (amp / peak), -1.0, 1.0)
+	pcm16 = (pcm16 * 32767.0).astype(np.int16)
+	with open_wave(out_filepath, "wb") as wf:
+		wf.setnchannels(channels)
+		wf.setsampwidth(2)
+		wf.setframerate(samplerate)
+		wf.writeframes(pcm16.tobytes())
+
+	print(f'Normalized {filepath} -> {out_filepath} (peak was {20*np.log10(peak):.1f} dBFS).')
 
 
 class Recording():
@@ -102,7 +264,7 @@ class Recording():
 		else:
 			return self.timeLimitSec - self.duration
 
-	def save(self, filepath=None, filename=None):
+	def save(self, filepath=None, filename=None, bitrate=None):
 		filename = defaultFromNone(filename, self.filename)
 		filepath = defaultFromNone(filepath, self.filepath)
 		if (filename is not None):
@@ -112,7 +274,8 @@ class Recording():
 			# interleaved samples with a one-channel WAV header (doubling
 			# apparent duration and corrupting playback interpretation).
 			saveAudio(filepath=filepath, filename=filename, data=self.ys,
-					  samplerate=self.samplerateRec, frmt=self.frmt, channels=self.channels)
+					  samplerate=self.samplerateRec, frmt=self.frmt, channels=self.channels,
+					  bitrate=bitrate)
 		else:
 			print('No filename given.  Not saving recorded audio.')
 
@@ -132,6 +295,38 @@ class Recording():
 		return Wave(self._wave_ys(), ts=None, framerate=self.samplerateRec)
 
 	def _wave_ys(self):
+		raise NotImplementedError
+
+	def normalize(self, amp=1.0):
+		'''
+		Peak-normalize the samples captured so far, in place, so the
+		loudest sample reaches +-amp (default 1.0 == full digital scale /
+		0dBFS).
+
+		amp must be in (0, 1.0] -- see _validate_amp().
+
+		Call this after recordStop() but before save() -- e.g. when
+		recordStart() was given no filename, so recordStop()'s automatic
+		save() is a no-op -- to fix up a recording whose source app's
+		PipeWire/PulseAudio stream volume was low at capture time (see
+		the README's loopback section), without a separate post-file
+		normalize_wav() pass. See normalize_wav() for the equivalent on
+		an already-saved WAV file.
+		'''
+		_validate_amp(amp)
+		ys = self._get_normalized_ys()
+		if len(ys) == 0:
+			return
+		peak = np.max(np.abs(ys))
+		if peak == 0:
+			print('NOTE in Recording.normalize: recording is silent, nothing to normalize.')
+			return
+		self._set_normalized_ys(np.clip(ys * (amp / peak), -1.0, 1.0))
+
+	def _get_normalized_ys(self):
+		raise NotImplementedError
+
+	def _set_normalized_ys(self, ys):
 		raise NotImplementedError
 
 
@@ -176,8 +371,37 @@ class Recording_bytes(Recording):
 		self._frame_count += len(extra) // (self._sampwidth * self.channels)
 
 	def _wave_ys(self):
-		from ._constants import ONE_OVER_MAX_INT16
 		return np.frombuffer(b''.join(self.ys), np.int16).astype(np.float32) * ONE_OVER_MAX_INT16
+
+	def _get_normalized_ys(self):
+		self._require_int16('normalize')
+		return self._wave_ys()
+
+	def _set_normalized_ys(self, ys):
+		# Collapse to a single chunk, same convention as Recording_np's
+		# ys setter -- this call replaces all previously captured bytes.
+		self.ys = [(ys * 32767.0).astype(np.int16).tobytes()]
+
+	def _require_int16(self, caller):
+		# _wave_ys()/normalize() both decode/re-encode as int16
+		# unconditionally, but Recording_bytes accepts any PyAudio frmt
+		# (paInt8/paInt24/paInt32/paUInt8/paFloat32/...) via _sampwidth.
+		# For any format other than paInt16, that decode silently
+		# misinterprets the raw bytes (wrong sample width/layout) and
+		# _set_normalized_ys() would then write 2-byte samples under a
+		# WAV header still declaring the original (different) sample
+		# width via self.frmt in save() -- corrupting the file. Fail
+		# clearly instead of producing a mis-encoded WAV. Non-int16
+		# capture is tracked as a separate, pre-existing limitation of
+		# Mic itself (see issue #29) -- not something normalize() works
+		# around.
+		if self.frmt != pyaudio.paInt16:
+			raise ValueError(
+				f"Recording_bytes.{caller}() only supports paInt16 (got frmt={self.frmt!r}) -- "
+				f"other PyAudio capture formats are not supported for normalization "
+				f"(Mic._callback_np()'s int16 decode means Recording_np can't decode them "
+				f"correctly either -- see issue #29)."
+			)
 
 
 class Recording_np(Recording):
@@ -265,9 +489,9 @@ class Recording_np(Recording):
 		self._cached_ys = None
 		self._frame_count += len(extra) // self.channels
 
-	def save(self, filepath=None, filename=None):
+	def save(self, filepath=None, filename=None, bitrate=None):
 		self._flush_stream_resampler()
-		super().save(filepath, filename)
+		super().save(filepath, filename, bitrate)
 
 	def _flush_stream_resampler(self):
 		'''Emit the StreamResampler's final buffered samples (if any).
@@ -285,6 +509,16 @@ class Recording_np(Recording):
 	def _wave_ys(self):
 		self._flush_stream_resampler()
 		return self.ys
+
+	def _get_normalized_ys(self):
+		# Must flush first -- same reason as _wave_ys(): otherwise the
+		# resampler's still-buffered tail samples would be silently
+		# excluded from the peak search and left unscaled.
+		self._flush_stream_resampler()
+		return self.ys
+
+	def _set_normalized_ys(self, ys):
+		self.ys = ys  # existing setter keeps the chunk/cache invariant intact
 
 	def resample(self, framerateOrig=None, framerateNew=None):
 		'''

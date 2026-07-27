@@ -1,7 +1,192 @@
+import sys
+from types import SimpleNamespace
+from wave import open as open_wave
+
 import numpy as np
 import pytest
 
-from olab_audio.recording import Recording_bytes, Recording_np, append, saveAudio
+import pyaudio
+
+from olab_audio.mic import Mic
+from olab_audio.recording import (
+    Recording_bytes,
+    Recording_np,
+    _encode_mp3,
+    _mp3_pcm16_from_data,
+    append,
+    normalize_wav,
+    saveAudio,
+    wav_to_mp3,
+)
+
+
+class _FakeEncoder:
+    def __init__(self):
+        self.bitrate = None
+        self.samplerate = None
+        self.channels = None
+        self.pcm = None
+
+    def set_bit_rate(self, value):
+        self.bitrate = value
+
+    def set_in_sample_rate(self, value):
+        self.samplerate = value
+
+    def set_channels(self, value):
+        self.channels = value
+
+    def encode(self, pcm):
+        self.pcm = pcm
+        return b'encoded:'
+
+    def flush(self):
+        return b'flushed'
+
+
+def _install_fake_lameenc(monkeypatch):
+    encoders = []
+
+    def make_encoder():
+        encoder = _FakeEncoder()
+        encoders.append(encoder)
+        return encoder
+
+    monkeypatch.setitem(sys.modules, 'lameenc', SimpleNamespace(Encoder=make_encoder))
+    return encoders
+
+
+def test_encode_mp3_configures_encoder_and_flushes(monkeypatch):
+    encoders = _install_fake_lameenc(monkeypatch)
+
+    assert _encode_mp3(b'\x00\x00', 44100, 2, bitrate=192) == b'encoded:flushed'
+    assert len(encoders) == 1
+    assert encoders[0].bitrate == 192
+    assert encoders[0].samplerate == 44100
+    assert encoders[0].channels == 2
+    assert encoders[0].pcm == b'\x00\x00'
+
+
+@pytest.mark.parametrize('samplerate, bitrate', [
+    (96000, 128),
+    (44100, 37),
+    (8000, 128),
+])
+def test_encode_mp3_rejects_values_lame_would_silently_coerce(samplerate, bitrate):
+    with pytest.raises(ValueError):
+        _encode_mp3(b'', samplerate, 1, bitrate=bitrate)
+
+
+def test_encode_mp3_rejects_non_mono_stereo_channels():
+    with pytest.raises(ValueError, match='mono or stereo'):
+        _encode_mp3(b'', 44100, 3)
+
+
+def test_encode_mp3_default_bitrate_is_rate_aware(monkeypatch):
+    encoders = _install_fake_lameenc(monkeypatch)
+
+    _encode_mp3(b'', 8000, 1)
+    _encode_mp3(b'', 44100, 1)
+
+    assert [encoder.bitrate for encoder in encoders] == [64, 128]
+
+
+def test_save_audio_mp3_dispatches_numpy_data(monkeypatch, tmp_path):
+    encoders = _install_fake_lameenc(monkeypatch)
+
+    saveAudio(filepath=str(tmp_path), filename='capture.MP3',
+              data=np.array([0.0, 1.0], dtype=np.float32), samplerate=44100,
+              channels=2, bitrate=192)
+
+    assert (tmp_path / 'capture.MP3').read_bytes() == b'encoded:flushed'
+    assert encoders[0].pcm == b'\x00\x00\xff\x7f'
+    assert encoders[0].channels == 2
+
+
+def test_mp3_bytes_reject_non_int16_capture():
+    with pytest.raises(ValueError, match='paInt16'):
+        _mp3_pcm16_from_data([b'\x00'], pyaudio.paInt8)
+
+
+def test_wav_to_mp3_defaults_output_path_and_preserves_metadata(monkeypatch, tmp_path):
+    encoders = _install_fake_lameenc(monkeypatch)
+    source = tmp_path / 'source.wav'
+    with open_wave(str(source), 'wb') as wf:
+        wf.setnchannels(2)
+        wf.setsampwidth(2)
+        wf.setframerate(44100)
+        wf.writeframes(b'\x00\x00\x01\x00')
+
+    wav_to_mp3(str(source), bitrate=192)
+
+    assert (tmp_path / 'source.mp3').read_bytes() == b'encoded:flushed'
+    assert encoders[0].samplerate == 44100
+    assert encoders[0].channels == 2
+    assert encoders[0].pcm == b'\x00\x00\x01\x00'
+
+
+def test_wav_to_mp3_encodes_zero_frame_wav(monkeypatch, tmp_path):
+    _install_fake_lameenc(monkeypatch)
+    source = tmp_path / 'empty.wav'
+    with open_wave(str(source), 'wb') as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(8000)
+
+    wav_to_mp3(str(source))
+
+    assert (tmp_path / 'empty.mp3').read_bytes() == b'encoded:flushed'
+
+
+def test_wav_to_mp3_does_not_create_output_when_validation_fails(tmp_path):
+    source = tmp_path / 'unsupported-rate.wav'
+    target = tmp_path / 'target.mp3'
+    with open_wave(str(source), 'wb') as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(96000)
+
+    with pytest.raises(ValueError, match='samplerate'):
+        wav_to_mp3(str(source), out_filepath=str(target))
+
+    assert not target.exists()
+
+
+def test_recording_save_threads_bitrate_to_mp3_encoder(monkeypatch, tmp_path):
+    encoders = _install_fake_lameenc(monkeypatch)
+    rec = Recording_np(samplerateMic=44100, samplerateRec=44100,
+                       filepath=str(tmp_path), filename='recording.mp3')
+    rec.append(np.zeros(20, dtype=np.float32))
+
+    rec.save(bitrate=192)
+
+    assert (tmp_path / 'recording.mp3').read_bytes() == b'encoded:flushed'
+    assert encoders[0].bitrate == 192
+
+
+def test_mic_record_stop_threads_bitrate_to_recording_save():
+    saved = []
+
+    class FakeRecording:
+        def save(self, filepath, filename, bitrate):
+            saved.append((filepath, filename, bitrate))
+
+        def postFunc(self, **kwargs):
+            pass
+
+    mic = Mic(deviceID=0)
+    mic.recording = FakeRecording()
+    mic.recordStop(filename='capture.mp3', bitrate=192)
+
+    assert saved == [(None, 'capture.mp3', 192)]
+
+
+def test_encode_mp3_with_installed_extra_starts_with_mp3_frame():
+    pytest.importorskip('lameenc', reason='install olab-audio[mp3]')
+
+    mp3 = _encode_mp3(b'\x00\x00' * 4410, 44100, 1)
+
+    assert mp3[:2] == b'\xff\xfb'
 
 
 def test_append_concatenates_same_framerate_arrays():
@@ -338,3 +523,191 @@ def test_save_audio_bytes_list_uses_stdlib_wave(tmp_path):
     from wave import open as open_wave
     with open_wave(str(tmp_path / "out_bytes.wav"), "rb") as wf:
         assert wf.getframerate() == 8000
+
+
+def _read_wav_pcm(path):
+    from wave import open as open_wave
+    with open_wave(str(path), "rb") as wf:
+        raw = wf.readframes(wf.getnframes())
+    return np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32767.0
+
+
+def test_normalize_wav_scales_peak_to_0dbfs(tmp_path):
+    quiet = (np.array([0.0, 0.25, -0.25, 0.5, -0.5], dtype=np.float32) * 32767.0).astype(np.int16)
+    path = tmp_path / "quiet.wav"
+    from wave import open as open_wave
+    with open_wave(str(path), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(44100)
+        wf.writeframes(quiet.tobytes())
+
+    normalize_wav(str(path))
+
+    pcm = _read_wav_pcm(path)
+    assert np.max(np.abs(pcm)) == pytest.approx(1.0, abs=1e-4)
+    # Relative shape between samples must be preserved -- normalize_wav()
+    # is a pure gain change, not a redistribution of amplitudes.
+    assert pcm[1] == pytest.approx(-pcm[2], abs=1e-4)
+
+
+def test_normalize_wav_non_default_amp_reaches_exact_peak(tmp_path):
+    """Real bug found in review: np.clip(..., -1.0, 1.0) silently capped
+    any amp > 1.0 at 1.0, contradicting the "reaches +-amp" contract.
+    amp <= 1.0 must still reach that exact peak, uncapped."""
+    quiet = (np.array([0.1, -0.1], dtype=np.float32) * 32767.0).astype(np.int16)
+    path = tmp_path / "quiet.wav"
+    from wave import open as open_wave
+    with open_wave(str(path), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(44100)
+        wf.writeframes(quiet.tobytes())
+
+    normalize_wav(str(path), amp=0.5)
+
+    assert np.max(np.abs(_read_wav_pcm(path))) == pytest.approx(0.5, abs=1e-3)
+
+
+@pytest.mark.parametrize("bad_amp", [0, -1.0, 1.5, float('nan'), float('inf')])
+def test_normalize_wav_rejects_invalid_amp(tmp_path, bad_amp):
+    """amp > 1.0 can never actually be reached (16-bit PCM tops out at
+    1.0 == 0dBFS) and amp <= 0 / non-finite are meaningless -- all must
+    raise clearly rather than silently clip or misbehave."""
+    quiet = (np.array([0.1, -0.1], dtype=np.float32) * 32767.0).astype(np.int16)
+    path = tmp_path / "quiet.wav"
+    from wave import open as open_wave
+    with open_wave(str(path), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(44100)
+        wf.writeframes(quiet.tobytes())
+
+    with pytest.raises(ValueError, match="amp"):
+        normalize_wav(str(path), amp=bad_amp)
+
+
+def test_normalize_wav_can_write_to_a_separate_path(tmp_path):
+    quiet = (np.array([0.2, -0.2], dtype=np.float32) * 32767.0).astype(np.int16)
+    src = tmp_path / "in.wav"
+    dst = tmp_path / "out.wav"
+    from wave import open as open_wave
+    with open_wave(str(src), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(44100)
+        wf.writeframes(quiet.tobytes())
+
+    normalize_wav(str(src), out_filepath=str(dst))
+
+    assert np.max(np.abs(_read_wav_pcm(src))) == pytest.approx(0.2, abs=1e-4)  # untouched
+    assert np.max(np.abs(_read_wav_pcm(dst))) == pytest.approx(1.0, abs=1e-4)
+
+
+def test_normalize_wav_silent_file_is_a_no_op(tmp_path, capsys):
+    silent = np.zeros(10, dtype=np.int16)
+    path = tmp_path / "silent.wav"
+    from wave import open as open_wave
+    with open_wave(str(path), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(44100)
+        wf.writeframes(silent.tobytes())
+
+    normalize_wav(str(path))  # must not raise
+
+    assert "NOTE" in capsys.readouterr().out
+    assert np.max(np.abs(_read_wav_pcm(path))) == 0.0
+
+
+def test_recording_np_normalize_scales_peak_to_0dbfs():
+    rec = Recording_np(samplerateMic=44100, samplerateRec=44100)
+    rec.append(np.array([0.1, -0.1, 0.2, -0.2], dtype=np.float32))
+
+    rec.normalize()
+
+    assert np.max(np.abs(rec.ys)) == pytest.approx(1.0)
+    assert rec.ys[2] == pytest.approx(-rec.ys[3])
+
+
+def test_recording_np_normalize_flushes_resampler_tail_first():
+    """The resampler's still-buffered tail must be included in both the
+    peak search and the rescale -- otherwise normalize() would silently
+    leave unflushed samples at their original (unnormalized) level."""
+    pytest.importorskip("soxr", reason="soxr is not installed; install olab-audio[resample]")
+
+    rec = Recording_np(samplerateMic=44100, samplerateRec=22050)
+    rec.append(np.array([0.1] * 200, dtype=np.float32))
+
+    rec.normalize()
+
+    assert rec._flushed is True
+    assert np.max(np.abs(rec.ys)) == pytest.approx(1.0)
+
+
+def test_recording_bytes_normalize_scales_peak_to_0dbfs():
+    rec = Recording_bytes(samplerateMic=44100, samplerateRec=44100)
+    quiet = (np.array([0.1, -0.1, 0.2, -0.2], dtype=np.float32) * 32767.0).astype(np.int16)
+    rec.append(quiet.tobytes())
+
+    rec.normalize()
+
+    ys = rec._wave_ys()
+    assert np.max(np.abs(ys)) == pytest.approx(1.0, abs=1e-3)
+
+
+def test_recording_bytes_normalize_rejects_non_int16_format():
+    """Real bug found in review: normalize() unconditionally decoded/
+    re-encoded as int16 regardless of self.frmt, corrupting any other
+    PyAudio format (paInt24/paInt32/paFloat32/...) and leaving save()'s
+    WAV header (built from the original frmt) mismatched against the
+    now-int16 data. Must fail clearly instead."""
+    rec = Recording_bytes(samplerateMic=44100, samplerateRec=44100, frmt=pyaudio.paInt32)
+    rec.append(b'\x00\x00\x00\x00' * 4)
+
+    with pytest.raises(ValueError, match="paInt16"):
+        rec.normalize()
+
+
+@pytest.mark.parametrize("bad_amp", [0, -1.0, 1.5, float('nan'), float('inf')])
+def test_recording_np_normalize_rejects_invalid_amp(bad_amp):
+    rec = Recording_np(samplerateMic=44100, samplerateRec=44100)
+    rec.append(np.array([0.1, -0.1], dtype=np.float32))
+
+    with pytest.raises(ValueError, match="amp"):
+        rec.normalize(amp=bad_amp)
+
+
+def test_recording_np_normalize_non_default_amp_reaches_exact_peak():
+    rec = Recording_np(samplerateMic=44100, samplerateRec=44100)
+    rec.append(np.array([0.1, -0.1], dtype=np.float32))
+
+    rec.normalize(amp=0.5)
+
+    assert np.max(np.abs(rec.ys)) == pytest.approx(0.5)
+
+
+def test_recording_normalize_silent_recording_is_a_no_op(capsys):
+    rec = Recording_np(samplerateMic=44100, samplerateRec=44100)
+    rec.append(np.zeros(10, dtype=np.float32))
+
+    rec.normalize()  # must not raise
+
+    assert "NOTE" in capsys.readouterr().out
+    assert np.max(np.abs(rec.ys)) == 0.0
+
+
+def test_recording_np_normalize_before_save_writes_normalized_wav(tmp_path):
+    """The documented deferred-save workflow: recordStart() with no
+    filename, then Recording.normalize() before an explicit save()."""
+    rec = Recording_np(samplerateMic=44100, samplerateRec=44100,
+                        filepath=str(tmp_path), filename=None)
+    rec.append(np.array([0.1, -0.1], dtype=np.float32))
+
+    rec.save()  # no filename given anywhere -- no-op, matches recordStop()'s behavior
+    assert not (tmp_path / "deferred.wav").exists()
+
+    rec.normalize()
+    rec.save(filename="deferred.wav")
+
+    assert np.max(np.abs(_read_wav_pcm(tmp_path / "deferred.wav"))) == pytest.approx(1.0, abs=1e-3)

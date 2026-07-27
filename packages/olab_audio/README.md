@@ -21,8 +21,8 @@ source venv/bin/activate
 pip install "olab-audio @ git+https://github.com/optimatorlab/olab_code.git@<tag-or-sha>#subdirectory=packages/olab_audio"
 ```
 
-Add `resample` and/or `analysis` as needed:
-`pip install "olab-audio[analysis] @ git+...#subdirectory=packages/olab_audio"`.
+Add `resample`, `analysis`, and/or `mp3` as needed:
+`pip install "olab-audio[analysis,mp3] @ git+...#subdirectory=packages/olab_audio"`.
 
 Once release wheels exist, prefer pinning the release's exact URL and
 SHA-256 hash instead of a git reference.
@@ -30,7 +30,7 @@ SHA-256 hash instead of a git reference.
 **Local development**, against an `olab_code` checkout:
 
 ```bash
-pip install -e "packages/olab_audio[analysis]"
+pip install -e "packages/olab_audio[analysis,mp3]"
 ```
 
 ## Extras
@@ -40,6 +40,7 @@ pip install -e "packages/olab_audio[analysis]"
 | *(core, default)* | `pyaudio`, `pulsectl`, `numpy` | `Mic`/`Speaker`/recording at the device's own native rate, device enumeration, PulseAudio port control. |
 | `resample` | `soxr` | Cross-rate recording (`Mic.recordStart(samplerateRec=...)` at a rate other than the mic's native one) and `olab_audio.resample`'s `resample()`/`StreamResampler`. Not yet validated on target Raspberry Pi hardware — see the plan doc's acceptance checklist. |
 | `analysis` | `resample` (soxr) + `librosa`, `soundfile`, `matplotlib` | `olab_audio.analysis`'s `Wave`/`Spectrogram`/`Spectrum`, tone/chirp/pitch synthesis, `trim`, `read_wave_librosa`, plotting, `Recording.make_wave()`, and `Recording_np`'s explicit `.resample()` method. |
+| `mp3` | `lameenc` (bundled LAME bindings) | Save a capture as MP3 or convert a 16-bit PCM WAV with `wav_to_mp3()`. No system `ffmpeg` binary is required. |
 
 Recording at the microphone's own native sample rate — the default, and
 almost always what you want — needs **only the core install**. Cross-rate
@@ -73,6 +74,149 @@ mic.recordStop()
 
 mic.stop()
 ```
+
+## MP3 output
+
+Install the optional encoder first:
+
+```bash
+pip install "olab-audio[mp3]"
+```
+
+Use an `.mp3` filename to encode when saving a recording; WAV remains the
+default behavior for every other filename. `bitrate` is optional: it defaults
+to 128 kbps for rates of 16 kHz and above, and 64 kbps for 8/11.025/12 kHz.
+
+```python
+mic.recordStart(filename="capture.mp3")
+# ... let it capture some audio ...
+mic.recordStop()  # saves a 128 kbps MP3 for a normal 44.1/48 kHz capture
+
+# Or select a valid constant bitrate while saving a recording manually:
+mic.recording.save(filename="capture.mp3", bitrate=192)
+```
+
+Convert an already-saved uncompressed 16-bit PCM WAV without invoking an
+external command:
+
+```python
+olab_audio.wav_to_mp3("system_audio.wav")
+olab_audio.wav_to_mp3("system_audio.wav", out_filepath="share.mp3", bitrate=192)
+```
+
+MP3 supports only mono or stereo 16-bit PCM input and these sample rates:
+8, 11.025, 12, 16, 22.05, 24, 32, 44.1, and 48 kHz. `olab_audio` rejects
+other rates and invalid rate/bitrate combinations rather than allowing the
+encoder to silently change them. If a device's native capture rate is not
+MP3-compatible, first capture/resample with `Recording_np.resample()` (the
+`analysis` extra) to a supported rate, then save the recording as MP3.
+
+## Loopback (system-output) capture
+
+Record "whatever is playing on this speaker/output" via PulseAudio/PipeWire's
+monitor sources -- Linux with a PulseAudio or PipeWire's PulseAudio-compatible
+server only, ALSA host API only.
+
+```python
+import olab_audio
+
+loopbacks = olab_audio.get_loopback_input_devices()
+loopback = loopbacks[0]
+
+mic = olab_audio.Mic(deviceID=loopback['deviceID'])
+olab_audio.start_loopback_capture(mic, loopback)  # starts mic AND routes only this stream
+
+mic.recordStart(filename="system_audio.wav")
+# ... let it capture some audio ...
+mic.recordStop()
+
+mic.stop()  # also removes this stream's PulseAudio source-output -- nothing to restore
+```
+
+Notes:
+- **All** entries returned by `get_loopback_input_devices()` share one
+  `deviceID` (the single PulseAudio/PipeWire-routed PortAudio device) --
+  `start_loopback_capture()` is what actually determines which sink's audio
+  is captured, not the `deviceID`.
+- `mic` must **not** be started before calling `start_loopback_capture()` --
+  it calls `mic.start()` itself (forwarding any keyword arguments you pass
+  after `source`, e.g. `reachbackFunc=`, exactly like calling `mic.start()`
+  directly), then moves only that one resulting PulseAudio source-output to
+  the selected monitor. The system default source, and every other
+  application's capture, are never touched.
+- If the new capture stream can't be identified (timeout, or an ambiguous
+  new stream), or the move itself is rejected by PulseAudio/PipeWire,
+  `start_loopback_capture()` stops `mic` and raises `RuntimeError` rather
+  than leaving it silently capturing the wrong source. A move call that
+  doesn't raise is trusted as successful -- some `pipewire-pulse` versions
+  don't reliably report a source-output's routing state afterward, so this
+  doesn't attempt to re-confirm it.
+- Capture only receives audio actually routed to the selected sink (silent
+  otherwise -- expected, not a bug), and uses the sink's native device rate,
+  which may not be 44.1kHz.
+
+## Normalizing recordings
+
+Loopback (and mic) recordings capture whatever level PulseAudio/PipeWire
+happened to be playing at -- e.g. a quiet per-app stream volume (PipeWire
+gives each playback app its own independent volume, restored per media
+role, separate from the sink/master volume) that's unrelated to what the
+system volume slider shows. Two ways to fix a too-quiet recording,
+depending on when you catch it:
+
+**Already saved to a WAV file** -- `normalize_wav()` peak-normalizes the
+file on disk:
+
+```python
+import olab_audio
+
+olab_audio.normalize_wav("system_audio.wav")  # overwrites in place, peak -> 0dBFS
+# or write to a separate file instead of overwriting:
+olab_audio.normalize_wav("system_audio.wav", out_filepath="system_audio_normalized.wav")
+```
+
+**Still in memory, before the first save** -- skip `recordStart(filename=...)`
+so `recordStop()`'s automatic save is a no-op, call `Recording.normalize()`
+on the buffer, then save it yourself:
+
+```python
+import olab_audio
+
+loopback = olab_audio.get_loopback_input_devices()[0]
+mic = olab_audio.Mic(deviceID=loopback['deviceID'])
+olab_audio.start_loopback_capture(mic, loopback)
+
+mic.recordStart()  # no filename -- recordStop() below won't auto-save
+# ... let it capture some audio ...
+mic.recordStop()   # writes nothing yet, since no filename was given
+
+mic.recording.normalize()                  # peak -> 0dBFS, in place, before saving
+mic.recording.save(filename="system_audio.wav")
+
+mic.stop()
+```
+
+Both use the same peak-scaling math (loudest sample -> +-`amp`, default
+`1.0` == 0dBFS) and print a `NOTE` instead of raising if the audio is
+silent (nothing to normalize). Neither touches PulseAudio/PipeWire device
+or mixer state -- they only rescale the samples you already captured.
+
+`amp` must be a finite value in `(0, 1.0]` -- 1.0 (0dBFS) is the loudest
+peak 16-bit PCM can represent at all, so an `amp` above 1.0 is rejected
+with `ValueError` rather than silently hard-clipping at 1.0 and falling
+short of the peak it promised.
+
+`Recording.normalize()` on a `Recording_bytes` only supports `paInt16`
+(the default `frmt`) -- it also raises `ValueError` for any other PyAudio
+format, since the int16 decode/re-encode it uses internally would
+otherwise corrupt other bit depths/formats. There's currently no working
+alternative for non-int16 capture: `Mic`'s NumPy callback path
+(`Mic._callback_np()`) also hardcodes an int16 decode regardless of
+`frmt`, so `Recording_np` can't correctly normalize (or otherwise
+process) a non-int16 capture either -- that's a separate, pre-existing
+limitation of `Mic` itself (tracked as
+[issue #29](https://github.com/optimatorlab/olab_code/issues/29)), not
+something `normalize()` works around.
 
 ## TLS/security note
 

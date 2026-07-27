@@ -32,7 +32,10 @@ resample = ["soxr>=0.4"]
 # DSP/analysis/teaching toolkit.
 analysis = ["olab-audio[resample]", "librosa", "soundfile", "matplotlib"]
 
-all = ["olab-audio[analysis]"]
+# MP3 save-time encoding via bundled LAME bindings; no system ffmpeg binary.
+mp3 = ["lameenc>=1.8.0"]
+
+all = ["olab-audio[analysis,mp3]"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/olab_audio"]
