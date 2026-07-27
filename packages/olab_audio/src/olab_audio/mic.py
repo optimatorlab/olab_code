@@ -144,12 +144,12 @@ class Mic():
 			self.excFunc(msg = f'ERROR in recordStart: {e}')
 			return False
 
-	def recordStop(self, filepath=None, filename=None):
+	def recordStop(self, filepath=None, filename=None, bitrate=None):
 		try:
 			self.isRecording       = False
 
 			# Try to write to file if a filename has been given (either here or in `recordStart()`):
-			self.recording.save(filepath, filename)
+			self.recording.save(filepath, filename, bitrate)
 
 			self.recording.postFunc(deviceID=self.deviceID)
 		except Exception as e:

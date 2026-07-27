@@ -44,6 +44,8 @@ Functions:
         PulseAudio source-output to it (never the server-wide default).
     normalize_wav: Peak-normalize an already-saved WAV file in place (or to
         a new path) -- the on-disk counterpart to Recording.normalize().
+    wav_to_mp3: Convert an uncompressed 16-bit PCM WAV file to MP3 (needs
+        the `mp3` extra).
     reinit_audio: Force PortAudio to re-probe hardware.
     terminate: Release PortAudio system resources.
     resample: Cross-rate PCM conversion (needs the `resample` extra to
@@ -74,7 +76,7 @@ from .device import (
 	terminate,
 )
 from .mic import Mic
-from .recording import Recording, Recording_bytes, Recording_np, append, normalize_wav, saveAudio
+from .recording import Recording, Recording_bytes, Recording_np, append, normalize_wav, saveAudio, wav_to_mp3
 from .speaker import Speaker
 
 # Names that live in olab_audio.analysis (the `analysis` extra) but are
@@ -157,5 +159,6 @@ __all__ = [
 	"start_loopback_capture",
 	"StreamResampler",
 	"terminate",
+	"wav_to_mp3",
 	*sorted(_ANALYSIS_NAMES),
 ]

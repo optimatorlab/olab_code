@@ -21,8 +21,8 @@ source venv/bin/activate
 pip install "olab-audio @ git+https://github.com/optimatorlab/olab_code.git@<tag-or-sha>#subdirectory=packages/olab_audio"
 ```
 
-Add `resample` and/or `analysis` as needed:
-`pip install "olab-audio[analysis] @ git+...#subdirectory=packages/olab_audio"`.
+Add `resample`, `analysis`, and/or `mp3` as needed:
+`pip install "olab-audio[analysis,mp3] @ git+...#subdirectory=packages/olab_audio"`.
 
 Once release wheels exist, prefer pinning the release's exact URL and
 SHA-256 hash instead of a git reference.
@@ -30,7 +30,7 @@ SHA-256 hash instead of a git reference.
 **Local development**, against an `olab_code` checkout:
 
 ```bash
-pip install -e "packages/olab_audio[analysis]"
+pip install -e "packages/olab_audio[analysis,mp3]"
 ```
 
 ## Extras
@@ -40,6 +40,7 @@ pip install -e "packages/olab_audio[analysis]"
 | *(core, default)* | `pyaudio`, `pulsectl`, `numpy` | `Mic`/`Speaker`/recording at the device's own native rate, device enumeration, PulseAudio port control. |
 | `resample` | `soxr` | Cross-rate recording (`Mic.recordStart(samplerateRec=...)` at a rate other than the mic's native one) and `olab_audio.resample`'s `resample()`/`StreamResampler`. Not yet validated on target Raspberry Pi hardware — see the plan doc's acceptance checklist. |
 | `analysis` | `resample` (soxr) + `librosa`, `soundfile`, `matplotlib` | `olab_audio.analysis`'s `Wave`/`Spectrogram`/`Spectrum`, tone/chirp/pitch synthesis, `trim`, `read_wave_librosa`, plotting, `Recording.make_wave()`, and `Recording_np`'s explicit `.resample()` method. |
+| `mp3` | `lameenc` (bundled LAME bindings) | Save a capture as MP3 or convert a 16-bit PCM WAV with `wav_to_mp3()`. No system `ffmpeg` binary is required. |
 
 Recording at the microphone's own native sample rate — the default, and
 almost always what you want — needs **only the core install**. Cross-rate
@@ -73,6 +74,42 @@ mic.recordStop()
 
 mic.stop()
 ```
+
+## MP3 output
+
+Install the optional encoder first:
+
+```bash
+pip install "olab-audio[mp3]"
+```
+
+Use an `.mp3` filename to encode when saving a recording; WAV remains the
+default behavior for every other filename. `bitrate` is optional: it defaults
+to 128 kbps for rates of 16 kHz and above, and 64 kbps for 8/11.025/12 kHz.
+
+```python
+mic.recordStart(filename="capture.mp3")
+# ... let it capture some audio ...
+mic.recordStop()  # saves a 128 kbps MP3 for a normal 44.1/48 kHz capture
+
+# Or select a valid constant bitrate while saving a recording manually:
+mic.recording.save(filename="capture.mp3", bitrate=192)
+```
+
+Convert an already-saved uncompressed 16-bit PCM WAV without invoking an
+external command:
+
+```python
+olab_audio.wav_to_mp3("system_audio.wav")
+olab_audio.wav_to_mp3("system_audio.wav", out_filepath="share.mp3", bitrate=192)
+```
+
+MP3 supports only mono or stereo 16-bit PCM input and these sample rates:
+8, 11.025, 12, 16, 22.05, 24, 32, 44.1, and 48 kHz. `olab_audio` rejects
+other rates and invalid rate/bitrate combinations rather than allowing the
+encoder to silently change them. If a device's native capture rate is not
+MP3-compatible, first capture/resample with `Recording_np.resample()` (the
+`analysis` extra) to a supported rate, then save the recording as MP3.
 
 ## Loopback (system-output) capture
 

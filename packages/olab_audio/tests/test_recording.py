@@ -1,9 +1,192 @@
+import sys
+from types import SimpleNamespace
+from wave import open as open_wave
+
 import numpy as np
 import pytest
 
 import pyaudio
 
-from olab_audio.recording import Recording_bytes, Recording_np, append, normalize_wav, saveAudio
+from olab_audio.mic import Mic
+from olab_audio.recording import (
+    Recording_bytes,
+    Recording_np,
+    _encode_mp3,
+    _mp3_pcm16_from_data,
+    append,
+    normalize_wav,
+    saveAudio,
+    wav_to_mp3,
+)
+
+
+class _FakeEncoder:
+    def __init__(self):
+        self.bitrate = None
+        self.samplerate = None
+        self.channels = None
+        self.pcm = None
+
+    def set_bit_rate(self, value):
+        self.bitrate = value
+
+    def set_in_sample_rate(self, value):
+        self.samplerate = value
+
+    def set_channels(self, value):
+        self.channels = value
+
+    def encode(self, pcm):
+        self.pcm = pcm
+        return b'encoded:'
+
+    def flush(self):
+        return b'flushed'
+
+
+def _install_fake_lameenc(monkeypatch):
+    encoders = []
+
+    def make_encoder():
+        encoder = _FakeEncoder()
+        encoders.append(encoder)
+        return encoder
+
+    monkeypatch.setitem(sys.modules, 'lameenc', SimpleNamespace(Encoder=make_encoder))
+    return encoders
+
+
+def test_encode_mp3_configures_encoder_and_flushes(monkeypatch):
+    encoders = _install_fake_lameenc(monkeypatch)
+
+    assert _encode_mp3(b'\x00\x00', 44100, 2, bitrate=192) == b'encoded:flushed'
+    assert len(encoders) == 1
+    assert encoders[0].bitrate == 192
+    assert encoders[0].samplerate == 44100
+    assert encoders[0].channels == 2
+    assert encoders[0].pcm == b'\x00\x00'
+
+
+@pytest.mark.parametrize('samplerate, bitrate', [
+    (96000, 128),
+    (44100, 37),
+    (8000, 128),
+])
+def test_encode_mp3_rejects_values_lame_would_silently_coerce(samplerate, bitrate):
+    with pytest.raises(ValueError):
+        _encode_mp3(b'', samplerate, 1, bitrate=bitrate)
+
+
+def test_encode_mp3_rejects_non_mono_stereo_channels():
+    with pytest.raises(ValueError, match='mono or stereo'):
+        _encode_mp3(b'', 44100, 3)
+
+
+def test_encode_mp3_default_bitrate_is_rate_aware(monkeypatch):
+    encoders = _install_fake_lameenc(monkeypatch)
+
+    _encode_mp3(b'', 8000, 1)
+    _encode_mp3(b'', 44100, 1)
+
+    assert [encoder.bitrate for encoder in encoders] == [64, 128]
+
+
+def test_save_audio_mp3_dispatches_numpy_data(monkeypatch, tmp_path):
+    encoders = _install_fake_lameenc(monkeypatch)
+
+    saveAudio(filepath=str(tmp_path), filename='capture.MP3',
+              data=np.array([0.0, 1.0], dtype=np.float32), samplerate=44100,
+              channels=2, bitrate=192)
+
+    assert (tmp_path / 'capture.MP3').read_bytes() == b'encoded:flushed'
+    assert encoders[0].pcm == b'\x00\x00\xff\x7f'
+    assert encoders[0].channels == 2
+
+
+def test_mp3_bytes_reject_non_int16_capture():
+    with pytest.raises(ValueError, match='paInt16'):
+        _mp3_pcm16_from_data([b'\x00'], pyaudio.paInt8)
+
+
+def test_wav_to_mp3_defaults_output_path_and_preserves_metadata(monkeypatch, tmp_path):
+    encoders = _install_fake_lameenc(monkeypatch)
+    source = tmp_path / 'source.wav'
+    with open_wave(str(source), 'wb') as wf:
+        wf.setnchannels(2)
+        wf.setsampwidth(2)
+        wf.setframerate(44100)
+        wf.writeframes(b'\x00\x00\x01\x00')
+
+    wav_to_mp3(str(source), bitrate=192)
+
+    assert (tmp_path / 'source.mp3').read_bytes() == b'encoded:flushed'
+    assert encoders[0].samplerate == 44100
+    assert encoders[0].channels == 2
+    assert encoders[0].pcm == b'\x00\x00\x01\x00'
+
+
+def test_wav_to_mp3_encodes_zero_frame_wav(monkeypatch, tmp_path):
+    _install_fake_lameenc(monkeypatch)
+    source = tmp_path / 'empty.wav'
+    with open_wave(str(source), 'wb') as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(8000)
+
+    wav_to_mp3(str(source))
+
+    assert (tmp_path / 'empty.mp3').read_bytes() == b'encoded:flushed'
+
+
+def test_wav_to_mp3_does_not_create_output_when_validation_fails(tmp_path):
+    source = tmp_path / 'unsupported-rate.wav'
+    target = tmp_path / 'target.mp3'
+    with open_wave(str(source), 'wb') as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(96000)
+
+    with pytest.raises(ValueError, match='samplerate'):
+        wav_to_mp3(str(source), out_filepath=str(target))
+
+    assert not target.exists()
+
+
+def test_recording_save_threads_bitrate_to_mp3_encoder(monkeypatch, tmp_path):
+    encoders = _install_fake_lameenc(monkeypatch)
+    rec = Recording_np(samplerateMic=44100, samplerateRec=44100,
+                       filepath=str(tmp_path), filename='recording.mp3')
+    rec.append(np.zeros(20, dtype=np.float32))
+
+    rec.save(bitrate=192)
+
+    assert (tmp_path / 'recording.mp3').read_bytes() == b'encoded:flushed'
+    assert encoders[0].bitrate == 192
+
+
+def test_mic_record_stop_threads_bitrate_to_recording_save():
+    saved = []
+
+    class FakeRecording:
+        def save(self, filepath, filename, bitrate):
+            saved.append((filepath, filename, bitrate))
+
+        def postFunc(self, **kwargs):
+            pass
+
+    mic = Mic(deviceID=0)
+    mic.recording = FakeRecording()
+    mic.recordStop(filename='capture.mp3', bitrate=192)
+
+    assert saved == [(None, 'capture.mp3', 192)]
+
+
+def test_encode_mp3_with_installed_extra_starts_with_mp3_frame():
+    pytest.importorskip('lameenc', reason='install olab-audio[mp3]')
+
+    mp3 = _encode_mp3(b'\x00\x00' * 4410, 44100, 1)
+
+    assert mp3[:2] == b'\xff\xfb'
 
 
 def test_append_concatenates_same_framerate_arrays():
