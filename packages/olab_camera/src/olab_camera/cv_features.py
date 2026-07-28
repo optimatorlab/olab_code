@@ -450,7 +450,17 @@ class _Calibrate():
 				total_error = 0
 				for i in range(len(objpoints)):
 					imgpoints2, _ = cv2.projectPoints(objpoints[i], rvecs[i], tvecs[i], mtx, dist)
-					error = cv2.norm(imgpoints[i], imgpoints2, cv2.NORM_L2)/len(imgpoints2)
+					# cv2.norm requires its two inputs' OpenCV types to match exactly. That's
+					# not guaranteed here: findChessboardCorners()/cornerSubPix() and
+					# projectPoints() aren't guaranteed to agree on shape/channel layout for
+					# the same logical (N, 2) point set -- e.g. OpenCV 5 changed
+					# findChessboardCorners()/cornerSubPix() to return a single-channel
+					# (N, 2) array where projectPoints() still returns 2-channel (N, 1, 2).
+					# Reshaping both to a plain (N, 2) float64 array sidesteps that
+					# version-dependent mismatch entirely.
+					pts1 = np.asarray(imgpoints[i], dtype=np.float64).reshape(-1, 2)
+					pts2 = np.asarray(imgpoints2, dtype=np.float64).reshape(-1, 2)
+					error = cv2.norm(pts1, pts2, cv2.NORM_L2)/len(pts2)
 					total_error += error
 				print( "\ntotal error: {}".format(total_error) )
 				mean_error = total_error/len(objpoints)
