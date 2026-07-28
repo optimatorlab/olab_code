@@ -381,7 +381,7 @@ class Camera():
 		with self.condition:
 			self.condition.notify_all()
 
-	def addAruco(self, idName=None, res_rows=None, res_cols=None, fps_target=5, calcRotations=True, postFunction=None, postFunctionArgs={}, configOverrides={}, ids_of_interest=None):
+	def addAruco(self, idName=None, res_rows=None, res_cols=None, fps_target=5, calcRotations=True, postFunction=None, postFunctionArgs={}, configOverrides={}, ids_of_interest=None, decorate=True):
 		"""Start ArUco marker detection in a separate thread.
 
 		Creates and starts an _Aruco instance that continuously detects ArUco markers in
@@ -402,6 +402,11 @@ class Camera():
 				olab_utils.ARUCO_DRAWING_DEFAULTS.
 			ids_of_interest (list, optional): List of specific marker IDs to detect. If None,
 				detects all markers.
+			decorate (bool): Whether to register this feature's detection overlay on the
+				streamed frame. Default True (matches legacy behavior). Set False to run
+				detection without drawing on the stream. Cannot be changed dynamically --
+				it's only read once, at start(); to change it, stop() this feature and
+				call addAruco() again.
 
 		Notes:
 			- Prevents starting multiple instances with the same idName.
@@ -436,7 +441,7 @@ class Camera():
 			res_rows  = self.defaultFromNone(res_rows,  self.res_rows,   int)
 			res_cols  = self.defaultFromNone(res_cols,  self.res_cols,   int)
 
-			self.aruco[idName] = _Aruco(self, idName, res_rows, res_cols, int(fps_target), calcRotations, postFunction, postFunctionArgs, configDict, ids_of_interest)
+			self.aruco[idName] = _Aruco(self, idName, res_rows, res_cols, int(fps_target), calcRotations, postFunction, postFunctionArgs, configDict, ids_of_interest, decorate)
 
 			self.aruco[idName].start()
 
@@ -444,7 +449,7 @@ class Camera():
 			self.logger.log(f'Error in addAruco: {e}.', severity=olab_utils.SEVERITY_ERROR)
 
 	def addQR(self, idName=None, decoder='cv2', ids_of_interest=None,
-			  res_rows=None, res_cols=None, fps_target=5, postFunction=None, postFunctionArgs=None, color=(0,0,255)):
+			  res_rows=None, res_cols=None, fps_target=5, postFunction=None, postFunctionArgs=None, color=(0,0,255), decorate=True):
 		"""Start QR-code detection in a separate thread.
 
 		Creates and starts a _QRCode instance that continuously decodes QR codes in camera
@@ -482,6 +487,11 @@ class Camera():
 				dict you pass in is never mutated, and each QR instance gets its own
 				independent args dict (never `None` or `{}` shared across instances).
 			color (tuple): BGR color for drawing QR outlines. Default (0,0,255) red.
+			decorate (bool): Whether to register this feature's detection overlay on the
+				streamed frame. Default True (matches legacy behavior). Set False to run
+				detection without drawing on the stream. Cannot be changed dynamically --
+				it's only read once, at start(); to change it, stop() this feature and
+				call addQR() again.
 
 		Notes:
 			- Prevents starting multiple instances with the same idName.
@@ -505,7 +515,7 @@ class Camera():
 			res_cols  = self.defaultFromNone(res_cols,  self.res_cols,   int)
 
 			self.qr[idName] = _QRCode(self, idName, decoder, ids_of_interest,
-									   res_rows, res_cols, int(fps_target), postFunction, postFunctionArgs, color)
+									   res_rows, res_cols, int(fps_target), postFunction, postFunctionArgs, color, decorate)
 			self.qr[idName].start()
 
 		except Exception as e:
@@ -546,7 +556,7 @@ class Camera():
 		"""
 		self.extrinsics = {'position': (x, y, z), 'orientation': (roll, pitch, yaw)}
 
-	def addBarcode(self, res_rows=None, res_cols=None, fps_target=5, postFunction=None, postFunctionArgs={}, color=(0,0,255)):
+	def addBarcode(self, res_rows=None, res_cols=None, fps_target=5, postFunction=None, postFunctionArgs={}, color=(0,0,255), decorate=True):
 		"""Start barcode and QR code detection using pyzbar in a separate thread.
 
 		Creates and starts a _Barcode instance that continuously scans for 1D/2D barcodes
@@ -559,6 +569,11 @@ class Camera():
 			postFunction (callable, optional): Callback function executed after each detection.
 			postFunctionArgs (dict): Additional keyword arguments passed to postFunction.
 			color (tuple): BGR color for drawing barcode bounding boxes. Default (0,0,255) red.
+			decorate (bool): Whether to register this feature's detection overlay on the
+				streamed frame. Default True (matches legacy behavior). Set False to run
+				detection without drawing on the stream. Cannot be changed dynamically --
+				it's only read once, at start(); to change it, stop() this feature and
+				call addBarcode() again.
 
 		Notes:
 			- Only one barcode detection instance ('default') is allowed at a time.
@@ -568,11 +583,11 @@ class Camera():
 		try:
 			# self.barcode is a dictionary.  We'll limit ourselves to just 1 barcode thread. though.
 			idName = 'default'
-			
+
 			res_rows  = self.defaultFromNone(res_rows,  self.res_rows,   int)
 			res_cols  = self.defaultFromNone(res_cols,  self.res_cols,   int)
-			
-			self.barcode[idName] = _Barcode(self, idName, res_rows, res_cols, int(fps_target), postFunction, postFunctionArgs, color)
+
+			self.barcode[idName] = _Barcode(self, idName, res_rows, res_cols, int(fps_target), postFunction, postFunctionArgs, color, decorate)
 			self.barcode[idName].start() 
 
 		except Exception as e:
@@ -617,7 +632,7 @@ class Camera():
 			self.logger.log(f'Error in addCalibrate: {e}.', severity=olab_utils.SEVERITY_ERROR)
 
 
-	def addFaceDetect(self, res_rows=None, res_cols=None, fps_target=5, postFunction=None, postFunctionArgs={}, color=(0,255,255), conf_threshold=0.7, model_name='face_detection_yunet_2023mar.onnx', device='cpu', modelPath=None):
+	def addFaceDetect(self, res_rows=None, res_cols=None, fps_target=5, postFunction=None, postFunctionArgs={}, color=(0,255,255), conf_threshold=0.7, model_name='face_detection_yunet_2023mar.onnx', device='cpu', modelPath=None, decorate=True):
 		"""Start face detection using OpenCV's built-in YuNet DNN model (cv2.FaceDetectorYN).
 
 		Creates and starts a _FaceDetect instance that detects faces (plus 5 facial
@@ -638,6 +653,11 @@ class Camera():
 			device (str): Compute device ('cpu' or 'gpu'). Default 'cpu'.
 			modelPath (str, optional): Custom path to DNN model files. If None, uses default
 				models bundled with olab_camera.
+			decorate (bool): Whether to register this feature's detection overlay on the
+				streamed frame. Default True (matches legacy behavior). Set False to run
+				detection without drawing on the stream. Cannot be changed dynamically --
+				it's only read once, at start(); to change it, stop() this feature and
+				call addFaceDetect() again.
 
 		Raises:
 			Exception: any failure resolving/loading the YuNet model propagates directly
@@ -656,14 +676,14 @@ class Camera():
 			res_rows  = self.defaultFromNone(res_rows,  self.res_rows,   int)
 			res_cols  = self.defaultFromNone(res_cols,  self.res_cols,   int)
 
-			self.facedetect[idName] = _FaceDetect(self, idName, res_rows, res_cols, int(fps_target), postFunction, postFunctionArgs, color, conf_threshold, model_name, device, modelPath)
+			self.facedetect[idName] = _FaceDetect(self, idName, res_rows, res_cols, int(fps_target), postFunction, postFunctionArgs, color, conf_threshold, model_name, device, modelPath, decorate)
 			self.facedetect[idName].start()
 
 		except Exception as e:
 			self.logger.log(f'Error in addFaceDetect: {e}.', severity=olab_utils.SEVERITY_ERROR)
 		
 	
-	def addROI(self, roiTrackerName=None, roiBB=None, fps_target=5, postFunction=None, color=(255,255,255)):
+	def addROI(self, roiTrackerName=None, roiBB=None, fps_target=5, postFunction=None, color=(255,255,255), decorate=True):
 		"""Start region-of-interest (ROI) tracking using OpenCV object trackers.
 
 		Creates and starts an _ROI instance that tracks a specified region across frames
@@ -677,6 +697,11 @@ class Camera():
 			postFunction (callable, optional): Callback function executed after each tracking
 				update with current bounding box.
 			color (tuple): BGR color for drawing tracking box. Default (255,255,255) white.
+			decorate (bool): Whether to register this feature's tracking-box overlay on the
+				streamed frame. Default True (matches legacy behavior). Set False to run
+				tracking without drawing on the stream. Cannot be changed dynamically --
+				it's only read once, at start(); to change it, stop() this feature and
+				call addROI() again.
 
 		Notes:
 			- Only one ROI tracking instance ('default') can run at a time.
@@ -693,10 +718,10 @@ class Camera():
 				# This should be an integer 4-tuple, of the form `(x, y, w, h)`
 				self.logger.log('Error in addROI: bb is None', severity=olab_utils.SEVERITY_ERROR)
 				return
-				
+
 			# self.roi is a dictionary.  We'll limit ourselves to just 1 ROI thread. though.
 			idName = 'default'
-			self.roi[idName] = _ROI(self, idName, roiTrackerName, roiBB, int(fps_target), postFunction, color)
+			self.roi[idName] = _ROI(self, idName, roiTrackerName, roiBB, int(fps_target), postFunction, color, decorate)
 			self.roi[idName].start() 
 
 		except Exception as e:
@@ -748,7 +773,7 @@ class Camera():
 			self.logger.log(f'Error in addTimelapse: {e}.', severity=olab_utils.SEVERITY_ERROR)
 		
 
-	def addUltralytics(self, idName=None, res_rows=None, res_cols=None, fps_target=None, postFunction=None, postFunctionArgs={}, color=(0,255,255), conf_threshold=0.25, model_name=None, verbose=False, drawBox=None, drawLabel=None, maskOutline=False):
+	def addUltralytics(self, idName=None, res_rows=None, res_cols=None, fps_target=None, postFunction=None, postFunctionArgs={}, color=(0,255,255), conf_threshold=0.25, model_name=None, verbose=False, drawBox=None, drawLabel=None, maskOutline=False, decorate=True):
 		"""Start Ultralytics YOLO model inference for object detection, segmentation, or pose estimation.
 
 		Creates and starts an _Ultralytics instance that runs YOLO models on camera frames
@@ -771,6 +796,11 @@ class Camera():
 			drawLabel (bool, optional): Whether to draw class labels on detections.
 			maskOutline (bool): For segmentation, draw mask outlines instead of filled masks.
 				Default False.
+			decorate (bool): Whether to register this feature's detection overlay on the
+				streamed frame. Default True (matches legacy behavior). Set False to run
+				inference without drawing on the stream. Cannot be changed dynamically --
+				it's only read once, at start(); to change it, stop() this feature and
+				call addUltralytics() again.
 
 		Notes:
 			- Requires Ultralytics library installation.
@@ -793,7 +823,7 @@ class Camera():
 			res_cols   = self.defaultFromNone(res_cols,   self.res_cols,   int)
 			fps_target = self.defaultFromNone(fps_target, self.fps_target, int)
 			
-			self.ultralytics[idName] = _Ultralytics(self, idName, res_rows, res_cols, int(fps_target), postFunction, postFunctionArgs, color, conf_threshold, model_name, verbose, drawBox, drawLabel, maskOutline)
+			self.ultralytics[idName] = _Ultralytics(self, idName, res_rows, res_cols, int(fps_target), postFunction, postFunctionArgs, color, conf_threshold, model_name, verbose, drawBox, drawLabel, maskOutline, decorate)
 			self.ultralytics[idName].start() 
 			
 		except Exception as e:

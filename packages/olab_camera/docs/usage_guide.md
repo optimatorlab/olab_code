@@ -199,7 +199,8 @@ camera.addAruco(idName=ARUCO_DICTIONARY,
                 postFunction=aruco_post_poses,
                 postFunctionArgs={'idName': ARUCO_DICTIONARY},
                 configOverrides={},
-                ids_of_interest=None)  # default is None, or provide a list of IDs to track
+                ids_of_interest=None,  # default is None, or provide a list of IDs to track
+                decorate=True)  # default is True; set False to skip drawing detections on the stream
 ```
 
 **Run the next cell when you're ready to stop the ArUco detection:**
@@ -225,7 +226,8 @@ def postBarcode(argsDict):
 ```python
 # Start the barcode reader, pointing to the `postBarcode()` function:
 camera.addBarcode(fps_target=5,
-                  postFunction=postBarcode)
+                  postFunction=postBarcode,
+                  decorate=True)  # default is True; set False to skip drawing detections on the stream
 ```
 
 **Run the next cell when you're ready to stop the barcode reader:**
@@ -355,7 +357,8 @@ camera.addQR(idName='default',
              decoder='cv2',
              postFunction=postQR,
              postFunctionArgs={'idName': 'default'},
-             ids_of_interest=None)  # default is None, or provide a list of payloads to track
+             ids_of_interest=None,  # default is None, or provide a list of payloads to track
+             decorate=True)  # default is True; set False to skip drawing detections on the stream
 ```
 
 **Run the next cell when you're ready to stop QR detection:**
@@ -417,7 +420,8 @@ def qr_post_poses(argsDict):
 camera.addQR(idName='default',
              decoder='cv2',
              postFunction=qr_post_poses,
-             postFunctionArgs={'idName': 'default'})
+             postFunctionArgs={'idName': 'default'},
+             decorate=True)  # default is True; set False to skip drawing detections on the stream
 ```
 
 - **NOTE**: `findTagPose()`/`findTagPoseGlobal()`/`findCameraPoseGlobal()`/`findTagPoses()`
@@ -458,7 +462,8 @@ camera.addFaceDetect(fps_target=5,
                      conf_threshold=0.7,
                      model_name='face_detection_yunet_2023mar.onnx',  # or '..._int8.onnx' for lower resource usage
                      device='cpu',
-                     modelPath=modelPath)
+                     modelPath=modelPath,
+                     decorate=True)  # default is True; set False to skip drawing detections on the stream
 ```
 
 **Run the next cell when you're ready to stop the face detection:**
@@ -475,6 +480,10 @@ The following options are documented:
 - Oriented Bounding Box (obb)
 - Segment (mask)
 - Track (can be applied to `Detect`, `Pose`, and `Segment`)
+
+All `addUltralytics()` calls below also accept `decorate=True` (default; set
+False to skip drawing detections on the stream) -- shown explicitly on the
+Detect example below, and applies the same way to Pose/OBB/Segment/Track.
 
 The examples below use the YOLO 11 pre-trained models.  See https://docs.ultralytics.com/models/ for other options.
 
@@ -513,7 +522,8 @@ def postUltralyticsDetect(argsDict):
 camera.addUltralytics(idName="detect",
                       model_name="yolo11n.pt",
                       conf_threshold=0.75,
-                      postFunction=postUltralyticsDetect)
+                      postFunction=postUltralyticsDetect,
+                      decorate=True)  # default is True; set False to skip drawing detections on the stream
 ```
 
 ```python
@@ -771,4 +781,5 @@ camera.removeDecoration(tid)
 
 ### Region of Interest (ROI)
 - Deprecated.  This functionality would (poorly) track a selected object.  The Ultralytics tracking is better (although it's limited to trained objects).
+- `addROI()` also accepts `decorate=True` (default; set `False` to track without drawing the tracking box on the stream), same as the other detection methods above.
 

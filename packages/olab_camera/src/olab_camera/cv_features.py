@@ -43,10 +43,11 @@ class _Aruco():
 		start(): Start the detection thread
 		stop(): Stop the detection thread and cleanup
 	"""
-	def __init__(self, camObject, idName, res_rows, res_cols, fps_target, calcRotations, postFunction, postFunctionArgs, configDict, ids_of_interest):
+	def __init__(self, camObject, idName, res_rows, res_cols, fps_target, calcRotations, postFunction, postFunctionArgs, configDict, ids_of_interest, decorate=True):
 		self.camObject = camObject  # This is the parent!
 
 		self.idName   = idName
+		self.decorate = decorate
 		self.decorationID = None
 
 		self.res_rows = res_rows
@@ -209,9 +210,9 @@ class _Aruco():
 			arucoThread.start()
 
 			# Add to decorations deque
-			# FIXME -- Maybe we don't necessarily want to decorate?
-			self.decorationID = int(time.time()*1000)
-			self.camObject.dec['dequeAdd'].append({'function': self._decorate, 'idName': self.idName, 'decorationID': self.decorationID})
+			if (self.decorate):
+				self.decorationID = int(time.time()*1000)
+				self.camObject.dec['dequeAdd'].append({'function': self._decorate, 'idName': self.idName, 'decorationID': self.decorationID})
 
 		except Exception as e:
 			self.camObject.logger.log(f'Error in aruco start: {e}.', severity=olab_utils.SEVERITY_ERROR)
@@ -555,7 +556,7 @@ class _Barcode():
 		start(): Launches barcode detection thread.
 		stop(): Terminates detection thread and cleans up resources.
 	"""
-	def __init__(self, camObject, idName, res_rows, res_cols, fps_target, postFunction, postFunctionArgs, color):
+	def __init__(self, camObject, idName, res_rows, res_cols, fps_target, postFunction, postFunctionArgs, color, decorate=True):
 		"""Initialize barcode detection feature.
 
 		Args:
@@ -567,15 +568,18 @@ class _Barcode():
 			postFunction (callable): Callback executed after each detection cycle.
 			postFunctionArgs (dict): Arguments for post-processing callback.
 			color (tuple): RGB color tuple for barcode visualization.
+			decorate (bool): Whether to register this feature's detection overlay on the
+				streamed frame. Default True.
 		"""
 		try:
 			# https://pypi.org/project/pyzbar/
 			from pyzbar import pyzbar
 			self.pyzbar = pyzbar
-			
+
 			self.camObject = camObject  # This is the parent!
-								
+
 			self.idName   = idName
+			self.decorate = decorate
 			self.decorationID = None
 			
 			self.res_rows = res_rows
@@ -709,9 +713,9 @@ class _Barcode():
 				self.camObject.decorations['barcode'].append(self.idName)
 			'''
 			# Add to decorations deque
-			# FIXME -- Maybe we don't necessarily want to decorate?
-			self.decorationID = int(time.time()*1000)
-			self.camObject.dec['dequeAdd'].append({'function': self._decorate, 'idName': self.idName, 'decorationID': self.decorationID})
+			if (self.decorate):
+				self.decorationID = int(time.time()*1000)
+				self.camObject.dec['dequeAdd'].append({'function': self._decorate, 'idName': self.idName, 'decorationID': self.decorationID})
 
 			self.camObject.logger.log(f'Starting barcode {self.idName} thread at {self.fps_target} fps', severity=olab_utils.SEVERITY_INFO)
 
@@ -794,7 +798,7 @@ class _QRCode():
 		stop(): Terminates detection thread and cleans up resources.
 	"""
 	def __init__(self, camObject, idName, decoder, ids_of_interest,
-				 res_rows, res_cols, fps_target, postFunction, postFunctionArgs, color):
+				 res_rows, res_cols, fps_target, postFunction, postFunctionArgs, color, decorate=True):
 		# Set first, unconditionally, so that even if construction fails
 		# partway through (e.g. an invalid decoder, below), this object is
 		# never left without the attribute addQR() checks on a later retry --
@@ -805,6 +809,7 @@ class _QRCode():
 			self.camObject = camObject  # This is the parent!
 
 			self.idName = idName
+			self.decorate = decorate
 			self.decorationID = None
 
 			self.decoder = decoder
@@ -983,8 +988,9 @@ class _QRCode():
 		function to visualize detected QR codes on the video stream.
 		"""
 		try:
-			self.decorationID = int(time.time()*1000)
-			self.camObject.dec['dequeAdd'].append({'function': self._decorate, 'idName': self.idName, 'decorationID': self.decorationID})
+			if (self.decorate):
+				self.decorationID = int(time.time()*1000)
+				self.camObject.dec['dequeAdd'].append({'function': self._decorate, 'idName': self.idName, 'decorationID': self.decorationID})
 
 			self.camObject.logger.log(f'Starting QRCode {self.idName} thread at {self.fps_target} fps (decoder={self.decoder})', severity=olab_utils.SEVERITY_INFO)
 
@@ -1050,7 +1056,7 @@ class _FaceDetect():
 		start(): Launches face detection thread.
 		stop(): Terminates detection thread and cleans up resources.
 	"""
-	def __init__(self, camObject, idName, res_rows, res_cols, fps_target, postFunction, postFunctionArgs, color, conf_threshold, model_name, device, modelPath):
+	def __init__(self, camObject, idName, res_rows, res_cols, fps_target, postFunction, postFunctionArgs, color, conf_threshold, model_name, device, modelPath, decorate=True):
 		"""Initialize face detection feature.
 
 		Args:
@@ -1068,6 +1074,8 @@ class _FaceDetect():
 				"face_detection_yunet_2023mar_int8.onnx" (smaller/faster, lower accuracy)).
 			device (str): Computation device ("cpu" or "gpu").
 			modelPath (str): Path to directory containing model files, or None for default.
+			decorate (bool): Whether to register this feature's detection overlay on the
+				streamed frame. Default True.
 
 		Raises:
 			Exception: any failure while resolving/loading the YuNet model (missing/
@@ -1083,6 +1091,7 @@ class _FaceDetect():
 		self.camObject = camObject  # This is the parent!
 
 		self.idName   = idName
+		self.decorate = decorate
 		self.decorationID = None
 
 		self.res_rows = res_rows
@@ -1224,9 +1233,9 @@ class _FaceDetect():
 				self.camObject.decorations['facedetect'].append(self.idName)
 			'''
 			# Add to decorations deque
-			# FIXME -- Maybe we don't necessarily want to decorate?
-			self.decorationID = int(time.time()*1000)
-			self.camObject.dec['dequeAdd'].append({'function': self._decorate, 'idName': self.idName, 'decorationID': self.decorationID})
+			if (self.decorate):
+				self.decorationID = int(time.time()*1000)
+				self.camObject.dec['dequeAdd'].append({'function': self._decorate, 'idName': self.idName, 'decorationID': self.decorationID})
 
 			self.camObject.logger.log(f'Starting facedetect {self.idName} thread at {self.fps_target} fps', severity=olab_utils.SEVERITY_INFO)
 
@@ -1470,7 +1479,7 @@ class _ROI():
 		ROI tracking requires the camera resolution to remain constant. The thread
 		will terminate if resolution changes are detected.
 	"""
-	def __init__(self, camObject, idName, roiTrackerName, roiBB, fps_target, postFunction, color):
+	def __init__(self, camObject, idName, roiTrackerName, roiBB, fps_target, postFunction, color, decorate=True):
 		"""Initialize region-of-interest tracking feature.
 
 		Args:
@@ -1481,11 +1490,14 @@ class _ROI():
 			fps_target (float): Target tracking rate in Hz.
 			postFunction (callable): Callback executed after each tracking update.
 			color (tuple): RGB color tuple for ROI box visualization.
+			decorate (bool): Whether to register this feature's tracking-box overlay on
+				the streamed frame. Default True.
 		"""
 		try:
 			self.camObject = camObject  # This is the parent!
-						
+
 			self.idName     = idName
+			self.decorate = decorate
 			self.decorationID = None
 							
 			self.roiBB      = roiBB  #  (x, y, w, h)
@@ -1593,9 +1605,9 @@ class _ROI():
 				self.camObject.decorations['roi'].append(self.idName)
 			'''
 			# Add to decorations deque
-			# FIXME -- Maybe we don't necessarily want to decorate?
-			self.decorationID = int(time.time()*1000)
-			self.camObject.dec['dequeAdd'].append({'function': self._decorate, 'idName': self.idName, 'decorationID': self.decorationID})
+			if (self.decorate):
+				self.decorationID = int(time.time()*1000)
+				self.camObject.dec['dequeAdd'].append({'function': self._decorate, 'idName': self.idName, 'decorationID': self.decorationID})
 
 			self.camObject.logger.log(f'Starting ROI thread {self.idName} at {self.fps_target} fps', severity=olab_utils.SEVERITY_INFO)
 
@@ -1666,7 +1678,7 @@ class _Ultralytics():
 		start(): Launches YOLO inference thread.
 		stop(): Terminates inference thread and cleans up resources.
 	"""
-	def __init__(self, camObject, idName, res_rows, res_cols, fps_target, postFunction, postFunctionArgs, color, conf_threshold, model_name, verbose, drawBox, drawLabel, maskOutline):
+	def __init__(self, camObject, idName, res_rows, res_cols, fps_target, postFunction, postFunctionArgs, color, conf_threshold, model_name, verbose, drawBox, drawLabel, maskOutline, decorate=True):
 		"""Initialize Ultralytics YOLO feature.
 
 		Args:
@@ -1684,6 +1696,8 @@ class _Ultralytics():
 			drawBox (bool): Draw bounding boxes on detections, or None for auto.
 			drawLabel (bool): Draw class labels on detections, or None for auto.
 			maskOutline (bool): Draw mask outlines for segmentation tasks.
+			decorate (bool): Whether to register this feature's detection overlay on the
+				streamed frame. Default True.
 		"""
 		self.camObject = camObject  # This is the parent!
 
@@ -1692,9 +1706,10 @@ class _Ultralytics():
 		except Exception as e:
 			self.camObject.logger.log(f'Error in ultralytics import: {e}.', severity=olab_utils.SEVERITY_ERROR)
 			return
-			
-		try:												
+
+		try:
 			self.idName   = idName          # "detect", "classify", "pose", "obb", "track", or "segment"
+			self.decorate = decorate
 			self.model_name = model_name    # "yolo11n.pt", "yolo11n-cls.pt", etc
 			self.model = YOLO(model_name)
 			self.verbose = verbose
@@ -1914,9 +1929,9 @@ class _Ultralytics():
 			ultraThread.start()
 
 			# Add to decorations deque
-			# FIXME -- Maybe we don't necessarily want to decorate?
-			self.decorationID = int(time.time()*1000)
-			self.camObject.dec['dequeAdd'].append({'function': self._decorate, 'idName': self.idName, 'decorationID': self.decorationID})
+			if (self.decorate):
+				self.decorationID = int(time.time()*1000)
+				self.camObject.dec['dequeAdd'].append({'function': self._decorate, 'idName': self.idName, 'decorationID': self.decorationID})
 
 		except Exception as e:
 			self.camObject.logger.log(f'Error in ultralytics start: {e}.', severity=olab_utils.SEVERITY_ERROR)
