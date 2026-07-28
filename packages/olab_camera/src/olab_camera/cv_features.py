@@ -1056,7 +1056,7 @@ class _FaceDetect():
 		start(): Launches face detection thread.
 		stop(): Terminates detection thread and cleans up resources.
 	"""
-	def __init__(self, camObject, idName, res_rows, res_cols, fps_target, postFunction, postFunctionArgs, color, conf_threshold, model_name, device, modelPath, decorate=True):
+	def __init__(self, camObject, idName, res_rows, res_cols, fps_target, postFunction, postFunctionArgs, color, conf_threshold, model_name, device, modelPath, decorate=True, drawLandmarks=True):
 		"""Initialize face detection feature.
 
 		Args:
@@ -1076,6 +1076,9 @@ class _FaceDetect():
 			modelPath (str): Path to directory containing model files, or None for default.
 			decorate (bool): Whether to register this feature's detection overlay on the
 				streamed frame. Default True.
+			drawLandmarks (bool): Whether to draw the 5 facial landmark points (eyes,
+				nose, mouth corners) on the streamed frame, in addition to the
+				bounding box. Default True.
 
 		Raises:
 			Exception: any failure while resolving/loading the YuNet model (missing/
@@ -1092,6 +1095,7 @@ class _FaceDetect():
 
 		self.idName   = idName
 		self.decorate = decorate
+		self.drawLandmarks = drawLandmarks
 		self.decorationID = None
 
 		self.res_rows = res_rows
@@ -1146,7 +1150,9 @@ class _FaceDetect():
 		olab_utils.decorateFaceDetect(img,
 								   self.deque[0]['confidence'],
 								   self.deque[0]['corners'],
-								   self.deque[0]['color'], addText=True)
+								   self.deque[0]['color'], addText=True,
+								   landmarks=self.deque[0]['landmarks'],
+								   drawLandmarks=self.drawLandmarks)
 
 
 	def _thread_FaceDetect(self):

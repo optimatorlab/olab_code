@@ -474,21 +474,16 @@ def decorateBarcode(img, corners, data, color=(0,0,255), addText=True):
 	try:
 		for i in range(0, len(corners)):
 			# Draw bounding box:
-			# print('corners', i, ': ', corners[i])
-			# cv2.polylines(img, [corners[i]], True, color, 2, cv2.LINE_AA)
 			cv2.rectangle(img, corners[i][0], corners[i][1],
 				color, 2, cv2.LINE_AA)
 
-			
-			'''
-			FIXME -- This is giving an error about index 1..
-			# Add label to bounding box (top right corner)
+			# Add label above the bbox's top-left corner:
 			if (addText):
+				topPoint = corners[i][0]
 				cv2.putText(img, str(data[i]),
-					(corners[i][0][1][0], corners[i][0][1][1] - 7),
+					(int(topPoint[0]), int(topPoint[1]) - 7),
 					cv2.FONT_HERSHEY_SIMPLEX,
-					0.5, color, 1, cv2.LINE_AA)		
-			'''
+					0.5, color, 1, cv2.LINE_AA)
 	except Exception as e:
 		print(f'Error in decorateBarcode: {e}')
 
@@ -824,7 +819,8 @@ def decorateCalibrate(img, checkerboard, corners, count, img_x_y, orig_x_y, addT
 	except Exception as e:
 		print(f'Error in decorateCalibrate: {e}')
 
-def decorateFaceDetect(img, confidence, corners, color=(0, 255, 255), addText=True):
+def decorateFaceDetect(img, confidence, corners, color=(0, 255, 255), addText=True,
+						landmarks=None, drawLandmarks=True):
 	'''
 	img is a numpy array of the cv2 image.
 		We will update the image itself.
@@ -832,25 +828,32 @@ def decorateFaceDetect(img, confidence, corners, color=(0, 255, 255), addText=Tr
 	corners - output from olab_utils.detectFaces(): a list of
 		[(x1,y1),(x2,y2)] int-pixel-coordinate pairs per face (top-left,
 		bottom-right).
+	landmarks - output from olab_utils.detectFaces(): a list of 5 (x,y)
+		int-pixel-coordinate tuples per face (right eye, left eye, nose tip,
+		right mouth corner, left mouth corner), same order/length as
+		corners. None (default) draws no landmark dots regardless of
+		drawLandmarks.
+	drawLandmarks - whether to draw a small dot at each landmark point, when
+		landmarks is given. Default True.
 	'''
 	try:
 		for i in range(0, len(corners)):
 			# Draw bounding box:
-			# print('corners', i, ': ', corners[i])
-			# cv2.polylines(img, [corners[i]], True, color, 2, cv2.LINE_AA)
 			cv2.rectangle(img, corners[i][0], corners[i][1],
 				color, 2, cv2.LINE_AA)
 
-
-			'''
-			FIXME -- This is giving an error about index 1..
-			# Add label to bounding box (top right corner)
+			# Add confidence label above the bbox's top-left corner:
 			if (addText):
-				cv2.putText(img, str(data[i]),
-					(corners[i][0][1][0], corners[i][0][1][1] - 7),
+				topPoint = corners[i][0]
+				cv2.putText(img, f'{confidence[i]:.2f}',
+					(int(topPoint[0]), int(topPoint[1]) - 7),
 					cv2.FONT_HERSHEY_SIMPLEX,
 					0.5, color, 1, cv2.LINE_AA)
-			'''
+
+			# Draw a small dot at each of the 5 landmark points:
+			if (drawLandmarks) and (landmarks is not None):
+				for (lx, ly) in landmarks[i]:
+					cv2.circle(img, (int(lx), int(ly)), 3, color, -1)
 	except Exception as e:
 		print(f'Error in decorateFaceDetect: {e}')
 

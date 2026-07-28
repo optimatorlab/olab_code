@@ -463,7 +463,8 @@ camera.addFaceDetect(fps_target=5,
                      model_name='face_detection_yunet_2023mar.onnx',  # or '..._int8.onnx' for lower resource usage
                      device='cpu',
                      modelPath=modelPath,
-                     decorate=True)  # default is True; set False to skip drawing detections on the stream
+                     decorate=True,  # default is True; set False to skip drawing detections on the stream
+                     drawLandmarks=True)  # default is True; set False to skip drawing the 5 facial landmark points
 ```
 
 **Run the next cell when you're ready to stop the face detection:**

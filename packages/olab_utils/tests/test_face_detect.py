@@ -115,3 +115,48 @@ def test_decorateFaceDetect_consumes_detectFaces_output_without_error():
     olab_utils.decorateFaceDetect(img, confidence, corners, color=(0, 255, 255))
     # No exception raised == success; also confirm it actually drew something.
     assert img.sum() > 0
+
+
+def test_decorateFaceDetect_draws_landmark_dots_when_enabled():
+    faces = np.array([_one_face_row(20.0, 20.0, 40.0, 40.0)])
+    detector = _FakeYuNetDetector(faces)
+    (confidence, corners, landmarks) = olab_utils.detectFaces(np.zeros((100, 100)), detector)
+
+    img = np.zeros((100, 100, 3), dtype=np.uint8)
+    olab_utils.decorateFaceDetect(img, confidence, corners, color=(0, 255, 255),
+                                   addText=False, landmarks=landmarks, drawLandmarks=True)
+
+    for (lx, ly) in landmarks[0]:
+        assert img[ly, lx].sum() > 0, f"landmark point ({lx},{ly}) was not drawn"
+
+
+def test_decorateFaceDetect_skips_landmark_dots_when_disabled():
+    faces = np.array([_one_face_row(20.0, 20.0, 40.0, 40.0)])
+    detector = _FakeYuNetDetector(faces)
+    (confidence, corners, landmarks) = olab_utils.detectFaces(np.zeros((100, 100)), detector)
+
+    img = np.zeros((100, 100, 3), dtype=np.uint8)
+    olab_utils.decorateFaceDetect(img, confidence, corners, color=(0, 255, 255),
+                                   addText=False, landmarks=landmarks, drawLandmarks=False)
+
+    for (lx, ly) in landmarks[0]:
+        assert img[ly, lx].sum() == 0, f"landmark point ({lx},{ly}) was drawn despite drawLandmarks=False"
+
+
+def test_decorateFaceDetect_addText_renders_confidence_label():
+    # Regression test for the addText indexing bug (corners[i][0][1][0] on a
+    # plain 2-tuple, plus an undefined `data[i]` reference) -- the old code
+    # either raised (silently swallowed by decorateFaceDetect()'s own
+    # try/except) or never rendered anything, so a "doesn't raise" test
+    # alone can't catch this; check the label ROI actually got drawn into.
+    faces = np.array([_one_face_row(30.0, 30.0, 30.0, 30.0)])
+    detector = _FakeYuNetDetector(faces)
+    (confidence, corners, landmarks) = olab_utils.detectFaces(np.zeros((100, 100)), detector)
+
+    img = np.zeros((100, 100, 3), dtype=np.uint8)
+    olab_utils.decorateFaceDetect(img, confidence, corners, color=(0, 255, 255),
+                                   addText=True, drawLandmarks=False)
+
+    (x1, y1) = corners[0][0]
+    roi = img[max(0, y1 - 15):y1, x1:x1 + 40]
+    assert roi.sum() > 0

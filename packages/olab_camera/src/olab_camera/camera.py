@@ -632,7 +632,7 @@ class Camera():
 			self.logger.log(f'Error in addCalibrate: {e}.', severity=olab_utils.SEVERITY_ERROR)
 
 
-	def addFaceDetect(self, res_rows=None, res_cols=None, fps_target=5, postFunction=None, postFunctionArgs={}, color=(0,255,255), conf_threshold=0.7, model_name='face_detection_yunet_2023mar.onnx', device='cpu', modelPath=None, decorate=True):
+	def addFaceDetect(self, res_rows=None, res_cols=None, fps_target=5, postFunction=None, postFunctionArgs={}, color=(0,255,255), conf_threshold=0.7, model_name='face_detection_yunet_2023mar.onnx', device='cpu', modelPath=None, decorate=True, drawLandmarks=True):
 		"""Start face detection using OpenCV's built-in YuNet DNN model (cv2.FaceDetectorYN).
 
 		Creates and starts a _FaceDetect instance that detects faces (plus 5 facial
@@ -658,6 +658,11 @@ class Camera():
 				detection without drawing on the stream. Cannot be changed dynamically --
 				it's only read once, at start(); to change it, stop() this feature and
 				call addFaceDetect() again.
+			drawLandmarks (bool): Whether to draw the 5 facial landmark points (eyes,
+				nose, mouth corners) on the streamed frame, in addition to the bounding
+				box. Default True. Cannot be changed dynamically -- it's only read once,
+				at start(); to change it, stop() this feature and call addFaceDetect()
+				again.
 
 		Raises:
 			Exception: any failure resolving/loading the YuNet model propagates directly
@@ -676,7 +681,7 @@ class Camera():
 			res_rows  = self.defaultFromNone(res_rows,  self.res_rows,   int)
 			res_cols  = self.defaultFromNone(res_cols,  self.res_cols,   int)
 
-			self.facedetect[idName] = _FaceDetect(self, idName, res_rows, res_cols, int(fps_target), postFunction, postFunctionArgs, color, conf_threshold, model_name, device, modelPath, decorate)
+			self.facedetect[idName] = _FaceDetect(self, idName, res_rows, res_cols, int(fps_target), postFunction, postFunctionArgs, color, conf_threshold, model_name, device, modelPath, decorate, drawLandmarks)
 			self.facedetect[idName].start()
 
 		except Exception as e:
