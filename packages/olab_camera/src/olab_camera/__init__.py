@@ -5,7 +5,8 @@ This module provides a comprehensive camera interface for USB cameras, Raspberry
 and ROS camera topics with extensive computer vision capabilities.
 
 Main Features:
-    - Multiple camera backends (USB, Raspberry Pi Camera Module, Gazebo Transport topics, ROS topics)
+    - Multiple camera backends (USB, Raspberry Pi Camera Module, Gazebo Transport topics, ROS topics,
+      Intel RealSense)
     - Video streaming over HTTPS — three protocol options:
         * MJPEG  (default, no extra deps)
         * WebSocket + JPEG  (pip install olab-camera[websocket])
@@ -27,6 +28,7 @@ Classes:
     CameraGazebo: Gazebo Transport topic subscriber/publisher
     CameraROS: ROS camera topic subscriber/publisher
     CameraUSB: USB camera and RTSP stream implementation
+    CameraRealSense: Intel RealSense camera (color + optional depth + optional IMU)
     CameraWebSocket: Virtual camera — accepts pushed JPEG frames via WSS (sim/Cesium use)
 
 Dependencies:
@@ -101,6 +103,7 @@ from .camera_pi import CameraPi, CameraPi2
 from .camera_gazebo import CameraGazebo
 from .camera_ros import CameraROS
 from .camera_usb import CameraUSB
+from .camera_realsense import CameraRealSense
 from .camera_websocket import CameraWebSocket, _WebSocketReceiveServer
 
 

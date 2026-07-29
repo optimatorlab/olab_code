@@ -1704,3 +1704,41 @@ def inches2meters(inches):
 
 def meters2inches(meters):
     return meters * 39.3701
+
+def validatePositiveIntOrNone(name, val):
+	"""Validate that a value is None or a positive int.
+
+	Raises ValueError synchronously if not -- useful for validating
+	constructor/method parameters as soon as they're received, before any
+	further processing. Rejects bools even though bool is a subclass of
+	int (a caller passing True/False for an int parameter is almost
+	certainly a mistake, not an intentional 1/0).
+
+	Args:
+		name (str): Parameter name, used only in the error message.
+		val: The value to validate.
+
+	Raises:
+		ValueError: `val` is not None and is not a positive int.
+	"""
+	if val is not None and (not isinstance(val, int) or isinstance(val, bool) or val <= 0):
+		raise ValueError(f'{name} must be a positive integer or None, got {val!r}')
+
+def validateIntInRangeOrNone(name, val, min_val, max_val):
+	"""Validate that a value is None or an int within [min_val, max_val].
+
+	Same contract as validatePositiveIntOrNone(), but for a bounded range
+	that may legitimately include 0 or negative values (unlike
+	validatePositiveIntOrNone(), which always excludes non-positive values).
+
+	Args:
+		name (str): Parameter name, used only in the error message.
+		val: The value to validate.
+		min_val (int): Minimum allowed value, inclusive.
+		max_val (int): Maximum allowed value, inclusive.
+
+	Raises:
+		ValueError: `val` is not None and is not an int in [min_val, max_val].
+	"""
+	if val is not None and (not isinstance(val, int) or isinstance(val, bool) or not (min_val <= val <= max_val)):
+		raise ValueError(f'{name} must be an integer in [{min_val}, {max_val}] or None, got {val!r}')

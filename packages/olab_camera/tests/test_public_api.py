@@ -15,6 +15,7 @@ PUBLIC_CLASS_NAMES = [
     "CameraGazebo",
     "CameraROS",
     "CameraUSB",
+    "CameraRealSense",
     "CameraWebSocket",
     "StreamingHandler",
     "StreamingServer",
@@ -31,7 +32,7 @@ def test_all_public_classes_resolve_at_root():
 
 
 def test_camera_backends_are_camera_subclasses():
-    for name in ["CameraPi", "CameraPi2", "CameraGazebo", "CameraROS", "CameraUSB", "CameraWebSocket"]:
+    for name in ["CameraPi", "CameraPi2", "CameraGazebo", "CameraROS", "CameraUSB", "CameraRealSense", "CameraWebSocket"]:
         backend = getattr(olab_camera, name)
         assert issubclass(backend, olab_camera.Camera), f"{name} is not a Camera subclass"
 
