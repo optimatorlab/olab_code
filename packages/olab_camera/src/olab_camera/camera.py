@@ -208,7 +208,15 @@ class Camera():
 		self.activeProtocol = None   # 'mjpeg' | 'websocket' | 'webrtc'
 		self.streamPort     = None
 		self.streamURL      = None
-		
+
+		# MJPEG-specific server lifecycle tracking (see stopStream()/
+		# _thread_stream_mjpeg()) -- websocket/webrtc don't need this,
+		# they already terminate cleanly on keepStreaming=False.
+		self._mjpegServer       = None
+		self._mjpegServingEvent = None
+		self._mjpegLock         = threading.Lock()
+		self._mjpegGeneration   = 0
+
 		self.keepPublishing = False   # _thread_ros
 		self.hasROSnode = False	
 			
@@ -896,7 +904,10 @@ class Camera():
 				self.streamURL = f'https://{_ip}:{port}/webrtc'
 
 			if protocol == 'mjpeg':
-				strThread = threading.Thread(target=self._thread_stream_mjpeg, args=(port,))
+				with self._mjpegLock:
+					self._mjpegGeneration += 1
+					generation = self._mjpegGeneration
+				strThread = threading.Thread(target=self._thread_stream_mjpeg, args=(port, generation))
 			elif protocol == 'websocket':
 				strThread = threading.Thread(target=self._thread_stream_websocket, args=(port,))
 			elif protocol == 'webrtc':
@@ -915,13 +926,34 @@ class Camera():
 		"""Stop the active video streaming server.
 
 		Sets keepStreaming to False, causing the streaming thread to terminate,
-		and clears the active protocol.
+		and clears the active protocol. For the MJPEG protocol specifically,
+		also shuts down and closes the underlying StreamingServer synchronously
+		before returning, so the port is genuinely free for immediate reuse
+		(websocket/webrtc already terminate cleanly on keepStreaming=False and
+		need no extra handling here).
 		"""
 		try:
 			self.keepStreaming   = False
 			self.activeProtocol = None
 			self.streamPort     = None
 			self.streamURL      = None
+			self.announceCondition()   # wake any per-connection handler loops immediately
+
+			with self._mjpegLock:
+				self._mjpegGeneration += 1   # invalidate any startup in flight
+				server        = self._mjpegServer
+				serving_event = self._mjpegServingEvent
+				self._mjpegServer       = None
+				self._mjpegServingEvent = None
+			if server is not None:
+				if serving_event.wait(timeout=STREAM_MAX_WAIT_TIME_SEC):
+					server.shutdown()     # documented-safe: serve_forever() confirmed
+					                      # genuinely running via service_actions()
+				# else: serve_forever() never signalled (shouldn't happen in
+				# practice -- would mean an exception between publish and the
+				# call) -- skip shutdown() to avoid the deadlock its own
+				# docstring warns about, and just release the socket below.
+				server.server_close()    # release the listening socket either way
 		except Exception as e:
 			self.logger.log(f'Error in stopStream: {e}.', severity=olab_utils.SEVERITY_ERROR)
 
@@ -1328,11 +1360,12 @@ class Camera():
 			# raise Exception(f'_thread_ros error: {e}')
 			self.logger.log(f'_thread_ros error: {e}.', severity=olab_utils.SEVERITY_ERROR)
 				
-	def _thread_stream_mjpeg(self, portNumber):
+	def _thread_stream_mjpeg(self, portNumber, generation):
 		'''
 		THIS IS A THREAD
 		It starts/runs the MJPEG streaming server
 		'''
+		server = None
 		try:
 			try:
 				self._ensureSslPath()		# Generate a local cert now, if one doesn't exist yet.
@@ -1358,9 +1391,46 @@ class Camera():
 					log_handshake_failure=_log_handshake_failure)
 				# -------------------------------------------
 
-				server.serve_forever()
+				# Reliable "the accept loop is genuinely running" signal for
+				# stopStream(): service_actions() is a stdlib extension hook
+				# that BaseServer.serve_forever() only calls from inside its
+				# own loop, after it has already entered and completed one
+				# select() -- unlike setting an event just before calling
+				# serve_forever() (a thread-switch in that gap could still
+				# let stopStream() race ahead and call shutdown() before the
+				# loop is genuinely running, which is exactly the deadlock
+				# shutdown()'s own docstring warns about), this signal
+				# structurally cannot fire early. Wrapping (not replacing)
+				# the original service_actions keeps this composable with a
+				# test subclass that overrides service_actions() itself.
+				serving_event = threading.Event()
+				original_service_actions = server.service_actions
+				def _signal_serving():
+					original_service_actions()
+					serving_event.set()
+				server.service_actions = _signal_serving
+
+				with self._mjpegLock:
+					if generation != self._mjpegGeneration:
+						# stopStream() (or a force=True replacement) already
+						# invalidated this attempt before we could publish --
+						# close immediately rather than leaking a bound port
+						# that nothing will ever be told to stop.
+						server.server_close()
+						return
+					self._mjpegServer       = server
+					self._mjpegServingEvent = serving_event
+
+				# Small poll_interval (vs. the 0.5s default) bounds how long
+				# the first service_actions() call -- and therefore
+				# stopStream()'s worst-case latency -- takes to arrive.
+				server.serve_forever(poll_interval=0.1)
 
 			finally:
+				with self._mjpegLock:
+					if self._mjpegServer is server:
+						self._mjpegServer       = None
+						self._mjpegServingEvent = None
 				self.logger.log('stopping _thread_stream_mjpeg thread', severity=olab_utils.SEVERITY_INFO)
 
 		except Exception as e:

@@ -220,9 +220,24 @@ group once, and grant access to it instead of everyone:
 sudo groupadd -f realsense
 sudo usermod -aG realsense $USER
 ```
-**Log out and back in (or run `newgrp realsense` in your current shell)**
-for the new group membership to take effect -- `usermod` alone does not
-update your already-running login session's group list.
+**`usermod` alone does not update your already-running login session's
+group list** -- and a plain **new terminal window is not a fresh login
+session** and will not pick up the change either. In most desktop
+environments (GNOME Terminal, etc.), a new window/tab is just a new shell
+spawned from a terminal-server process that has been running (with its
+original group list fixed) since you logged into your desktop session --
+opening another window doesn't make it re-read `/etc/group`. Confirmed
+this the hard way: opening a new terminal window still failed with the
+same IMU permission error, while `newgrp realsense` in the *existing*
+shell worked immediately. Two ways to actually pick up the new group:
+- **Immediately, in your current shell only**: run `newgrp realsense`
+  (or launch whatever needs it via `sg realsense -c '...'`). Only applies
+  to that shell and its children (e.g. a Jupyter server launched from it).
+- **Durably, for every future shell/terminal/app with no extra steps**:
+  fully log out of your desktop session and back in (or reboot). This
+  forces a fresh PAM-driven session that re-reads `/etc/group`, after
+  which new group membership is picked up automatically everywhere --
+  no `newgrp`/`sg` needed again.
 
 Create `/etc/udev/rules.d/99-realsense-iio.rules`:
 ```
