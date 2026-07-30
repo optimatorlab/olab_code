@@ -16,10 +16,11 @@ import numpy as np
 ```
 
 ### 2. Initialize your camera
-There are 3 types of camera classes:
+There are several types of camera classes:
 1. `CameraUSB` - This is for any camera that has a device path (like `/dev/video0`).  Examples include webcams, internal laptop cams, and even Raspberry Pi cameras.
 2. `CameraROS` - This is for cameras that subscribe to compressedImage topic, including Gazebo simulations and the Clover drone (real hardware).
 3. `CameraPi` - This is exclusive to Raspberry Pi cameras that use the `picamera` package.  This option is deprecated.
+4. `CameraRealSense` - For Intel RealSense devices (developed/tested against a D435i), via the `pyrealsense2` SDK. See [Section 5](#5-realsense-cameras-color--depth--imu) below for depth/IMU-specific usage.
 
 If you're unsure, chances are `CameraUSB` is the appropriate class for you.
 
@@ -120,6 +121,259 @@ camera.frameProcessor = my_pipeline
 
 ---
 
+### 5.  RealSense cameras (color + depth + IMU)
+
+`CameraRealSense` wraps Intel's `pyrealsense2` SDK. Install the optional
+dependency first:
+```bash
+pip install olab-camera[realsense]
+```
+
+**On x86_64 Linux (verified: Ubuntu 24.04, Python 3.12)** this installs a
+prebuilt `pyrealsense2` wheel with the RealSense SDK bundled in --
+no system-level `librealsense`/apt setup, no build step. Confirm it worked:
+```bash
+python -c "import pyrealsense2 as rs; print(rs.context().query_devices())"
+```
+This should print an (possibly empty, if no device is plugged in yet)
+device list with no errors -- if it raises `ModuleNotFoundError`, the
+`pip install` above didn't complete; if it raises something else, that's
+a real `pyrealsense2`/librealsense problem, not an `olab_camera` one.
+
+**On ARM (e.g. Raspberry Pi, including the CM5)**: `pyrealsense2` does
+publish prebuilt `manylinux2014_aarch64` wheels on PyPI, but only for
+specific CPython versions -- confirmed (via PyPI's own file index) that as
+of `pyrealsense2==2.58.3.10794` these exist for **Python 3.9, 3.10, and
+3.12** on aarch64, and *not* for 3.11 or 3.13. Check which case you're in
+before assuming `pip install` will "just work":
+```bash
+python3 --version
+```
+- **3.9 / 3.10 / 3.12 on aarch64**: `pip install olab-camera[realsense]`
+  should install a prebuilt wheel exactly like the x86_64 case above.
+- **3.11 (e.g. Raspberry Pi OS Bookworm's default) / 3.13 (e.g. Debian
+  Trixie's default) on aarch64, or any other platform without a matching
+  wheel**: `pip install pyrealsense2` will fail with "no matching
+  distribution." Options: install one of the supported Python versions
+  alongside the system default just for this venv (e.g. via your distro's
+  packages, `pyenv`, or `deadsnakes`), or build `librealsense` (with Python
+  bindings enabled) from source per Intel's official
+  [librealsense installation guide](https://github.com/IntelRealSense/librealsense/blob/master/doc/installation.md).
+  **Neither path is verified in this repo yet.**
+
+**Device permissions (Linux)**: if `query_devices()` finds nothing despite
+a RealSense camera being plugged in, it's usually a udev-rules issue (the
+device node exists but your user can't access it), not a Python/SDK
+problem -- Intel's installation guide above covers installing
+`librealsense`'s udev rules. Unplugging/replugging the device after
+installing the rules is often required.
+
+**IMU permissions (Linux, `enableIMU=True`)**: color and depth streaming
+use standard USB/UVC access, which `systemd-logind` grants your login
+session automatically (no extra udev rule needed on most desktop distros --
+confirmed on this repo's Ubuntu 24.04 dev machine). The IMU is different:
+it's exposed through the Linux **IIO** (Industrial I/O) subsystem via a HID
+sensor hub, and `logind`'s automatic per-session ACLs do *not* cover IIO
+devices. Without an explicit udev rule, `enableIMU=True` fails at
+`pipeline.start()` with a `Permission denied` error even when
+`query_devices()` and color/depth both work fine. Confirmed (by actually
+plugging in a D435i and working through this) that a working fix needs a
+udev rule covering **three separate things**, not just one:
+1. The `/sys/bus/iio/devices/iio:deviceN/...` sysfs attribute tree
+   (`scan_elements/*_en`, `in_accel_sampling_frequency`,
+   `in_anglvel_sampling_frequency`, `buffer/*`, `trigger/*`) -- a plain
+   `MODE=` udev directive doesn't reach these (they're created after the
+   device node itself), so this needs a `RUN+=` shell `chmod`.
+2. `/dev/hidrawN` for the RealSense's HID interface -- the actual HID
+   reports flow through here.
+3. `/dev/iio:deviceN` itself (major 236) -- the char device
+   `pyrealsense2` reads buffered IMU samples from; distinct from both of
+   the above, and needs its own `MODE=` rule.
+
+**Scope every rule to the specific RealSense device** (`idVendor`+
+`idProduct`), not just `idVendor=="8086"` (Intel's vendor ID, which also
+matches unrelated Intel HID/sensor hardware on many machines, e.g. laptop
+touchpads or built-in sensor hubs) -- an earlier draft of this rule matched
+on vendor ID alone and granted world read/write to *every* Intel hidraw
+device and *every* IIO device on the machine, which a companion-computer/
+shared-machine reviewer correctly flagged as a real security and device-
+integrity regression, not just a RealSense-specific permission fix.
+`idProduct` for the D435i is `0b3a`; confirmed via
+`udevadm info -a -n /dev/iio:device1 | grep -A1 ATTRS{idProduct}` that
+`udev`'s `ATTRS{}` matching walks up the sysfs parent chain from the IIO
+device to the originating USB device, so both `idVendor` and `idProduct`
+can be matched directly on the `iio`/`hidraw` rules below without any
+extra plumbing. **If you're on a different RealSense model** (D415, D455,
+L515, etc.), look up its `idProduct` the same way (or via `lsusb -d 8086:`)
+and use that value instead -- don't widen the match back to vendor-only.
+
+**Use a dedicated group, not world-writable permissions.** Device scoping
+(above) stops the rule from touching *unrelated* devices, but on its own
+still leaves the RealSense's own IMU nodes world read/write (`MODE="0666"`/
+`a+rwX`), so any unprivileged local process -- not just the intended
+`olab_camera` caller -- can alter that camera's IMU buffer/trigger/
+sampling-rate/enable controls or read/inject its device traffic. On a
+companion computer running an obstacle-avoidance process, that's a real
+integrity risk, not just a permissions inconvenience. Create a dedicated
+group once, and grant access to it instead of everyone:
+```bash
+sudo groupadd -f realsense
+sudo usermod -aG realsense $USER
+```
+**`usermod` alone does not update your already-running login session's
+group list** -- and a plain **new terminal window is not a fresh login
+session** and will not pick up the change either. In most desktop
+environments (GNOME Terminal, etc.), a new window/tab is just a new shell
+spawned from a terminal-server process that has been running (with its
+original group list fixed) since you logged into your desktop session --
+opening another window doesn't make it re-read `/etc/group`. Confirmed
+this the hard way: opening a new terminal window still failed with the
+same IMU permission error, while `newgrp realsense` in the *existing*
+shell worked immediately. Two ways to actually pick up the new group:
+- **Immediately, in your current shell only**: run `newgrp realsense`
+  (or launch whatever needs it via `sg realsense -c '...'`). Only applies
+  to that shell and its children (e.g. a Jupyter server launched from it).
+- **Durably, for every future shell/terminal/app with no extra steps**:
+  fully log out of your desktop session and back in (or reboot). This
+  forces a fresh PAM-driven session that re-reads `/etc/group`, after
+  which new group membership is picked up automatically everywhere --
+  no `newgrp`/`sg` needed again.
+
+Create `/etc/udev/rules.d/99-realsense-iio.rules`:
+```
+SUBSYSTEM=="iio", ATTRS{idVendor}=="8086", ATTRS{idProduct}=="0b3a", ACTION=="add", RUN+="/bin/sh -c 'chgrp -R realsense /sys%p 2>/dev/null; chmod -R g+rwX,o-rwx /sys%p 2>/dev/null || true'"
+KERNEL=="hidraw*", ATTRS{idVendor}=="8086", ATTRS{idProduct}=="0b3a", GROUP="realsense", MODE="0660"
+SUBSYSTEM=="iio", ATTRS{idVendor}=="8086", ATTRS{idProduct}=="0b3a", KERNEL=="iio:device*", GROUP="realsense", MODE="0660"
+```
+Then apply it (no reboot/replug needed -- `--action=add` re-triggers udev's
+add event for the already-present device):
+```bash
+sudo udevadm control --reload-rules
+sudo udevadm trigger --action=add
+```
+**Use `--action=add`, not a plain `udevadm trigger`.** Confirmed (the hard
+way) that a bare `udevadm trigger` fires a `change` event by default, not
+`add` -- the `MODE=`/`GROUP=` device-node rules above have no `ACTION=`
+filter so they still apply either way, but the sysfs `RUN+=` rule below is
+guarded by `ACTION=="add"` and silently never re-fires under a plain
+`trigger`, leaving the sysfs attribute permissions stale even though the
+device nodes look correctly updated. `--action=add` re-triggers a real
+add event for the already-present device (no unplug/replug needed) and
+fires both.
+
+Note the `chmod -R g+rwX,o-rwx` (not just `g+rwX`) on the sysfs `RUN+=`
+line -- `chmod`'s `+` is additive only, so if you're replacing an earlier,
+broader version of this rule (or otherwise already have stray
+world-writable permissions on these sysfs attributes from prior
+troubleshooting), `g+rwX` alone would add group access without ever
+removing the pre-existing world-writable bits. `o-rwx` explicitly strips
+them, so the end state is correct regardless of what was there before.
+
+**If it still fails after the rule is applied**, two things caused real
+false starts while validating this on the dev machine, both worth checking
+before assuming the udev rule itself is wrong:
+- **A conflicting process already has the IMU open.** The desktop
+  `iio-sensor-proxy` system service (ships with most desktop Ubuntu/GNOME
+  installs; used for screen auto-rotation) grabs any accel/gyro IIO device
+  it finds, including the RealSense's, and holds it exclusively --
+  `pipeline.start()` then fails with `"iio hid device is busy or not
+  found!"`. Stop it for the session: `sudo systemctl stop
+  iio-sensor-proxy.service` (likely not present/relevant on a headless
+  companion computer). A leftover Jupyter kernel from a previous test run
+  that never called `camera.stop()` (or was never restarted) can cause the
+  identical "busy" symptom -- restart the kernel if so.
+- **A previous failed/partial `pipeline.start()` can leave
+  `buffer/enable` stuck at `1`** under
+  `/sys/bus/iio/devices/iio:deviceN/buffer/enable`, which can block
+  reconfiguring the device on the next attempt. Reset it manually if
+  needed: `echo 0 | sudo tee /sys/bus/iio/devices/iio:device1/buffer/enable
+  /sys/bus/iio/devices/iio:device2/buffer/enable` (device numbers vary --
+  confirm via `udevadm info` which `iio:deviceN` maps to the RealSense's
+  `accel_3d`/`gyro_3d` triggers first).
+
+**Companion computer (e.g. Raspberry Pi CM5) note**: this whole IMU-udev
+issue is a general Linux/IIO permissions gap, not specific to this
+particular dev machine -- expect to need the same
+`99-realsense-iio.rules` file there too if `enableIMU=True` hits the same
+`Permission denied`/`busy` errors. This is separate from, and unaffected
+by, the CM5's still-undecided `pyrealsense2` install path for Python 3.13
+aarch64 (see above) -- the udev rule matters once `pyrealsense2` is
+installed and importable, regardless of how it got there.
+
+**Color-only** (the default -- behaves like any other camera class):
+```python
+camera = olab_camera.CameraRealSense(
+    paramDict={'res_rows': 480, 'res_cols': 640, 'fps_target': 30, 'outputPort': port})
+camera.start(startStream=True, port=port)
+# camera.frameDeque / getFrame() / addAruco() / startStream() all work exactly
+# like every other camera class.
+```
+
+**Depth + IMU, for obstacle avoidance:**
+```python
+camera = olab_camera.CameraRealSense(
+    paramDict={'res_rows': 480, 'res_cols': 640, 'fps_target': 30, 'outputPort': port},
+    enableDepth=True, enableIMU=True)
+camera.start()
+
+depth_m = camera.getDepthFrameCopy()   # float32 meters, aligned to color by default
+imu = camera.getIMUData()
+# {'accel': (x,y,z)|None, 'accel_timestamp_ms': float|None,
+#  'gyro': (x,y,z)|None, 'gyro_timestamp_ms': float|None}
+```
+
+**Viewing depth as a live colorized stream** (instead of color): pass
+`streamSource='depth'` (requires `enableDepth=True`) -- the colorized depth
+image is what lands in `frameDeque`/gets streamed, using the exact same
+`startStream()` call as color:
+```python
+camera = olab_camera.CameraRealSense(
+    paramDict={'res_rows': 480, 'res_cols': 640, 'fps_target': 30, 'outputPort': port},
+    enableDepth=True, streamSource='depth')
+camera.start(startStream=True, port=port)
+```
+
+Notes:
+- `serial_number=None` (default) auto-selects the first connected RealSense
+  device; pass a specific serial to target one device when multiple are attached.
+- Depth resolution/framerate default to the color stream's values, but can be
+  set independently via `depth_res_rows`/`depth_res_cols`/`depth_framerate`.
+- `alignDepthToColor=True` (default) keeps depth and color pixels spatially
+  corresponding -- turn off only if you specifically want native depth-sensor
+  resolution/framing instead.
+- `enableDepthFilters=True` (default) applies pyrealsense2's spatial/
+  temporal/hole-filling filters to depth. **Confirmed via real D435i
+  hardware testing to make a dramatic difference** -- much less jitter/
+  noise (especially at longer range) and visibly softer occlusion "shadow"
+  artifacts at object edges when aligned to color (see below). Set
+  `enableDepthFilters=False` only if you specifically need the extra CPU
+  headroom and can tolerate noisier raw depth.
+- `depth_color_scheme` (int 0-9, default `None` = SDK default) selects
+  which of pyrealsense2's colorizer color schemes is used for
+  `streamSource='depth'` (0=Jet, 1=Classic, 2=WhiteToBlack, 3=BlackToWhite,
+  4=Bio, 5=Cold, 6=Warm, 7=Quantized, 8=Pattern, 9=Hue). Confirmed via real
+  hardware that the SDK default (Jet) colors **near=blue, far=red** -- the
+  reverse of the "near=red/hot=danger" convention some obstacle-avoidance
+  UIs expect. Pass e.g. `depth_color_scheme=6` (Warm) for a different
+  mapping if that matters for your use; look at the actual stream to judge
+  which scheme reads best for your use case, since the SDK's own scheme
+  descriptions don't fully capture how each one renders in practice.
+- Color's own factory intrinsics are auto-populated into `camera.intrinsics`
+  (so `addAruco()`/pose functions work with no manual calibration step);
+  depth's native intrinsics are kept separately in `camera.depthIntrinsics`.
+- **Depth-to-color alignment occlusion "shadow" artifact**: with
+  `alignDepthToColor=True` (default), you may see a black offset "shadow"
+  trailing real objects in the colorized depth view. This is expected --
+  the depth (stereo IR) module and the RGB module sit at different
+  physical positions on the device, so at object edges, some pixels
+  visible to one aren't visible to the other and can't get valid aligned
+  depth. `enableDepthFilters=True` (default, see above) softens this via
+  hole-filling, but doesn't eliminate it -- it's inherent to the sensors'
+  physical baseline, not a bug.
+- Point-cloud generation is not yet supported (tracked in a separate GitHub issue).
+
+---
+
 # Additional Tools
 
 ### Calibration
@@ -199,7 +453,8 @@ camera.addAruco(idName=ARUCO_DICTIONARY,
                 postFunction=aruco_post_poses,
                 postFunctionArgs={'idName': ARUCO_DICTIONARY},
                 configOverrides={},
-                ids_of_interest=None)  # default is None, or provide a list of IDs to track
+                ids_of_interest=None,  # default is None, or provide a list of IDs to track
+                decorate=True)  # default is True; set False to skip drawing detections on the stream
 ```
 
 **Run the next cell when you're ready to stop the ArUco detection:**
@@ -225,7 +480,8 @@ def postBarcode(argsDict):
 ```python
 # Start the barcode reader, pointing to the `postBarcode()` function:
 camera.addBarcode(fps_target=5,
-                  postFunction=postBarcode)
+                  postFunction=postBarcode,
+                  decorate=True)  # default is True; set False to skip drawing detections on the stream
 ```
 
 **Run the next cell when you're ready to stop the barcode reader:**
@@ -355,7 +611,8 @@ camera.addQR(idName='default',
              decoder='cv2',
              postFunction=postQR,
              postFunctionArgs={'idName': 'default'},
-             ids_of_interest=None)  # default is None, or provide a list of payloads to track
+             ids_of_interest=None,  # default is None, or provide a list of payloads to track
+             decorate=True)  # default is True; set False to skip drawing detections on the stream
 ```
 
 **Run the next cell when you're ready to stop QR detection:**
@@ -417,7 +674,8 @@ def qr_post_poses(argsDict):
 camera.addQR(idName='default',
              decoder='cv2',
              postFunction=qr_post_poses,
-             postFunctionArgs={'idName': 'default'})
+             postFunctionArgs={'idName': 'default'},
+             decorate=True)  # default is True; set False to skip drawing detections on the stream
 ```
 
 - **NOTE**: `findTagPose()`/`findTagPoseGlobal()`/`findCameraPoseGlobal()`/`findTagPoses()`
@@ -458,7 +716,9 @@ camera.addFaceDetect(fps_target=5,
                      conf_threshold=0.7,
                      model_name='face_detection_yunet_2023mar.onnx',  # or '..._int8.onnx' for lower resource usage
                      device='cpu',
-                     modelPath=modelPath)
+                     modelPath=modelPath,
+                     decorate=True,  # default is True; set False to skip drawing detections on the stream
+                     drawLandmarks=True)  # default is True; set False to skip drawing the 5 facial landmark points
 ```
 
 **Run the next cell when you're ready to stop the face detection:**
@@ -475,6 +735,10 @@ The following options are documented:
 - Oriented Bounding Box (obb)
 - Segment (mask)
 - Track (can be applied to `Detect`, `Pose`, and `Segment`)
+
+All `addUltralytics()` calls below also accept `decorate=True` (default; set
+False to skip drawing detections on the stream) -- shown explicitly on the
+Detect example below, and applies the same way to Pose/OBB/Segment/Track.
 
 The examples below use the YOLO 11 pre-trained models.  See https://docs.ultralytics.com/models/ for other options.
 
@@ -513,7 +777,8 @@ def postUltralyticsDetect(argsDict):
 camera.addUltralytics(idName="detect",
                       model_name="yolo11n.pt",
                       conf_threshold=0.75,
-                      postFunction=postUltralyticsDetect)
+                      postFunction=postUltralyticsDetect,
+                      decorate=True)  # default is True; set False to skip drawing detections on the stream
 ```
 
 ```python
@@ -771,4 +1036,5 @@ camera.removeDecoration(tid)
 
 ### Region of Interest (ROI)
 - Deprecated.  This functionality would (poorly) track a selected object.  The Ultralytics tracking is better (although it's limited to trained objects).
+- `addROI()` also accepts `decorate=True` (default; set `False` to track without drawing the tracking box on the stream), same as the other detection methods above.
 

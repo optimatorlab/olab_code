@@ -152,3 +152,38 @@ def test_addFaceDetect_processes_at_a_lower_resolution_and_scales_result_back(mo
     assert d['confidence'] == [pytest.approx(0.95)]
     assert d['corners'] == [[(20, 20), (60, 60)]]
     assert d['landmarks'] == [[(40, 40)] * 5]
+
+
+# ─── _FaceDetect: drawLandmarks option forwarding (issue #25) ──────────────
+
+def test_addFaceDetect_drawLandmarks_option_is_forwarded_to_decorateFaceDetect(monkeypatch):
+    # Regression guard for a swapped-argument/wrong-kwarg-name wiring bug --
+    # decorateFaceDetect() itself is tested directly (packages/olab_utils),
+    # this only confirms Camera.addFaceDetect()'s drawLandmarks actually
+    # reaches it, since a pure decorateFaceDetect() unit test can't catch a
+    # break in that plumbing.
+    img = np.zeros((480, 640, 3), dtype=np.uint8)
+    cam = _make_camera_with_frame(img)
+
+    class _FakeDetector:
+        def detect(self, frame):
+            return (0, None)
+    monkeypatch.setattr(olab_utils, '_resolveFaceDetector', lambda *a, **k: _FakeDetector())
+
+    calls = []
+    real_decorateFaceDetect = olab_utils.decorateFaceDetect
+
+    def _spy(*args, **kwargs):
+        calls.append(kwargs)
+        return real_decorateFaceDetect(*args, **kwargs)
+
+    monkeypatch.setattr(olab_utils, 'decorateFaceDetect', _spy)
+
+    cam.addFaceDetect(fps_target=10, drawLandmarks=False)
+    time.sleep(0.3)
+    cam.facedetect['default']._decorate(img)
+    _stop_feature_thread(cam, cam.facedetect, 'default')
+
+    assert calls, "decorateFaceDetect was never called"
+    assert calls[-1]['drawLandmarks'] is False
+    assert calls[-1]['landmarks'] == []
