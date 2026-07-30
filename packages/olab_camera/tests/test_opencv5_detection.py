@@ -30,6 +30,23 @@ def _stop_feature_thread(cam, featureDict, idName, wait=0.3):
     time.sleep(wait)
 
 
+def _wait_for_feature_cycle(featureDict, idName, timeout=5.0):
+    """Poll until a feature thread (e.g. _FaceDetect) has appended at least
+    one real detection-cycle result to its deque, replacing the placeholder
+    seeded at construction -- deterministic, unlike a fixed sleep racing the
+    thread's own throttle-wait (every feature thread in cv_features.py waits
+    up to 1s on cam.condition whenever its fps isn't behind
+    cam.fps['capture'], which never advances for the bare Camera() used in
+    these tests, so *every* iteration waits the full 1s -- see the same fix
+    in test_qr_and_pose.py's _wait_for_qr_cycle() for the original diagnosis
+    of this exact race, found via a real CI flake)."""
+    initial = featureDict[idName].deque[0]
+    deadline = time.monotonic() + timeout
+    while featureDict[idName].deque[0] is initial and time.monotonic() < deadline:
+        time.sleep(0.01)
+    return featureDict[idName].deque[0]
+
+
 class _RecordingLogger:
     """Stub logger recording every call, so tests can assert on exactly
     what was logged without depending on the real olab_utils.Logger."""
@@ -135,8 +152,7 @@ def test_addFaceDetect_processes_at_a_lower_resolution_and_scales_result_back(mo
     monkeypatch.setattr(olab_utils, '_resolveFaceDetector', lambda *a, **k: fake_detector)
 
     cam.addFaceDetect(fps_target=10, res_rows=proc_h, res_cols=proc_w)
-    time.sleep(1.5)
-    d = cam.facedetect['default'].deque[0]
+    d = _wait_for_feature_cycle(cam.facedetect, 'default')
     _stop_feature_thread(cam, cam.facedetect, 'default')
 
     # getFrameCopy() must have been called with resOption=(proc_w, proc_h).
