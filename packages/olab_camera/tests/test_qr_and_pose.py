@@ -58,6 +58,28 @@ def _stop_feature_thread(cam, featureDict, idName, wait=0.3):
     time.sleep(wait)
 
 
+def _wait_for_qr_cycle(cam, idName, timeout=5.0):
+    """Poll until _QRCode's background thread has appended at least one
+    real detection-cycle result to its deque, replacing the placeholder
+    seeded at construction (_QRCode.__init__ pre-seeds
+    {'data': [], 'corners': [], 'color': ...} so deque[0] never raises
+    IndexError even before any real frame has been processed).
+
+    A fixed sleep() here used to race the thread's own throttle-wait
+    (_thread_QRCode() waits up to 1s on cam.condition whenever its fps
+    isn't behind cam.fps['capture'] -- which, for the bare Camera() used
+    in these tests, never advances, so *every* iteration waits the full
+    1s) -- leaving very little margin against real detection under any
+    scheduling load, and no way to distinguish "thread hasn't run yet"
+    from "ran and legitimately found nothing" (e.g. ids_of_interest
+    filtering everything out)."""
+    initial = cam.qr[idName].deque[0]
+    deadline = time.monotonic() + timeout
+    while cam.qr[idName].deque[0] is initial and time.monotonic() < deadline:
+        time.sleep(0.01)
+    return cam.qr[idName].deque[0]
+
+
 # ─── Camera.pose / Camera.extrinsics defaults ──────────────────────────────
 
 def test_pose_and_extrinsics_defaults():
@@ -104,8 +126,7 @@ def test_addQR_cv2_decoder_decodes_skewed_tag():
     cam = _make_camera_with_frame(img)
 
     cam.addQR(idName='default', decoder='cv2')
-    time.sleep(1.5)
-    d = cam.qr['default'].deque[0]
+    d = _wait_for_qr_cycle(cam, 'default')
     _stop_feature_thread(cam, cam.qr, 'default')
 
     assert 'PAD_A' in d['data']
@@ -125,8 +146,7 @@ def test_addQR_cv2_decoder_corners_usable_for_pose_via_findTagPose():
                        cx=img.shape[1] / 2, cy=img.shape[0] / 2, dist=[0, 0, 0, 0, 0])
 
     cam.addQR(idName='default', decoder='cv2')
-    time.sleep(1.5)
-    d = cam.qr['default'].deque[0]
+    d = _wait_for_qr_cycle(cam, 'default')
     _stop_feature_thread(cam, cam.qr, 'default')
 
     idx = d['data'].index('PAD_A')
@@ -147,8 +167,7 @@ def test_addQR_pyzbar_decoder_also_decodes():
     cam = _make_camera_with_frame(img)
 
     cam.addQR(idName='default', decoder='pyzbar')
-    time.sleep(1.5)
-    d = cam.qr['default'].deque[0]
+    d = _wait_for_qr_cycle(cam, 'default')
     _stop_feature_thread(cam, cam.qr, 'default')
 
     assert 'PAD_A' in d['data']
@@ -177,8 +196,7 @@ def test_addQR_retry_with_valid_decoder_after_invalid_decoder_typo():
     assert 'default' not in cam.qr
 
     cam.addQR(idName='default', decoder='cv2')
-    time.sleep(1.5)
-    d = cam.qr['default'].deque[0]
+    d = _wait_for_qr_cycle(cam, 'default')
     _stop_feature_thread(cam, cam.qr, 'default')
 
     assert 'PAD_A' in d['data']
@@ -195,8 +213,7 @@ def test_addQR_processes_at_a_lower_resolution_and_scales_corners_back():
 
     proc_w, proc_h = orig_w // 2, orig_h // 2
     cam.addQR(idName='default', decoder='cv2', res_rows=proc_h, res_cols=proc_w)
-    time.sleep(1.5)
-    d = cam.qr['default'].deque[0]
+    d = _wait_for_qr_cycle(cam, 'default')
     _stop_feature_thread(cam, cam.qr, 'default')
 
     assert 'PAD_A' in d['data']
@@ -217,8 +234,7 @@ def test_addQR_ids_of_interest_filters_reported_payloads():
     cam = _make_camera_with_frame(img)
 
     cam.addQR(idName='default', decoder='cv2', ids_of_interest=['SOME_OTHER_PAYLOAD'])
-    time.sleep(1.5)
-    d = cam.qr['default'].deque[0]
+    d = _wait_for_qr_cycle(cam, 'default')
     _stop_feature_thread(cam, cam.qr, 'default')
 
     assert 'PAD_A' not in d['data']
@@ -240,10 +256,14 @@ def test_addQR_two_instances_with_default_postFunctionArgs_get_independent_dicts
 
     cam.addQR(idName='first', decoder='cv2', postFunction=cb)
     cam.addQR(idName='second', decoder='cv2', postFunction=cb)
-    time.sleep(1.5)
-    _stop_feature_thread(cam, cam.qr, 'first')
-    cam.camOn = True   # keep 'second' alive long enough to also observe its callback
-    time.sleep(0.3)
+    # Both callbacks are confirmed to have run (each _wait_for_qr_cycle()
+    # call only returns once that feature's thread has completed a real
+    # cycle, which calls postFunction() before returning to the top of
+    # its loop) before either thread is stopped -- no extra sleep needed
+    # to "give the other one time" the way the old fixed-sleep version did.
+    _wait_for_qr_cycle(cam, 'first')
+    _wait_for_qr_cycle(cam, 'second')
+    cam.qr['first'].isThreadActive = False
     cam.qr['second'].isThreadActive = False
     cam.camOn = False
     time.sleep(0.3)
@@ -261,7 +281,7 @@ def test_addQR_does_not_mutate_caller_supplied_postFunctionArgs():
 
     myArgs = {'label': 'mine'}
     cam.addQR(idName='default', decoder='cv2', postFunctionArgs=myArgs)
-    time.sleep(1.5)
+    _wait_for_qr_cycle(cam, 'default')
     _stop_feature_thread(cam, cam.qr, 'default')
 
     assert myArgs == {'label': 'mine'}   # caller's own dict must be untouched
