@@ -154,12 +154,72 @@ python3 --version
 - **3.11 (e.g. Raspberry Pi OS Bookworm's default) / 3.13 (e.g. Debian
   Trixie's default) on aarch64, or any other platform without a matching
   wheel**: `pip install pyrealsense2` will fail with "no matching
-  distribution." Options: install one of the supported Python versions
+  distribution." Two options: install one of the supported Python versions
   alongside the system default just for this venv (e.g. via your distro's
-  packages, `pyenv`, or `deadsnakes`), or build `librealsense` (with Python
-  bindings enabled) from source per Intel's official
-  [librealsense installation guide](https://github.com/IntelRealSense/librealsense/blob/master/doc/installation.md).
-  **Neither path is verified in this repo yet.**
+  packages, `pyenv`, or `deadsnakes` -- **not verified in this repo**), or
+  build `librealsense` from source with Python bindings enabled --
+  **verified end-to-end** (2026-07-30, Raspberry Pi CM5, Debian Trixie
+  (13), Python 3.13.5, aarch64, kernel `6.12.47+rpt-rpi-2712`; librealsense
+  `2.58.3` from
+  [github.com/realsenseai/librealsense](https://github.com/realsenseai/librealsense)
+  -- the project moved from `IntelRealSense/librealsense`, use the new URL):
+
+  ```bash
+  sudo apt-get update
+  sudo apt-get install -y libusb-1.0-0-dev libudev-dev libssl-dev pkg-config libgtk-3-dev
+  sudo apt-get install -y git wget cmake build-essential
+  sudo apt-get install -y libglfw3-dev libgl1-mesa-dev libglu1-mesa-dev
+  sudo apt-get install -y python3-dev python3.13-dev   # match your actual Python version
+  ```
+  `python3-dev`/`python3.NN-dev` (the actual headers + `libpython3.NN.so`)
+  are **required**, separately from the base `python3` package -- without
+  them, `cmake` fails with `Could NOT find Python (missing:
+  Python_INCLUDE_DIRS Python_LIBRARIES ...)` even though the legacy
+  `PythonInterp`/`PythonLibs` detection reports the interpreter found fine.
+
+  ```bash
+  cd ~/Projects   # or wherever you keep repos
+  git clone https://github.com/realsenseai/librealsense.git
+  cd librealsense
+  ./scripts/setup_udev_rules.sh
+  mkdir build && cd build
+  cmake .. -DCMAKE_BUILD_TYPE=Release -DFORCE_RSUSB_BACKEND=ON -DBUILD_PYTHON_BINDINGS=true -DPYTHON_EXECUTABLE=$(which python3)
+  make -j$(nproc)   # ~20 minutes on a CM5's 4 cores
+  sudo make install
+  sudo ldconfig
+  ```
+  - **`FORCE_RSUSB_BACKEND=ON`**: Intel's kernel-patch scripts
+    (`patch-realsense-*.sh`) only support Ubuntu 20/22/24 LTS -- Debian
+    isn't covered. `FORCE_RSUSB_BACKEND` uses a userspace USB backend
+    instead, needing no kernel patches at all; it's explicitly documented
+    as "optional for Linux" (vs. mandatory on Windows/macOS/Android),
+    exactly for this situation.
+  - **`-DPYTHON_EXECUTABLE=$(which python3)`**: run this with your target
+    venv activated. `sudo make install` installs the compiled
+    `pyrealsense2` package **directly into that venv's own
+    site-packages** (with proper `__init__.py` + versioned `.so` symlinks)
+    -- no manual copying, no `PYTHONPATH` fiddling needed. (An earlier
+    version of this guide assumed a manual copy step was required; it
+    wasn't -- verified by watching `make install`'s actual output
+    location.)
+  - Confirm: `python3 -c "import pyrealsense2 as rs;
+    print(rs.context().query_devices())"` should print a real device list
+    (or an empty one if nothing's plugged in), no `ModuleNotFoundError`.
+  - **Do not run `pip install olab-camera[realsense]` after a source
+    build.** That extra tries to pull `pyrealsense2` from PyPI, which has
+    no wheel for this platform/Python combination and will just fail --
+    `pyrealsense2` is already provided by the build above, and
+    `olab-camera`'s other dependencies install normally on their own.
+
+  **Same-hardware transfer**: on an *identical* CM5 (same Debian point
+  release, same Python 3.13.x), you don't need to rebuild --
+  `rsync`/copy the whole `librealsense/build/` directory over and run
+  `sudo make install` there too (fast, since everything's already
+  compiled). Still need `./scripts/setup_udev_rules.sh` and your own
+  `99-realsense-iio.rules`/group setup (below) on the second machine --
+  those aren't part of the build tree. If the two machines ever drift
+  onto different OS/kernel/Python versions, don't assume binary
+  compatibility -- rebuild and re-verify.
 
 **Device permissions (Linux)**: if `query_devices()` finds nothing despite
 a RealSense camera being plugged in, it's usually a udev-rules issue (the
@@ -242,9 +302,39 @@ shell worked immediately. Two ways to actually pick up the new group:
 Create `/etc/udev/rules.d/99-realsense-iio.rules`:
 ```
 SUBSYSTEM=="iio", ATTRS{idVendor}=="8086", ATTRS{idProduct}=="0b3a", ACTION=="add", RUN+="/bin/sh -c 'chgrp -R realsense /sys%p 2>/dev/null; chmod -R g+rwX,o-rwx /sys%p 2>/dev/null || true'"
-KERNEL=="hidraw*", ATTRS{idVendor}=="8086", ATTRS{idProduct}=="0b3a", GROUP="realsense", MODE="0660"
-SUBSYSTEM=="iio", ATTRS{idVendor}=="8086", ATTRS{idProduct}=="0b3a", KERNEL=="iio:device*", GROUP="realsense", MODE="0660"
+KERNEL=="hidraw*", ATTRS{idVendor}=="8086", ATTRS{idProduct}=="0b3a", GROUP:="realsense", MODE:="0660"
+SUBSYSTEM=="iio", ATTRS{idVendor}=="8086", ATTRS{idProduct}=="0b3a", KERNEL=="iio:device*", GROUP:="realsense", MODE:="0660"
 ```
+**Use `GROUP:=`/`MODE:=` (the "final assignment" operator), not plain
+`GROUP=`/`MODE=`.** If you built `librealsense` from source, you already
+ran `./scripts/setup_udev_rules.sh`, which installs Intel's own
+`99-realsense-libusb.rules` -- and confirmed on a real CM5 that this file
+sorts *after* `99-realsense-iio.rules` alphabetically and re-assigns the
+same `hidraw` device to `GROUP=plugdev, MODE=0666` (world-permissive),
+silently overriding a plain `GROUP=`/`MODE=` assignment in ours. `:=`
+makes an assignment immune to being overridden by any later-processed
+rule, regardless of filename ordering (verified: `udevadm test
+/dev/hidrawN` showed `99-realsense-libusb.rules` applying its own
+`GROUP`/`MODE` right after ours, before the fix). Diagnose this yourself
+via `sudo udevadm test /dev/hidrawN 2>&1 | grep -E "GROUP|MODE"` -- it
+prints every rule file that touches those properties, in the order
+applied; the last one listed is what wins under plain `=`.
+
+**Type or paste this file carefully -- a corrupted rule here can silently
+break unrelated devices system-wide, not just the RealSense.** Confirmed
+the hard way: pasting the long `RUN+=` line into a terminal without
+bracketed-paste support let the terminal's own line-wrap become a literal
+newline mid-word, splitting one rule into two broken fragments. The
+tail fragment of a different line ended up as `MODE="0660"` on its own,
+with **no match conditions at all** -- an unconditional rule that
+applied `0660` permissions to *every* device udev processed afterward,
+including `/dev/null`, silently breaking it (and likely others) until a
+reboot reasserted correct defaults. After creating/editing this file,
+always run `cat -n /etc/udev/rules.d/99-realsense-iio.rules` and confirm
+it's **exactly 3 lines** before reloading -- if `ACTION=="add"` or
+`MODE=` land on a line by themselves, edit it directly (e.g. `sudo nano`)
+rather than re-pasting.
+
 Then apply it (no reboot/replug needed -- `--action=add` re-triggers udev's
 add event for the already-present device):
 ```bash
@@ -292,13 +382,31 @@ before assuming the udev rule itself is wrong:
   `accel_3d`/`gyro_3d` triggers first).
 
 **Companion computer (e.g. Raspberry Pi CM5) note**: this whole IMU-udev
-issue is a general Linux/IIO permissions gap, not specific to this
-particular dev machine -- expect to need the same
-`99-realsense-iio.rules` file there too if `enableIMU=True` hits the same
-`Permission denied`/`busy` errors. This is separate from, and unaffected
-by, the CM5's still-undecided `pyrealsense2` install path for Python 3.13
-aarch64 (see above) -- the udev rule matters once `pyrealsense2` is
-installed and importable, regardless of how it got there.
+permissions gap is general to Linux/IIO, not specific to any one machine
+-- expect to need the same `99-realsense-iio.rules` file (with the `:=`
+fix above) on a CM5 too. This is separate from, and unaffected by,
+whichever `pyrealsense2` install path you used (see above) -- the udev
+rule matters once `pyrealsense2` is installed and importable, regardless
+of how it got there.
+
+**Confirmed IMU limitation on the Raspberry Pi Foundation's CM5 kernel**
+(2026-07-30, `6.12.47+rpt-rpi-2712`, Debian Trixie): `enableIMU=True`
+cannot work at all on this kernel, and it's not a permissions issue --
+`/lib/modules/$(uname -r)/kernel/drivers/iio/` ships only the base
+`industrialio` framework; `hid_sensor_hub`, `hid_sensor_accel_3d`, and
+`hid_sensor_gyro_3d` (the glue drivers that expose a HID sensor
+collection like the D435i's IMU as `/dev/iio:deviceN`) are entirely
+absent -- confirmed via `find /lib/modules/$(uname -r) -iname
+"*hid_sensor*"` (no results) and `dmesg`, which shows the kernel binding
+the IMU's HID interface with the generic `hid-generic` driver instead of
+`hid-sensor-hub`. No `/dev/iio:device*` node is ever created as a result.
+Getting IMU working on this specific kernel would need out-of-tree
+kernel module compilation (a distinct, larger task from anything in this
+guide) -- not attempted yet, tracked in
+[olab_code#41](https://github.com/optimatorlab/olab_code/issues/41).
+**Color and depth are unaffected** (confirmed working on this same
+machine/kernel) -- they only need standard USB/UVC access, not the IIO
+subsystem.
 
 **Color-only** (the default -- behaves like any other camera class):
 ```python
