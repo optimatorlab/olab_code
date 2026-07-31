@@ -183,11 +183,33 @@ python3 --version
   cd librealsense
   ./scripts/setup_udev_rules.sh
   mkdir build && cd build
-  cmake .. -DCMAKE_BUILD_TYPE=Release -DFORCE_RSUSB_BACKEND=ON -DBUILD_PYTHON_BINDINGS=true -DPYTHON_EXECUTABLE=$(which python3)
+  cmake .. -DCMAKE_BUILD_TYPE=Release -DFORCE_RSUSB_BACKEND=ON -DBUILD_PYTHON_BINDINGS=true -DPYTHON_EXECUTABLE=$(which python3) -DBUILD_EXAMPLES=false -DBUILD_GRAPHICAL_EXAMPLES=false -DBUILD_TOOLS=false -DCHECK_FOR_UPDATES=false
   make -j$(nproc)   # ~20 minutes on a CM5's 4 cores
   sudo make install
   sudo ldconfig
   ```
+  - **`./scripts/setup_udev_rules.sh` prompts** with `read -p "Remove all
+    RealSense cameras attached. Hit any key when ready"` whenever *any*
+    `/dev/video*` node exists on the machine -- true on essentially every
+    CM5 here, since Pi cameras are typically already attached. This is
+    fine interactively (just hit Enter) -- it only becomes a problem when
+    running this non-interactively (e.g. over `ssh host cmd` with no pty),
+    where nothing can ever answer it and it hangs forever with zero
+    output. If automating this, pipe an answer in explicitly, e.g. `echo |
+    sudo ./scripts/setup_udev_rules.sh`.
+  - **`-DBUILD_EXAMPLES=false -DBUILD_GRAPHICAL_EXAMPLES=false
+    -DBUILD_TOOLS=false -DCHECK_FOR_UPDATES=false`**: we only need the
+    core library + Python bindings, not the GUI viewer/depth-quality
+    tools or firmware-updater. Confirmed via a real build failure on a
+    second CM5 (olab-131, 2026-07-31): with the defaults (all four of
+    these are ON by default on Linux), `realsense-viewer` and
+    `rs-depth-quality` failed to link with `undefined reference to
+    idn2_*` -- `CHECK_FOR_UPDATES` (ON by default on Linux) pulls in a
+    bundled libcurl built with IDN support, but the final link of those
+    two tool binaries never actually links `libidn2.so`, so the build
+    fails. Disabling examples/tools/update-checking sidesteps the broken
+    link entirely (we don't need any of it) rather than chasing the idn2
+    linkage itself, and also cuts build time.
   - **`FORCE_RSUSB_BACKEND=ON`**: Intel's kernel-patch scripts
     (`patch-realsense-*.sh`) only support Ubuntu 20/22/24 LTS -- Debian
     isn't covered. `FORCE_RSUSB_BACKEND` uses a userspace USB backend
