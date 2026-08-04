@@ -502,6 +502,102 @@ Notes:
   physical baseline, not a bug.
 - Point-cloud generation is not yet supported (tracked in a separate GitHub issue).
 
+### 6.  OpenMV cameras (GENX320 histogram preview)
+
+`CameraOpenMV` wraps the official `openmv` host protocol client. Install the
+optional dependency first:
+```bash
+pip install olab-camera[openmv]
+```
+`openmv`'s own published wheel metadata only requires Python >=3.8 -- it is
+`olab_camera`'s own base `requires-python = ">=3.10"` that applies here, not
+a separate or stricter floor imposed by the `openmv` extra.
+
+This first release integrates one profile, `genx_histogram_preview`: a
+fixed 320x320 grayscale event-activity preview from a single GENX320 module,
+streamed through the same MJPEG/WebSocket/WebRTC paths every other backend
+uses. Raw GENX320 event streaming/recording, the `mt9v034_frame_passthrough`
+profile, and multi-camera sync are later work -- see
+`docs/plans/olab_camera_openmv_support_plan.md`.
+
+**What's hardware-confirmed vs. pending in this profile:** every GENX320
+sensor-control call this profile issues (`csi.CSI(cid=csi.GENX320)`,
+`pixformat`/`framesize`/`framerate`/`brightness`/`contrast`/`snapshot`, and
+the `ioctl()` calls + constants for bias presets, anti-flicker, hot-pixel
+calibration, and spatio-temporal filtering) is confirmed against
+[OpenMV's own published GENX320 documentation](https://docs.openmv.io/dev/openmvcam/sensors/genx320.html)
+-- not guessed. The exact numeric defaults (anti-flicker Hz windows,
+hot-pixel calibration event-count/sigma) are reasonable choices, not
+hardware-tuned ones, and the profile as a whole has not yet been run
+against a physical board (hardware bring-up is step 5 of the plan doc, out
+of scope this round) -- so "confirmed API" here means *the calls are real
+and documented*, not *this exact configuration has been validated on a
+GENX320*. The supplementary config/health telemetry channel this profile
+also publishes is an independent, best-effort mechanism: it prints a
+"not yet implemented" notice and does not affect the frame stream, pending
+that same bring-up confirming the on-device channel-write primitive (which
+is a separate, new protocol feature unrelated to the sensor APIs above).
+
+```python
+import olab_camera
+
+camera = olab_camera.CameraOpenMV(devicePort='/dev/ttyACM0')
+camera.start(startStream=True, port=8003)
+# Visit https://localhost:8003/stream.mjpg
+
+# Host receipt time + sequence, paired atomically with the current frame --
+# use this (not a separate getFrame() call) whenever you need metadata:
+frame, meta = camera.getFrameAndMeta()
+
+camera.shutdown()
+```
+
+Notes:
+- **The laptop/host connects to the OpenMV board over USB**, addressed by
+  its serial device path (e.g. `/dev/ttyACM0` on Linux) -- that's what
+  `devicePort` is. The `csi` module referenced above is entirely on-device
+  MicroPython code running on the OpenMV board itself, talking to its
+  attached GENX320 module over the board's internal sensor interface --
+  it has nothing to do with any port/interface on the host machine, and
+  nothing in this integration expects the host to have a CSI port of its
+  own.
+- **`devicePort` is the OpenMV serial path** (e.g. `/dev/ttyACM0`), not the
+  same thing as `start()`'s `port` argument (the streaming port, exactly
+  like every other backend). There's no discovery/default-device policy
+  yet -- name the port explicitly.
+- The profile's resolution (320x320) and histogram rate are fixed once
+  configured; passing a different `res_rows`/`res_cols`/`framerate` to
+  `start()` raises `ValueError` before any device interaction, rather than
+  silently ignoring the request. `changeResolutionFramerate()` can change
+  the histogram rate (via a stop/restart cycle, same as `CameraRealSense`),
+  not the resolution.
+- `getFrameAndMeta()` is the only way to get frame + metadata as a matched
+  pair -- `getFrame()` and inspecting metadata separately are *not*
+  guaranteed to correspond to the same frame, since the capture thread can
+  replace the single-slot frame buffer between the two calls. The metadata
+  is **host receipt time**, never a sensor-exposure timestamp.
+
+#### Custom scripts and the helper/channel contract
+
+Maintained profiles are recommended so you don't have to write OpenMV
+MicroPython yourself. If you do write a custom script, the helper contract
+it should use is a single reserved top-level name: **`_OmvHelper`** -- a
+class providing versioned envelope encode/decode and channel-publish
+primitives (see `olab_camera.openmv_profiles.contract` for the host-side
+envelope format: `schema_version`, `profile_id`, `device_seq`,
+`device_time_ms`, `kind` (`config`/`health`/`result`/`error`), `payload`).
+Every maintained profile's rendered script is `_OmvHelper`'s source text,
+followed by two blank lines, then the profile body calling
+`_OmvHelper.publish(...)` -- a hand-assembled custom script that reuses this
+convention must not itself define a top-level `_OmvHelper` name, since
+that's the entire reserved collision surface.
+
+`OpenMVDevice.runScriptFile(path)` is the low-level primitive for uploading
+an arbitrary local `.py` file -- it only guarantees script upload/execution
+and stdout, not profile-level channels or frame/event semantics. This is
+explicitly an experimental, low-level path; the helper contract above is
+what interoperates with `olab_camera`'s own tooling.
+
 ---
 
 # Additional Tools
