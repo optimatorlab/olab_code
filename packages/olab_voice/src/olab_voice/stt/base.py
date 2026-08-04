@@ -15,6 +15,37 @@ TranscriptEventType = Literal[
 
 
 @dataclass(slots=True)
+class TranscriptSegment:
+    """A single timed segment within a batch transcription result.
+
+    Backend-agnostic value object: any `BatchTranscriber` implementation can
+    populate `TranscriptEvent.segments` with these, not just Faster-Whisper.
+    """
+
+    text: str
+    start_time: float
+    end_time: float
+    confidence: float | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "text": self.text,
+            "start_time": self.start_time,
+            "end_time": self.end_time,
+            "confidence": self.confidence,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "TranscriptSegment":
+        return cls(
+            text=data["text"],
+            start_time=data["start_time"],
+            end_time=data["end_time"],
+            confidence=data.get("confidence"),
+        )
+
+
+@dataclass(slots=True)
 class TranscriptEvent:
     """Transcript result emitted by STT backends or sessions."""
 
@@ -34,6 +65,7 @@ class TranscriptEvent:
     capture_end_time: float | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     timestamp: float = field(default_factory=time)
+    segments: list[TranscriptSegment] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -53,6 +85,7 @@ class TranscriptEvent:
             "capture_end_time": self.capture_end_time,
             "metadata": self.metadata,
             "timestamp": self.timestamp,
+            "segments": [segment.to_dict() for segment in self.segments],
         }
 
     @classmethod
@@ -74,6 +107,9 @@ class TranscriptEvent:
             capture_end_time=data.get("capture_end_time"),
             metadata=data.get("metadata", {}),
             timestamp=data.get("timestamp", time()),
+            segments=[
+                TranscriptSegment.from_dict(segment) for segment in data.get("segments", [])
+            ],
         )
 
 

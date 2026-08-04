@@ -56,6 +56,44 @@ def test_faster_whisper_empty_audio_does_not_require_backend():
     assert event.session_id == "session-1"
 
 
+class _FakeSegment:
+    def __init__(self, text: str, start: float, end: float, avg_logprob: float | None) -> None:
+        self.text = text
+        self.start = start
+        self.end = end
+        self.avg_logprob = avg_logprob
+
+
+class _FakeModel:
+    def __init__(self, segments: list[_FakeSegment]) -> None:
+        self._segments = segments
+
+    def transcribe(self, source, language=None, beam_size=None):
+        return self._segments, object()
+
+
+def test_faster_whisper_maps_segments_without_changing_aggregate_fields():
+    transcriber = FasterWhisperTranscriber(model_path="/definitely/local/model")
+    transcriber._model = _FakeModel(
+        [
+            _FakeSegment(" hey 107 ", 0.0, 0.8, -0.1),
+            _FakeSegment(" take off ", 0.8, 1.5, -0.3),
+        ]
+    )
+    blob = AudioBlob(data=b"fake-audio-bytes", format="audio/wav", session_id="session-1")
+
+    event = asyncio.run(transcriber.transcribe(blob))
+
+    assert [s.text for s in event.segments] == ["hey 107", "take off"]
+    assert [s.start_time for s in event.segments] == [0.0, 0.8]
+    assert [s.end_time for s in event.segments] == [0.8, 1.5]
+    assert [s.confidence for s in event.segments] == [-0.1, -0.3]
+    assert event.text == "hey 107 take off"
+    assert event.start_time == 0.0
+    assert event.end_time == 1.5
+    assert event.confidence == pytest.approx(-0.2)
+
+
 def test_faster_whisper_transcribes_local_fixture_when_configured():
     model_path = _model_path_from_env(
         "OLAB_VOICE_FASTER_WHISPER_MODEL", DEFAULT_FASTER_WHISPER_MODEL

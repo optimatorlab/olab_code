@@ -1,6 +1,12 @@
 """Speech-to-text backend interfaces and implementations."""
 
-from olab_voice.stt.base import BatchTranscriber, StreamingTranscriber, TranscriptEvent, TranscriptEventType
+from olab_voice.stt.base import (
+    BatchTranscriber,
+    StreamingTranscriber,
+    TranscriptEvent,
+    TranscriptEventType,
+    TranscriptSegment,
+)
 from olab_voice.stt.faster_whisper import FasterWhisperTranscriber, FasterWhisperUnavailableError
 from olab_voice.stt.faster_whisper_streaming import (
     FasterWhisperStreamingTranscriber,
@@ -21,6 +27,7 @@ __all__ = [
     "StreamingBackpressureError",
     "TranscriptEvent",
     "TranscriptEventType",
+    "TranscriptSegment",
     "VoskStreamingTranscriber",
     "VoskUnavailableError",
 ]
