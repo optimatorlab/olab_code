@@ -1,12 +1,9 @@
-"""OpenMV frame-integration camera backend (`genx_histogram_preview`, and any
-other profile that publishes frames through OpenMV's standard frame-stream
-channel). Raw GENX320 event streaming/recording is a deliberately separate,
-not-yet-implemented API -- see docs/plans/olab_camera_openmv_support_plan.md.
-"""
+"""OpenMV camera backend for histogram, regions, and raw GENX event modes."""
 
 import threading
 import time
 from dataclasses import replace
+from os import PathLike
 
 import cv2
 import numpy as np
@@ -15,6 +12,11 @@ import olab_utils				# A bunch of (somewhat) helpful functions and variables
 
 from .camera import Camera, STREAM_MAX_WAIT_TIME_SEC
 from .openmv_device import OpenMVDevice
+from .openmv_events import (
+	EVT20Decoder, EventDecodeError, EventDispatcher, EventPreviewWorker, EventRecorder,
+	EventRecorderWorker,
+)
+from .openmv_movement import MovementRecordDecodeError, decode_movement_record
 from .openmv_profiles import PROFILES
 
 # openmv.image.PIXFORMAT_GRAYSCALE's documented value (1 byte/pixel
@@ -115,10 +117,46 @@ class CameraOpenMV(Camera):
 		self._stopping         = False
 		self._captureThreadDone = threading.Event()
 		self._frameSeq         = 0
+		self._eventCallbacks   = []
+		self._eventRecorderOutputDir = None
+		self._eventDispatcher  = None
+		self._eventPreviewWorker = None
+		self._eventRecorderWorker = None
+		self._rawWorkerReaper = None
+		self.eventStats = {'batches': 0, 'events': 0, 'decode_errors': 0,
+			'callback_drops': 0, 'preview_drops': 0, 'callback_errors': 0,
+			'recorder_drops': 0, 'recorder_errors': 0}
+		self.latestMovementRecord = None
 
 		self._latestFrameMeta = {
 			'host_receipt_time': None, 'host_receipt_wall_time': None, 'sequence': None,
 		}
+
+
+	def _isRawEventsProfile(self):
+		return 'raw_events' in getattr(self._profile, 'capabilities', ())
+
+	def _hasMovementRegions(self):
+		return 'movement_regions' in getattr(self._profile, 'capabilities', ())
+
+
+	def addEventCallback(self, callback):
+		"""Register a non-blocking raw-event consumer for raw-event sessions."""
+		if not callable(callback):
+			raise ValueError('callback must be callable')
+		if self.camOn:
+			raise RuntimeError('addEventCallback() must be called before start()')
+		self._eventCallbacks.append(callback)
+		return callback
+
+
+	def addEventRecorder(self, outputDir):
+		"""Record raw-event batches to `outputDir` during the next raw session."""
+		if not isinstance(outputDir, (str, bytes, PathLike)) or not outputDir:
+			raise ValueError('outputDir must be a non-empty path')
+		if self.camOn:
+			raise RuntimeError('addEventRecorder() must be called before start()')
+		self._eventRecorderOutputDir = outputDir
 
 
 	def _deviceTimeout(self):
@@ -141,6 +179,7 @@ class CameraOpenMV(Camera):
 			except Exception as e:
 				self.logger.log(f'Error disconnecting CameraOpenMV device during startup cleanup: {e}', severity=olab_utils.SEVERITY_ERROR)
 			self._device = None
+		self._stopRawWorkers()
 		self._stopping = False
 		self.camOn = False
 
@@ -188,16 +227,21 @@ class CameraOpenMV(Camera):
 				'its deferred cleanup; wait for it to finish and try again.')
 
 		config = self._profile.config
-		if res_rows is not None and int(res_rows) != config.resolution[0]:
-			raise ValueError(f'res_rows must be {config.resolution[0]} for profile {self._profile.profile_id!r}, got {res_rows!r}')
-		if res_cols is not None and int(res_cols) != config.resolution[1]:
-			raise ValueError(f'res_cols must be {config.resolution[1]} for profile {self._profile.profile_id!r}, got {res_cols!r}')
-		if framerate is not None and int(framerate) != config.histogram_rate_hz:
-			raise ValueError(f'framerate must be {config.histogram_rate_hz} for profile {self._profile.profile_id!r}, got {framerate!r}')
+		resolution = getattr(config, 'resolution', (320, 320))
+		if res_rows is not None and int(res_rows) != resolution[0]:
+			raise ValueError(f'res_rows must be {resolution[0]} for profile {self._profile.profile_id!r}, got {res_rows!r}')
+		if res_cols is not None and int(res_cols) != resolution[1]:
+			raise ValueError(f'res_cols must be {resolution[1]} for profile {self._profile.profile_id!r}, got {res_cols!r}')
+		if self._isRawEventsProfile():
+			if framerate is not None:
+				raise ValueError('framerate is not supported by raw-event profiles; use preview_rate_hz')
+			self.framerate = config.preview_rate_hz
+		else:
+			if framerate is not None and int(framerate) != config.histogram_rate_hz:
+				raise ValueError(f'framerate must be {config.histogram_rate_hz} for profile {self._profile.profile_id!r}, got {framerate!r}')
+			self.framerate = config.histogram_rate_hz
 
-		self.res_rows  = config.resolution[0]
-		self.res_cols  = config.resolution[1]
-		self.framerate = config.histogram_rate_hz
+		self.res_rows, self.res_cols = resolution
 		self.port      = self.defaultFromNone(port, self.outputPort)
 
 		self._captureThreadDone.clear()
@@ -215,7 +259,10 @@ class CameraOpenMV(Camera):
 			device.connect()
 			device.stopScript()
 			device.runSource(self._profile.render_script())
-			device.streaming(True, raw=False)
+			if not self._isRawEventsProfile():
+				device.streaming(True, raw=False)
+			else:
+				self._startRawWorkers()
 
 			self._frameSeq = 0
 			self.camOn = True
@@ -255,6 +302,120 @@ class CameraOpenMV(Camera):
 				# trivially the device's sole user so far.
 				self._cleanupDeviceSync()
 
+	def _publishFrame(self, bgr):
+		"""Publish one BGR frame through the shared Camera frame contract."""
+		self._frameSeq += 1
+		with self.condition:
+			self.frameDeque.append(bgr)
+			self._latestFrameMeta = {
+				'host_receipt_time': time.monotonic(),
+				'host_receipt_wall_time': time.time(),
+				'sequence': self._frameSeq,
+			}
+			self.condition.notify_all()
+		self._lastFrameTime = time.time()
+		self.calcFramerate(self.fps['capture'], 'capture')
+
+
+	def _applyHistogramDisplayPolicy(self, bgr):
+		if getattr(self._profile.config, 'display_palette', 'grayscale') == 'turbo':
+			return cv2.applyColorMap(cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY), cv2.COLORMAP_TURBO)
+		return bgr
+
+
+	def _readMovementRecord(self):
+		try:
+			status = self._device.readChannelStatus()
+			if not status.get('genx_regions'):
+				return
+			size = self._device.channelSize('genx_regions')
+			if size:
+				self.latestMovementRecord = decode_movement_record(
+					self._device.readChannel('genx_regions', size))
+		except (MovementRecordDecodeError, ValueError) as e:
+			self.logger.log(f'CameraOpenMV: malformed movement record: {e}', severity=olab_utils.SEVERITY_WARNING)
+
+
+	def _overlayMovementRegions(self, bgr):
+		if not self.latestMovementRecord:
+			return bgr
+		out = bgr.copy()
+		for region in self.latestMovementRecord['regions']:
+			x, y, w, h = (region[k] for k in ('x', 'y', 'w', 'h'))
+			cv2.rectangle(out, (x, y), (x + w - 1, y + h - 1), (0, 255, 0), 1)
+			cv2.drawMarker(out, (region['cx'], region['cy']), (0, 200, 255), cv2.MARKER_CROSS, 7, 1)
+		return out
+
+
+	def _startRawWorkers(self):
+		config = self._profile.config
+		recorder = None
+		if self._eventRecorderOutputDir is not None:
+			recorder = EventRecorder(self._eventRecorderOutputDir, {
+				'profile_id': self._profile.profile_id, 'device_port': self.devicePort})
+		def _worker_error(kind, exc):
+			self.eventStats[f'{kind}_errors'] = self.eventStats.get(f'{kind}_errors', 0) + 1
+			self.logger.log(f'CameraOpenMV raw {kind} error: {exc}', severity=olab_utils.SEVERITY_ERROR)
+		self._eventDispatcher = EventDispatcher(
+			self._eventCallbacks,
+			queue_size=config.callback_queue_size, on_error=_worker_error)
+		if recorder is not None:
+			self._eventRecorderWorker = EventRecorderWorker(
+				recorder, queue_size=config.callback_queue_size,
+				on_error=lambda exc: _worker_error('recorder', exc))
+		if config.preview_enabled:
+			self._eventPreviewWorker = EventPreviewWorker(
+				self._publishFrame, queue_size=config.callback_queue_size,
+				preview_rate_hz=config.preview_rate_hz)
+		self._eventDispatcher.start()
+		if self._eventPreviewWorker is not None:
+			self._eventPreviewWorker.start()
+		if self._eventRecorderWorker is not None:
+			self._eventRecorderWorker.start()
+
+
+	def _stopRawWorkers(self):
+		all_stopped = True
+		for worker in (self._eventPreviewWorker, self._eventDispatcher, self._eventRecorderWorker):
+			if worker is not None and not worker.stop(timeout=self._deviceTimeout()):
+				self.logger.log('CameraOpenMV raw worker did not exit within bounded shutdown timeout', severity=olab_utils.SEVERITY_WARNING)
+				all_stopped = False
+		if self._eventDispatcher is not None:
+			self.eventStats['callback_drops'] += self._eventDispatcher.queue.dropped
+		if self._eventPreviewWorker is not None:
+			self.eventStats['preview_drops'] += self._eventPreviewWorker.queue.dropped
+		if self._eventRecorderWorker is not None:
+			self.eventStats['recorder_drops'] += self._eventRecorderWorker.queue.dropped
+		if all_stopped:
+			self._eventDispatcher = None
+			self._eventPreviewWorker = None
+			self._eventRecorderWorker = None
+		else:
+			# A user callback is allowed to take arbitrarily long.  Preserve
+			# the worker references until it returns, and clear `_stopping`
+			# only after every prior-session worker is actually gone.  This
+			# prevents a raw->histogram re-arm from racing that callback.
+			self._scheduleRawWorkerReaper()
+		return all_stopped
+
+
+	def _scheduleRawWorkerReaper(self):
+		if self._rawWorkerReaper is not None and self._rawWorkerReaper.is_alive():
+			return
+
+		def _reap():
+			workers = (self._eventPreviewWorker, self._eventDispatcher, self._eventRecorderWorker)
+			for worker in workers:
+				if worker is not None:
+					worker.thread.join()
+			self._eventDispatcher = None
+			self._eventPreviewWorker = None
+			self._eventRecorderWorker = None
+			self._stopping = False
+
+		self._rawWorkerReaper = threading.Thread(target=_reap, daemon=True)
+		self._rawWorkerReaper.start()
+
 
 	def _startCaptureThread(self):
 		self._capture_running = True
@@ -272,6 +433,10 @@ class CameraOpenMV(Camera):
 		since nothing in the openmv client library is documented
 		thread-safe for concurrent access. See stop()'s docstring.
 		"""
+		if self._isRawEventsProfile():
+			self._captureRawEvents()
+			self._capture_running = False
+
 		config = self._profile.config
 		expected_width, expected_height = config.resolution
 
@@ -316,20 +481,13 @@ class CameraOpenMV(Camera):
 
 			rgb = np.frombuffer(data, dtype=np.uint8).reshape(expected_height, expected_width, 3)
 			bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+			bgr = self._applyHistogramDisplayPolicy(bgr)
+			if self._hasMovementRegions():
+				self._readMovementRecord()
+				bgr = self._overlayMovementRegions(bgr)
 			bgr = self.zoomFunction(bgr)
 
-			self._frameSeq += 1
-			with self.condition:
-				self.frameDeque.append(bgr)
-				self._latestFrameMeta = {
-					'host_receipt_time': time.monotonic(),
-					'host_receipt_wall_time': time.time(),
-					'sequence': self._frameSeq,
-				}
-				self.condition.notify_all()
-
-			self._lastFrameTime = time.time()
-			self.calcFramerate(self.fps['capture'], 'capture')
+			self._publishFrame(bgr)
 
 		# Sole owner of the device from here on -- clean up exactly once,
 		# regardless of why we're exiting.
@@ -343,10 +501,52 @@ class CameraOpenMV(Camera):
 				device.disconnect()
 			except Exception:
 				pass
+		workers_stopped = self._stopRawWorkers() if self._isRawEventsProfile() else True
 
 		self.camOn = False
-		self._stopping = False
+		self._stopping = not workers_stopped
 		self._captureThreadDone.set()
+
+
+	def _captureRawEvents(self):
+		"""Capture-owner raw channel loop; it only decodes and enqueues work."""
+		decoder = EVT20Decoder()
+		sequence = 0
+		while self._capture_running:
+			try:
+				status = self._device.readChannelStatus()
+				if not status.get('raw_events'):
+					time.sleep(0.002)
+					continue
+				size = self._device.channelSize('raw_events')
+				if not size:
+					time.sleep(0.002)
+					continue
+				payload = self._device.readChannel('raw_events', size)
+				sequence += 1
+				try:
+					batch = decoder.decode(payload, sequence)
+				except (EventDecodeError, TypeError, ValueError) as e:
+					# A corrupt channel payload is data loss, not a connection loss.
+					# Preserve capture ownership and wait for the next independent
+					# payload rather than tearing down a live event session.
+					self.eventStats['decode_errors'] += 1
+					self.logger.log(f'CameraOpenMV: dropping malformed raw event batch: {e}', severity=olab_utils.SEVERITY_WARNING)
+					continue
+			except Exception as e:
+				if self._capture_running:
+					self.eventStats['decode_errors'] += 1
+					self.logger.log(f'CameraOpenMV raw capture error: {e}', severity=olab_utils.SEVERITY_ERROR)
+					self._capture_running = False
+				break
+			self.eventStats['batches'] += 1
+			self.eventStats['events'] += batch.count
+			if self._eventDispatcher is not None:
+				self._eventDispatcher.submit(batch)
+			if self._eventPreviewWorker is not None:
+				self._eventPreviewWorker.submit(batch)
+			if self._eventRecorderWorker is not None:
+				self._eventRecorderWorker.submit(batch)
 
 
 	def stop(self, stopStream=True):
@@ -392,7 +592,11 @@ class CameraOpenMV(Camera):
 				self._capture_thread = None
 				# _captureLoop already performed its own device cleanup and
 				# set _captureThreadDone before exiting.
-				self._stopping = False
+				# A callback/recorder worker may still be draining.  In that
+				# case its reaper owns the transition back to False; clearing it
+				# here would permit an unsafe re-arm.
+				if self._rawWorkerReaper is None or not self._rawWorkerReaper.is_alive():
+					self._stopping = False
 
 		if stopStream:
 			self.stopStream()
@@ -421,6 +625,10 @@ class CameraOpenMV(Camera):
 				silent clamp).
 		"""
 		config = self._profile.config
+		if self._isRawEventsProfile():
+			if framerate is not None:
+				raise ValueError('raw-event profiles use preview_rate_hz, not changeResolutionFramerate()')
+			return
 		if res_rows is not None and int(res_rows) != config.resolution[0]:
 			raise ValueError(f'res_rows must be {config.resolution[0]} for profile {self._profile.profile_id!r}, got {res_rows!r}')
 		if res_cols is not None and int(res_cols) != config.resolution[1]:

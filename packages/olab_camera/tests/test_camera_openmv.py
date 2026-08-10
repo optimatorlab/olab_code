@@ -20,6 +20,7 @@ import numpy as np
 import pytest
 
 from olab_camera import CameraOpenMV
+import olab_camera.camera_openmv as camera_openmv_module
 from olab_camera.openmv_profiles.genx_histogram_preview import FIXED_RESOLUTION
 
 
@@ -63,7 +64,7 @@ class FakeDevice:
 
     instances = []
 
-    def __init__(self, port, timeout=1.0, fail_at=None, frames=None, block_event=None, **kwargs):
+    def __init__(self, port, timeout=1.0, fail_at=None, frames=None, raw_payloads=None, block_event=None, **kwargs):
         self.port = port
         self.timeout = timeout
         self.fail_at = fail_at
@@ -72,6 +73,7 @@ class FakeDevice:
         # (used to test specific drop-then-recover orderings).
         self._explicit_frames = frames is not None
         self._frames = list(frames) if frames is not None else []
+        self._raw_payloads = list(raw_payloads) if raw_payloads is not None else []
         self._block_event = block_event
         self._blocked_once = False
         self.calls = []
@@ -107,6 +109,15 @@ class FakeDevice:
         if self._explicit_frames:
             return self._frames.pop(0) if self._frames else None
         return _make_frame()
+
+    def readChannelStatus(self):
+        return {'raw_events': bool(self._raw_payloads)}
+
+    def channelSize(self, name):
+        return len(self._raw_payloads[0]) if name == 'raw_events' and self._raw_payloads else 0
+
+    def readChannel(self, name, size=None):
+        return self._raw_payloads.pop(0) if name == 'raw_events' and self._raw_payloads else None
 
 
 PARAM_DICT = {'res_rows': 320, 'res_cols': 320, 'fps_target': 30, 'outputPort': 8000}
@@ -196,6 +207,104 @@ def test_change_zoom_supported():
     cam.changeZoom(2.0)
     assert cam.zoomLevel == 2.0
     cam.stop()
+
+
+def test_raw_profile_preview_uses_normal_frame_queue_and_callback():
+	# One EVT2.0 ON event at (12, 9), followed by no further channel data.
+	payload = ((1 << 28) | (5 << 22) | (12 << 11) | 9).to_bytes(4, 'little')
+	seen = []
+	cam = _make_camera(profile='genx_raw_events', device_kwargs={'raw_payloads': [payload]})
+	cam.addEventCallback(lambda batch: seen.append(batch.count))
+	cam.start()
+	assert _wait_until(lambda: len(cam.frameDeque) > 0)
+	assert _wait_until(lambda: seen == [1])
+	frame, meta = cam.getFrameAndMeta()
+	assert frame.shape == (320, 320, 3)
+	assert frame[9, 12, 1] > 0
+	assert meta['sequence'] == 1
+	cam.stop()
+
+
+def test_raw_stop_waits_for_in_progress_callback_before_rearm():
+	"""A full queue and stuck callback cannot race a later camera session."""
+	payload = ((1 << 28) | (5 << 22) | (12 << 11) | 9).to_bytes(4, 'little')
+	callback_started = threading.Event()
+	release_callback = threading.Event()
+
+	def slow_callback(_batch):
+		callback_started.set()
+		release_callback.wait()
+
+	cam = _make_camera(profile='genx_raw_events',
+		profile_kwargs={'callback_queue_size': 1},
+		device_kwargs={'timeout': 0.02, 'raw_payloads': [payload] * 3})
+	cam.addEventCallback(slow_callback)
+	cam.start()
+	assert callback_started.wait(timeout=1)
+
+	cam.stop()
+	assert cam._stopping is True
+	with pytest.raises(RuntimeError):
+		cam.start()
+
+	release_callback.set()
+	assert _wait_until(lambda: not cam._stopping, timeout=2)
+	assert cam.eventStats['callback_drops'] >= 1
+	cam.start()
+	cam.stop()
+
+
+def test_raw_profile_can_disable_preview_without_disabling_callbacks():
+	payload = ((1 << 28) | (5 << 22) | (12 << 11) | 9).to_bytes(4, 'little')
+	seen = []
+	cam = _make_camera(profile='genx_raw_events', profile_kwargs={'preview_enabled': False},
+		device_kwargs={'raw_payloads': [payload]})
+	cam.addEventCallback(lambda batch: seen.append(batch.count))
+	cam.start()
+	assert cam._eventPreviewWorker is None
+	assert _wait_until(lambda: seen == [1])
+	assert len(cam.frameDeque) == 0
+	cam.stop()
+
+
+def test_raw_malformed_batch_is_counted_and_later_batch_is_delivered():
+	"""One corrupt payload is observable loss, not a fatal capture error."""
+	good = ((1 << 28) | (5 << 22) | (12 << 11) | 9).to_bytes(4, 'little')
+	seen = []
+	cam = _make_camera(profile='genx_raw_events',
+		device_kwargs={'raw_payloads': [b'bad', good]})
+	cam.addEventCallback(lambda batch: seen.append(batch.count))
+	cam.start()
+	assert _wait_until(lambda: seen == [1])
+	assert cam.eventStats['decode_errors'] == 1
+	assert cam.camOn is True
+	cam.stop()
+
+
+def test_raw_recorder_failure_is_counted_once_without_stalling_acquisition(monkeypatch, tmp_path):
+	"""A failed recorder is isolated from later raw capture batches."""
+	class FailingRecorder:
+		def __init__(self, _output_dir, _metadata):
+			self.closed = False
+		def write(self, _batch):
+			raise OSError('disk full')
+		def close(self):
+			self.closed = True
+
+	monkeypatch.setattr(camera_openmv_module, 'EventRecorder', FailingRecorder)
+	payload = ((1 << 28) | (5 << 22) | (12 << 11) | 9).to_bytes(4, 'little')
+	seen = []
+	cam = _make_camera(profile='genx_raw_events',
+		device_kwargs={'raw_payloads': [payload] * 3})
+	cam.addEventCallback(lambda batch: seen.append(batch.sequence))
+	cam.addEventRecorder(tmp_path / 'events')
+	cam.start()
+	assert _wait_until(lambda: cam.eventStats['recorder_errors'] == 1)
+	assert _wait_until(lambda: len(seen) == 3)
+	assert cam.eventStats['recorder_errors'] == 1
+	assert cam.eventStats['batches'] == 3
+	assert cam.camOn is True
+	cam.stop()
 
 
 # ---- capture-loop frame validation -----------------------------------------

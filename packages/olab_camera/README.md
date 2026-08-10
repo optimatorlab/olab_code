@@ -68,6 +68,33 @@ After installation:
 import olab_camera, olab_utils
 ```
 
+## GENX320 modes
+
+The OpenMV backend uses the same `CameraOpenMV` lifecycle and browser-stream
+interfaces as the other cameras. Select a mode with `profile=`:
+
+```python
+from olab_camera import CameraOpenMV
+
+# Provisional default: normal 320x320 histogram pixels.
+cam = CameraOpenMV('/dev/ttyACM0', profile='genx_histogram_preview')
+
+# Histogram pixels with optional on-board movement-region telemetry/overlay.
+regions = CameraOpenMV('/dev/ttyACM0', profile='genx_histogram_regions')
+
+# Raw ON/OFF events, rendered back into normal preview frames. Register these
+# before start(); they execute away from USB acquisition and are bounded.
+raw = CameraOpenMV('/dev/ttyACM0', profile='genx_raw_events')
+raw.addEventCallback(lambda batch: print(batch.count))
+raw.addEventRecorder(outputDir='genx-session')
+```
+
+Use `start()` / `startStream()` / `stop()` normally. A raw session is separate
+from histogram acquisition; it supplies typed EVT2.0 batches to callbacks and
+a derived browser-viewable preview, with explicit drop counters in `eventStats`.
+Name the actual OpenMV CDC device explicitly because ACM numbering can change
+after reconnects.
+
 ## TLS certificates
 
 Every streaming protocol (including the MJPEG default) serves over

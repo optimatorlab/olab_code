@@ -52,6 +52,12 @@ class _FakeClient:
     def has_channel(self, name):
         return name == 'stream'
 
+    def read_status(self):
+        return {'stream': True}
+
+    def channel_size(self, name):
+        return 5 if name == 'stream' else 0
+
     def channel_read(self, name, size=None):
         return b'chunk' if name == 'stream' else None
 
@@ -143,7 +149,10 @@ def test_stop_script_run_source_and_channels():
     device.runSource('print(1)')
     assert device.hasChannel('stream') is True
     assert device.hasChannel('nope') is False
+    assert device.readChannelStatus() == {'stream': True}
+    assert device.channelSize('stream') == 5
     assert device.readChannel('stream') == b'chunk'
+    assert device.readChannel('stream', 5) == b'chunk'
     assert device.writeChannel('stream', b'data') is True
     assert device.readStdout() == 'hello'
 

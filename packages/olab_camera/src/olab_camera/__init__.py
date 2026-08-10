@@ -30,7 +30,8 @@ Classes:
     CameraUSB: USB camera and RTSP stream implementation
     CameraRealSense: Intel RealSense camera (color + optional depth + optional IMU)
     CameraWebSocket: Virtual camera — accepts pushed JPEG frames via WSS (sim/Cesium use)
-    CameraOpenMV: OpenMV camera, standard-frame integration (e.g. GENX320 histogram preview)
+    CameraOpenMV: OpenMV camera, GENX320 histogram pixels, optional movement
+      regions, or raw polarity-event preview/callbacks
 
 Dependencies:
     - numpy

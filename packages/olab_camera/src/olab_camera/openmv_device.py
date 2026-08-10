@@ -1,13 +1,161 @@
 """Host-side session/control wrapper around the openmv.Camera protocol client."""
 
+import logging
 import math
 import os
+import random
+import struct
+import time
 
 try:
 	import openmv as _openmv_lib
+	import openmv.transport as _openmv_transport
+	from openmv.constants import Flags, Opcode, Protocol, Status
+	from openmv.exceptions import (
+		ChecksumException,
+		OMVException,
+		SequenceException,
+		TimeoutException,
+	)
 except Exception as e:
 	print(f'INFO: openmv is not installed and was not imported.  You may ignore this message.  Unless you are using an OpenMV camera you do not need the openmv package.')
 	_openmv_lib = None
+
+
+if _openmv_lib is not None:
+
+	class _EventSafeTransport(_openmv_transport.Transport):
+		"""`Transport` with one behavior change: periodic protocol EVENT
+		packets (e.g. the firmware's ~50ms stdout "tick" notifications, see
+		`openmv/openmv` PR #3138) no longer renew this call's response-wait
+		deadline.
+
+		Upstream `recv_packet()` unconditionally does `start_time =
+		time.time()` on every EVENT packet, alongside genuine FRAGMENT
+		packets (actual response-assembly progress, which legitimately
+		should renew the deadline). On real hardware, a channel op that
+		races a script-stop transition can get its real response silently
+		rejected at the parse layer (sequence mismatch -> `_check_seq()`
+		fails -> byte dropped, never surfaced as a packet); combined with a
+		still-running script's steady stream of EVENT packets, upstream's
+		behavior means the deadline is perpetually renewed and
+		`recv_packet()` never times out -- an infinite hang instead of a
+		bounded `TimeoutException`. This override is otherwise a verbatim
+		copy of the upstream method; only the EVENT branch's deadline reset
+		is removed. See docs/investigations/openmv_hang_investigation.md
+		for the full hardware-reproduced trace this is based on.
+		"""
+
+		def recv_packet(self, poll_events=False):
+			if not self.serial or not self.serial.is_open:
+				raise OMVException("Serial connection not open")
+
+			fragments = bytearray()
+			start_time = time.time()
+
+			while time.time() - start_time < self.timeout:
+				if self.serial.in_waiting > 0:
+					data = self.serial.read(self.serial.in_waiting)
+					self.buf.extend(data)
+
+				if not (packet := self._process()):
+					if poll_events:
+						return
+					time.sleep(0.001)
+					continue
+
+				if self.drop_rate > 0.0 and random.random() < self.drop_rate:
+					self.log(packet=packet, direction="Drop")
+					continue
+
+				self.stats['received'] += 1
+				self.log(packet=packet, direction="Recv")
+
+				if (packet['flags'] & Flags.RTX) and (self.sequence != packet['sequence']):
+					if packet['flags'] & Flags.ACK_REQ:
+						self.send_packet(packet['opcode'], packet['channel'],
+										 Flags.ACK, sequence=packet['sequence'])
+					continue
+
+				if packet['flags'] & Flags.ACK_REQ:
+					if self.drop_rate > 0.0 and random.random() < self.drop_rate:
+						self.log(packet['sequence'], packet['channel'], packet['opcode'], Flags.ACK, 0, "Drop")
+					else:
+						self.send_packet(packet['opcode'], packet['channel'], Flags.ACK)
+
+				if packet['flags'] & Flags.EVENT:
+					self.event_callback(packet['channel'], 0xFFFF if not packet['length']
+										else struct.unpack('<H', packet['payload'])[0])
+					# Deliberately NOT resetting start_time here -- see class
+					# docstring. This is the one behavior change vs upstream.
+					continue
+
+				self.sequence = (self.sequence + 1) & 0xFF
+
+				if packet['flags'] & Flags.FRAGMENT:
+					fragments.extend(packet['payload'])
+					start_time = time.time()
+					continue
+
+				if packet['flags'] & Flags.NAK:
+					status = struct.unpack('<H', packet['payload'][:2])[0]
+					if status == Status.CHECKSUM:
+						raise ChecksumException("")
+					elif status == Status.SEQUENCE:
+						raise SequenceException("")
+					elif status == Status.TIMEOUT:
+						raise TimeoutException("")
+					elif status != Status.BUSY:
+						raise OMVException(f"Command failed with status: {Status(status).name}")
+					return False
+
+				if fragments:
+					fragments.extend(packet['payload'])
+					packet['payload'] = bytes(fragments)
+					packet['length'] = len(fragments)
+
+				return True if not packet['length'] else bytes(packet['payload'])
+
+			if not poll_events:
+				raise TimeoutException("Packet receive timeout")
+
+	class _EventSafeOpenMVCamera(_openmv_lib.Camera):
+		"""`openmv.Camera` with `_EventSafeTransport` wired in.
+
+		`_resync()` is the only place upstream constructs a `Transport`, and
+		it does so freshly on every resync (including the first connect and
+		every automatic reconnect after a `ResyncException`) -- so this must
+		override `_resync()` itself rather than patch `self.transport` after
+		construction, or a resync would silently revert to the buggy
+		upstream transport.
+		"""
+
+		def _resync(self):
+			logging.info("🔁 Resynchronizing")
+
+			self.transport = _EventSafeTransport(
+				self._serial, crc=True, seq=True,
+				max_payload=Protocol.MIN_PAYLOAD_SIZE, timeout=self.timeout,
+				event_callback=self._handle_event, drop_rate=self.drop_rate)
+
+			for attempt in range(self.max_retry):
+				try:
+					self.transport.reset_sequence()
+					self.transport.send_packet(Opcode.PROTO_SYNC, 0, 0)
+					if self.transport.recv_packet():
+						self.transport.reset_sequence()
+						break
+				except OMVException:
+					if attempt < self.max_retry - 1:
+						logging.warning(f"⚠️ Sync attempt {attempt + 1} failed, retrying...")
+						continue
+					else:
+						logging.error("❌ Failed to resync after maximum attempts")
+						raise TimeoutException("Resync failed - unable to synchronize with device")
+
+			self.update_capabilities()
+			self.transport.update_caps(self.caps['crc'], self.caps['seq'],
+									   self.caps['ack'], self.caps['max_payload'])
 
 
 class OpenMVDevice:
@@ -40,7 +188,12 @@ class OpenMVDevice:
 				caller must name the port explicitly.
 			client_class (type, optional): Injectable protocol-client class,
 				for testing only. Real callers should never pass this --
-				defaults to the real `openmv.Camera` when installed.
+				defaults to `_EventSafeOpenMVCamera`, a thin `openmv.Camera`
+				subclass that fixes an upstream transport bug where
+				protocol EVENT packets (e.g. firmware stdout "ticks")
+				perpetually renew a request's response-wait deadline,
+				which can turn a rejected/desynced response into an
+				infinite hang instead of a bounded `TimeoutException`.
 			timeout (float): Protocol response timeout (seconds) passed to
 				the client. Must be a finite positive number -- it's the
 				basis for every bounded-wait calculation in `CameraOpenMV`'s
@@ -67,7 +220,7 @@ class OpenMVDevice:
 				raise ImportError(
 					'openmv is required for OpenMVDevice but is not installed. '
 					'Install it with: pip install olab-camera[openmv]')
-			resolved_client_class = _openmv_lib.Camera
+			resolved_client_class = _EventSafeOpenMVCamera
 
 		self.port = port
 		self.timeout = timeout
@@ -161,9 +314,17 @@ class OpenMVDevice:
 		"""Return True if a channel of the given name is registered on the device."""
 		return self._client.has_channel(name)
 
-	def readChannel(self, name):
-		"""Read and return the full contents of a named channel, or None."""
-		return self._client.channel_read(name)
+	def readChannelStatus(self):
+		"""Return a mapping of named custom channels to readiness flags."""
+		return self._client.read_status()
+
+	def channelSize(self, name):
+		"""Return the presently available byte count for a named channel."""
+		return self._client.channel_size(name)
+
+	def readChannel(self, name, size=None):
+		"""Read a named channel, optionally with a previously observed byte count."""
+		return self._client.channel_read(name, size)
 
 	def writeChannel(self, name, payload):
 		"""Write payload to a named channel. Returns True if the channel exists."""

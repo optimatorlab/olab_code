@@ -78,6 +78,7 @@ class GenxHistogramPreviewConfig:
 	anti_flicker: str = 'off'
 	spatio_temporal_filtering: bool = True
 	hot_pixel_calibration: str = 'auto'
+	display_palette: str = 'grayscale'
 
 	def __post_init__(self):
 		self.resolution = tuple(self.resolution)
@@ -114,6 +115,8 @@ class GenxHistogramPreviewConfig:
 			raise ValueError(
 				f'hot_pixel_calibration must be one of {_HOT_PIXEL_CALIBRATION_POLICIES}, '
 				f'got {self.hot_pixel_calibration!r}')
+		if self.display_palette not in ('grayscale', 'turbo'):
+			raise ValueError("display_palette must be 'grayscale' or 'turbo'")
 
 
 def _bias_preset_const(name):
@@ -239,6 +242,7 @@ class GenxHistogramPreviewProfile:
 
 	profile_id = PROFILE_ID
 	config_cls = GenxHistogramPreviewConfig
+	capabilities = frozenset(('frames', 'histogram'))
 
 	def __init__(self, **config_kwargs):
 		self.config = GenxHistogramPreviewConfig(**config_kwargs)
