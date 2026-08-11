@@ -1275,3 +1275,256 @@ The dense full-frame scene makes `find_blobs` expensive, reducing on-board
 processing to about 38 FPS, but produces valid compact records. The new guard
 prioritizes complete records over forcing every nominal 25-Hz report through
 when the host or channel transfer is busy.
+
+### 2026-08-10 — GENX histogram-preview direct-probe preflight — BLOCKED (board absent)
+
+This writer session began the approved single-owner diagnostic before any
+production change. At `2026-08-10T20:52:39-04:00`, device enumeration found no
+`/dev/ttyACM*` node:
+
+```
+ls -l /dev/ttyACM*
+ls: cannot access '/dev/ttyACM*': No such file or directory
+```
+
+The fresh minimal pyserial check was run as:
+
+```
+python3 - <<'PY'
+from serial.tools import list_ports
+import serial
+ports = list(list_ports.comports())
+print(f'pyserial={serial.__version__}')
+print(f'ports={len(ports)}')
+for p in ports:
+    print(f'device={p.device!r} description={p.description!r} hwid={p.hwid!r} vid={p.vid!r} pid={p.pid!r}')
+for p in ports:
+    if p.device.startswith('/dev/ttyACM'):
+        try:
+            with serial.Serial(p.device, baudrate=115200, timeout=0.2, exclusive=True) as ser:
+                print(f'OPEN_OK device={p.device!r} is_open={ser.is_open}')
+        except Exception as exc:
+            print(f'OPEN_FAIL device={p.device!r} type={type(exc).__name__} error={exc}')
+PY
+```
+
+Its complete stdout was:
+
+```
+pyserial=3.5
+ports=0
+```
+
+Consequently no device or firmware identity can be reported, no port was
+opened or owned by this session, no `readFrame()` calls were made (there are no
+per-call timings), and delivered-frame count is `0` / not measured. The direct
+probe was not started, so no `finally` disconnect was needed. A live board must
+be attached and re-enumerated before the requested single-owner
+`connect → stopScript → runSource → streaming(True, raw=False) → readFrame()`
+probe can determine the supported GENX histogram frame-export mechanism.
+
+### 2026-08-10 — GENX histogram-preview reattach preflight — BLOCKED (device not exposed to this session)
+
+The user confirmed that the board was attached at `/dev/ttyACM0` and authorized
+the requested narrow diagnostic access. This execution environment still could
+not see or open that node. The minimal check was:
+
+```
+ls -l /dev/ttyACM0
+python3 - <<'PY'
+from serial.tools import list_ports
+import serial
+path = '/dev/ttyACM0'
+print(f'pyserial={serial.__version__}')
+for p in list_ports.comports():
+    print(f'PORT device={p.device!r} description={p.description!r} hwid={p.hwid!r} vid={p.vid!r} pid={p.pid!r} serial_number={p.serial_number!r}')
+try:
+    with serial.Serial(path, baudrate=115200, timeout=0.2, exclusive=True) as ser:
+        print(f'OPEN_OK device={path!r} is_open={ser.is_open}')
+except Exception as exc:
+    print(f'OPEN_FAIL device={path!r} type={type(exc).__name__} error={exc}')
+PY
+```
+
+Complete output:
+
+```
+ls: cannot access '/dev/ttyACM0': No such file or directory
+pyserial=3.5
+OPEN_FAIL device='/dev/ttyACM0' type=SerialException error=[Errno 2] could not open port /dev/ttyACM0: [Errno 2] No such file or directory: '/dev/ttyACM0'
+```
+
+This is an absent-device-namespace result, not a busy-port result: no process
+in this session owned the port. Firmware identity, script stdout,
+`readFrame()` timings, and delivered-frame count remain unavailable; no probe
+connection was created, so no disconnect was necessary.
+
+### 2026-08-10 — GENX histogram-preview direct single-owner probe — NO FRAMES (before fix)
+
+The user ran the saved `/tmp/openmv_genx_histogram_probe.py` as the sole port
+owner after closing other serial clients:
+
+```
+PYTHONPATH=packages/olab_camera/src python3 /tmp/openmv_genx_histogram_probe.py
+```
+
+Its fresh exclusive pyserial preflight succeeded:
+
+```
+PRECHECK open=True port=/dev/ttyACM0
+```
+
+The profile source was `genx_histogram_preview`, SHA-256
+`1731cf9cd96ad072dd7007cc90e6370ae49c631ecd83b87837dcb2b62e06a800`, 5765
+bytes. `OpenMVDevice.connect()` identified an OpenMV IMXRT1060 /
+MIMXRT1062DVJ6A, CPU ID `0x411FC271`, device ID
+`354149D7615BB0A0615BB0A0`, CSI0 `0xB0602003`, USB `37C5:1060`, protocol
+`1.0.2`, bootloader `1.0.3`, firmware `5.0.0`, and a 1024-KB stream buffer.
+
+The direct owner executed `connect → stopScript → runSource →
+streaming(True, raw=False)` successfully. Each subsequent `readFrame()` sent
+a stream-channel `CHANNEL_LOCK` that received NAK and returned immediately:
+
+```
+READ index=0 elapsed_ms=0.4 frame=None
+READ index=1 elapsed_ms=1.3 frame=None
+READ index=2 elapsed_ms=1.3 frame=None
+READ index=3 elapsed_ms=1.5 frame=None
+READ index=4 elapsed_ms=1.4 frame=None
+READ index=5 elapsed_ms=0.3 frame=None
+READ index=6 elapsed_ms=0.6 frame=None
+READ index=7 elapsed_ms=1.6 frame=None
+READ index=8 elapsed_ms=0.7 frame=None
+READ index=9 elapsed_ms=0.5 frame=None
+DELIVERED_FRAMES=0
+```
+
+The only captured device stdout was stale REPL startup text plus the prior
+script's `KeyboardInterrupt`; there was no profile exception or profile
+telemetry output. The probe's `finally` completed both `stopScript` and
+`disconnect`.
+
+**Conclusion and selected mechanism:** this is not a timeout or transport
+hang. Firmware 5.0's `csi.CSI(..., stream=None)` sends standard stream output
+only for the primary CSI. GENX320 is an auxiliary CSI, so the profile must use
+the documented stream-source selector `csi.CSI(cid=csi.GENX320, stream=True)`
+to route `snapshot()` output to `OpenMVDevice.streaming()/readFrame()`. The
+profile now makes precisely that change; rerun the same probe to collect the
+required after-fix delivered-frame evidence.
+
+### 2026-08-11 — Initial after-fix probe result — INCONCLUSIVE (startup race in probe)
+
+The first `stream=True` run used profile SHA-256
+`bd6377fe11bba6c5e0388d4e18108d11b1ae354f7314f7b8a108dac533865e5f` (6001
+bytes) and again recorded ten `CHANNEL_LOCK` NAK / `readFrame() -> None`
+responses, all within 0.2–1.4 ms, with zero delivered frames. It did so
+immediately after `runSource()`/`streaming(True)`: all ten polls completed in
+roughly 6 ms, before a GENX320 script can complete its startup and optional
+hot-pixel calibration. The only stdout again was stale pre-stop REPL text, so
+the run does not show whether the newly uploaded profile reached its snapshot
+loop. It completed `finally stopScript` and `disconnect` successfully.
+
+This is an insufficient after-fix test, not evidence that `stream=True` fails.
+The saved probe now waits three seconds after streaming is enabled, drains
+startup stdout, and spaces its ten frame polls by 100 ms. The production
+no-frame diagnostic likewise has a five-second startup grace period; it still
+backs off documented immediate-empty reads and rate-limits sustained warnings.
+
+### 2026-08-11 — Paced after-fix probe — DEVICE SCRIPT FAILURE ISOLATED
+
+The paced probe reached the uploaded script's actual stdout and captured a
+definitive exception after the three-second wait:
+
+```
+RuntimeError: Sensor control failed.
+```
+
+The rendered source maps its reported line 113 to:
+
+```
+csi0.ioctl(csi.IOCTL_GENX320_SET_STC, csi.GENX320_STC_TRAIL, 1, 2)
+```
+
+The board soft-rebooted after the exception; all ten later stream locks were
+therefore expected NAK/`None` results (0.6–1.2 ms) and delivered-frame count
+remained zero. The session stayed single-owner and its `finally` stopped and
+disconnected successfully.
+
+The earlier successful real-board histogram probe proves the required setup
+sequence starts with `csi0.ioctl(csi.IOCTL_GENX320_SET_MODE,
+csi.GENX320_MODE_HISTO)` before image controls. This maintained profile had
+omitted that documented/proven mode selection. It now adds that one setup call
+before `pixformat()` while retaining the selected `stream=True` source. The
+next paced probe will establish whether the STC operation then succeeds in the
+proper histogram mode; no conclusion about STC support is being inferred yet.
+
+### 2026-08-11 — GENX histogram-preview direct single-owner probe — SUCCESS (after fix)
+
+With the proven histogram mode, selected auxiliary stream source, STC disabled,
+and default hot-pixel calibration disabled, the same exclusive `/dev/ttyACM0`
+probe succeeded. The rendered profile SHA-256 was
+`29979a74dfd0b532ded39602219b2e6fca05d5b9337c78e6ce11efa8a7e96bc3` (6010
+bytes); board identity remained OpenMV IMXRT1062 / GENX320, firmware 5.0.0,
+protocol 1.0.2, USB `37C5:1060`.
+
+After the three-second startup wait, the stream emitted Frame Ready events and
+every read returned a 307,200-byte decoded 320×320 frame:
+
+```
+READ index=0 elapsed_ms=27.8 frame_keys=[...] size=307200
+READ index=1 elapsed_ms=12.8 frame_keys=[...] size=307200
+READ index=2 elapsed_ms=11.1 frame_keys=[...] size=307200
+READ index=3 elapsed_ms=13.6 frame_keys=[...] size=307200
+READ index=4 elapsed_ms=12.3 frame_keys=[...] size=307200
+READ index=5 elapsed_ms=13.7 frame_keys=[...] size=307200
+READ index=6 elapsed_ms=13.2 frame_keys=[...] size=307200
+READ index=7 elapsed_ms=13.5 frame_keys=[...] size=307200
+READ index=8 elapsed_ms=12.9 frame_keys=[...] size=307200
+READ index=9 elapsed_ms=13.3 frame_keys=[...] size=307200
+DELIVERED_FRAMES=10
+FINALLY stopScript complete
+FINALLY disconnect complete
+```
+
+The one stdout line was the expected non-fatal `_OmvHelper.publish` warning;
+the helper disables telemetry after that first unsupported write and did not
+affect frame delivery. **Conclusion:** standard V2 frame streaming is supported
+for GENX histogram preview when `csi.CSI(..., stream=True)` selects the
+auxiliary sensor, `GENX320_MODE_HISTO` is explicitly set, and unsupported STC
+is not applied. The remaining live acceptance item is a `CameraOpenMV`
+frameDeque/MJPEG integration check.
+
+### 2026-08-11 — CameraOpenMV + MJPEG integration — SUCCESS
+
+The final live integration probe started `CameraOpenMV` on `/dev/ttyACM0` with
+an initially empty `frameDeque` and an ephemeral TLS MJPEG port. It reported:
+
+```
+MJPEG_SERVER https://127.0.0.1:33183/stream.mjpg
+FRAME_DEQUE shape=(320, 320, 3) dtype=uint8 sequence=1
+127.0.0.1 - - [11/Aug/2026 07:22:18] "GET /stream.mjpg HTTP/1.1" 200 -
+MJPEG_BOUNDARY bytes_before_boundary=218
+FINALLY camera.stop complete
+```
+
+This confirms the corrected V2 CSI grayscale stream format (`0x06060000`),
+the host conversion/publication path, and the initial-empty MJPEG path all
+work together. The one host warning was an unrelated/benign stdout channel
+event (`Unknown Event: channel=2, event=0xFFFF`); it did not prevent frame
+delivery or clean shutdown.
+
+### 2026-08-11 — Sensor-option evidence boundary
+
+The failed `SET_STC(...TRAIL, 1, 2)` attempt occurred before the profile was
+corrected to set `GENX320_MODE_HISTO`; STC combined with the corrected histogram
+mode was not separately tested. The maintained preview therefore disables and
+host-rejects STC as a conservative, verified-path policy, but does **not** claim
+that the firmware categorically lacks STC support. A dedicated sensor-options
+probe can establish that combination later.
+
+Hot-pixel calibration is different: with corrected mode/stream selection and
+STC disabled, `IOCTL_GENX320_CALIBRATE(10000, 0.5)` visibly progressed from
+67% to 78% over the probe while all stream locks returned NAK/`None`; snapshots
+cannot begin until it completes. It did not crash the board. `auto` is retained
+as an explicit opt-in for a setup session with sufficient scene activity;
+`off` is the default required for immediate live preview frames.

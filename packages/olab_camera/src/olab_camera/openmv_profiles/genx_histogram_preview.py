@@ -64,10 +64,13 @@ class GenxHistogramPreviewConfig:
 			'low_noise', 'high_speed' (the confirmed `csi.GENX320_BIASES_*`
 			presets).
 		anti_flicker (str): One of 'off', '50hz', '60hz'.
-		spatio_temporal_filtering (bool): Whether to enable the sensor's
-			spatio-temporal contrast filter (`csi.GENX320_STC_TRAIL` vs.
-			`csi.GENX320_STC_DISABLE`).
-		hot_pixel_calibration (str): One of 'auto', 'off'.
+		spatio_temporal_filtering (bool): Disabled in the verified histogram
+			preview path. The combination of STC and histogram mode has not
+			been isolated on the attached firmware, so `True` is rejected
+			before uploading a script rather than risking a device reset.
+		hot_pixel_calibration (str): One of 'auto', 'off'. `auto` is opt-in:
+			it blocks snapshots until the on-device calibration completes, so
+			it is unsuitable when immediate preview frames are required.
 	"""
 
 	resolution: tuple = FIXED_RESOLUTION
@@ -76,8 +79,8 @@ class GenxHistogramPreviewConfig:
 	contrast: int = 16
 	bias_preset: str = 'default'
 	anti_flicker: str = 'off'
-	spatio_temporal_filtering: bool = True
-	hot_pixel_calibration: str = 'auto'
+	spatio_temporal_filtering: bool = False
+	hot_pixel_calibration: str = 'off'
 	display_palette: str = 'grayscale'
 
 	def __post_init__(self):
@@ -110,6 +113,11 @@ class GenxHistogramPreviewConfig:
 		if not isinstance(self.spatio_temporal_filtering, bool):
 			raise ValueError(
 				f'spatio_temporal_filtering must be a bool, got {self.spatio_temporal_filtering!r}')
+		if self.spatio_temporal_filtering:
+			raise ValueError(
+				'spatio_temporal_filtering is disabled for the verified '
+				'GENX320 histogram-preview path; STC-with-histogram has not '
+				'been isolated on this firmware')
 
 		if self.hot_pixel_calibration not in _HOT_PIXEL_CALIBRATION_POLICIES:
 			raise ValueError(
@@ -152,8 +160,12 @@ HISTOGRAM_RATE_HZ = {histogram_rate_hz}
 BASELINE_BRIGHTNESS = {baseline_brightness}
 CONTRAST = {contrast}
 
-csi0 = csi.CSI(cid=csi.GENX320)
+# GENX320 is an auxiliary CSI on the RT1062.  The firmware only routes an
+# auxiliary sensor's snapshots to the standard host/IDE stream when selected
+# explicitly; the default (`stream=None`) selects the primary CSI only.
+csi0 = csi.CSI(cid=csi.GENX320, stream=True)
 csi0.reset()
+csi0.ioctl(csi.IOCTL_GENX320_SET_MODE, csi.GENX320_MODE_HISTO)
 csi0.pixformat(csi.GRAYSCALE)
 csi0.framesize(RESOLUTION)
 csi0.framerate(HISTOGRAM_RATE_HZ)
@@ -161,7 +173,6 @@ csi0.brightness(BASELINE_BRIGHTNESS)
 csi0.contrast(CONTRAST)
 csi0.ioctl(csi.IOCTL_GENX320_SET_BIASES, csi.{bias_preset_const})
 csi0.ioctl(csi.IOCTL_GENX320_SET_AFK, {anti_flicker_args})
-csi0.ioctl(csi.IOCTL_GENX320_SET_STC, csi.{stc_mode_const}, 1, 2)
 {hot_pixel_calibration_call}
 
 _seq = 0
@@ -196,6 +207,8 @@ def _read_helper_source():
 def render_profile_body(config):
 	"""Render just the profile-specific body (no helper text) for `config`."""
 	if config.hot_pixel_calibration == 'auto':
+		# Calibration runs before the snapshot loop and may take an
+		# activity-dependent amount of time. It is intentionally opt-in.
 		hot_pixel_calibration_call = (
 			f'csi0.ioctl(csi.IOCTL_GENX320_CALIBRATE, '
 			f'{_HOT_PIXEL_CALIBRATION_EVENT_COUNT}, {_HOT_PIXEL_CALIBRATION_SIGMA})')
@@ -214,7 +227,6 @@ def render_profile_body(config):
 		anti_flicker=config.anti_flicker,
 		anti_flicker_args=_anti_flicker_args(config.anti_flicker),
 		spatio_temporal_filtering=config.spatio_temporal_filtering,
-		stc_mode_const='GENX320_STC_TRAIL' if config.spatio_temporal_filtering else 'GENX320_STC_DISABLE',
 		hot_pixel_calibration=config.hot_pixel_calibration,
 		hot_pixel_calibration_call=hot_pixel_calibration_call,
 	)

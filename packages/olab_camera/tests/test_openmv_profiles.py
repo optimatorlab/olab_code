@@ -53,11 +53,14 @@ def test_anti_flicker_must_be_known_value():
 def test_spatio_temporal_filtering_must_be_bool():
     with pytest.raises(ValueError):
         GenxHistogramPreviewConfig(spatio_temporal_filtering='yes')
+    with pytest.raises(ValueError, match='disabled'):
+        GenxHistogramPreviewConfig(spatio_temporal_filtering=True)
 
 
 def test_hot_pixel_calibration_must_be_known_policy():
     with pytest.raises(ValueError):
         GenxHistogramPreviewConfig(hot_pixel_calibration='not_a_real_policy')
+    assert GenxHistogramPreviewConfig().hot_pixel_calibration == 'off'
 
 
 # ---- render_script() exact composition ----------------------------------
@@ -78,6 +81,8 @@ def test_render_script_is_helper_plus_profile_body_exactly():
 
 def test_render_script_contains_no_bare_import_helper():
     script = render_script(GenxHistogramPreviewConfig())
+    assert 'csi.CSI(cid=csi.GENX320, stream=True)' in script
+    assert 'csi0.ioctl(csi.IOCTL_GENX320_SET_MODE, csi.GENX320_MODE_HISTO)' in script
     assert 'import helper' not in script
     assert 'class _OmvHelper:' in script
     assert '_OmvHelper.publish(' in script
@@ -111,13 +116,15 @@ def _make_fake_csi_module():
         'GENX320_BIASES_LOW_NOISE', 'GENX320_BIASES_HIGH_SPEED',
         'GENX320_STC_DISABLE', 'GENX320_STC_TRAIL',
         'IOCTL_GENX320_SET_BIASES', 'IOCTL_GENX320_SET_AFK', 'IOCTL_GENX320_SET_STC',
+        'IOCTL_GENX320_SET_MODE', 'GENX320_MODE_HISTO',
         'IOCTL_GENX320_CALIBRATE',
     ):
         setattr(fake_csi, const, const)
 
     class _FakeCSIInstance:
-        def __init__(self, cid):
+        def __init__(self, cid, stream=None):
             self.cid = cid
+            self.stream = stream
 
         def reset(self):
             pass

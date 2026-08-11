@@ -24,7 +24,7 @@ import olab_camera.camera_openmv as camera_openmv_module
 from olab_camera.openmv_profiles.genx_histogram_preview import FIXED_RESOLUTION
 
 
-PIXFORMAT_GRAYSCALE = 0x08020001
+PIXFORMAT_GRAYSCALE = 0x06060000
 
 
 @pytest.fixture(autouse=True)
@@ -328,6 +328,43 @@ def test_capture_loop_drops_invalid_frames_without_raising(bad_frame):
 
     cam.stop()
     assert cam.camOn is False
+
+
+def test_no_frame_diagnostic_is_rate_limited_and_capture_recovers(monkeypatch):
+    """Immediate empty stream reads warn once, then a valid frame recovers."""
+    messages = []
+    monkeypatch.setattr(camera_openmv_module, '_NO_FRAME_WARNING_THRESHOLD', 3)
+    monkeypatch.setattr(camera_openmv_module, '_NO_FRAME_STARTUP_GRACE_SEC', 0)
+    cam = _make_camera(device_kwargs={'frames': [None] * 5 + [_make_frame()]})
+    real_log = cam.logger.log
+
+    def record_log(message, **kwargs):
+        messages.append(message)
+        return real_log(message, **kwargs)
+
+    cam.logger.log = record_log
+    cam.start()
+    assert _wait_until(lambda: len(cam.frameDeque) == 1)
+    assert len([message for message in messages if 'no frames from profile' in message]) == 1
+    assert cam.camOn is True
+
+    cam.stop()
+    device = FakeDevice.instances[0]
+    assert device.calls.count('disconnect') == 1
+
+
+def test_stop_during_immediate_no_frame_reads_is_bounded_and_cleans_up_once():
+    cam = _make_camera(device_kwargs={'frames': [], 'timeout': 0.05})
+    cam.start()
+    assert _wait_until(lambda: cam._capture_thread is not None and cam._capture_thread.is_alive())
+
+    started = time.monotonic()
+    cam.stop()
+    assert time.monotonic() - started < 1.0
+    device = FakeDevice.instances[0]
+    assert device.calls.count('stopScript') == 2  # startup + capture-owner cleanup
+    assert device.calls.count('disconnect') == 1
+    assert cam._device is None
 
 
 # ---- getFrameAndMeta() race-freedom ----------------------------------------

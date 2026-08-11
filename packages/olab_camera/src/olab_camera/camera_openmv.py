@@ -19,12 +19,15 @@ from .openmv_events import (
 from .openmv_movement import MovementRecordDecodeError, decode_movement_record
 from .openmv_profiles import PROFILES
 
-# openmv.image.PIXFORMAT_GRAYSCALE's documented value (1 byte/pixel
-# grayscale). Defined locally rather than imported from the optional
-# `openmv` package's internal image module, which isn't a stable public API
-# surface -- and this class must import cleanly whether or not `openmv` is
-# installed.
-_PIXFORMAT_GRAYSCALE = 0x08020001
+# OpenMV's V2 csi stream header identifies a GENX320 grayscale frame as
+# `0x06060000` (measured on firmware 5.0.0). This is intentionally distinct
+# from the optional host package's `openmv.image.PIXFORMAT_GRAYSCALE`: that
+# image-library enum is not the V2 csi stream-header contract.
+_PIXFORMAT_GRAYSCALE = 0x06060000
+_NO_FRAME_WARNING_THRESHOLD = 25
+_NO_FRAME_STARTUP_GRACE_SEC = 5.0
+_NO_FRAME_WARNING_INTERVAL_SEC = 5.0
+_NO_FRAME_IMMEDIATE_BACKOFF_SEC = 0.01
 
 
 class CameraOpenMV(Camera):
@@ -439,8 +442,12 @@ class CameraOpenMV(Camera):
 
 		config = self._profile.config
 		expected_width, expected_height = config.resolution
+		no_frame_started = None
+		consecutive_no_frames = 0
+		last_no_frame_warning = None
 
 		while self._capture_running:
+			read_started = time.monotonic()
 			try:
 				frame = self._device.readFrame()
 			except Exception as e:
@@ -452,7 +459,31 @@ class CameraOpenMV(Camera):
 				break
 
 			if frame is None:
+				now = time.monotonic()
+				if no_frame_started is None:
+					no_frame_started = now
+				consecutive_no_frames += 1
+				if (now - no_frame_started >= _NO_FRAME_STARTUP_GRACE_SEC
+						and consecutive_no_frames >= _NO_FRAME_WARNING_THRESHOLD
+						and (last_no_frame_warning is None
+							or now - last_no_frame_warning >= _NO_FRAME_WARNING_INTERVAL_SEC)):
+					self.logger.log(
+						f'CameraOpenMV: no frames from profile {self._profile.profile_id!r} '
+						f'for {now - no_frame_started:.1f}s '
+						f'({consecutive_no_frames} consecutive; port={self.devicePort!r}; '
+						f'capture_running={self._capture_running})',
+						severity=olab_utils.SEVERITY_WARNING)
+					last_no_frame_warning = now
+				# Hardware evidence shows an unavailable stream returns in under
+				# 2ms. Back off only that immediate-empty path; a bounded blocking
+				# read already provides its own wait and must not be slowed further.
+				if time.monotonic() - read_started < _NO_FRAME_IMMEDIATE_BACKOFF_SEC:
+					time.sleep(_NO_FRAME_IMMEDIATE_BACKOFF_SEC)
 				continue
+
+			no_frame_started = None
+			consecutive_no_frames = 0
+			last_no_frame_warning = None
 
 			if frame.get('format') != _PIXFORMAT_GRAYSCALE:
 				self.logger.log(
