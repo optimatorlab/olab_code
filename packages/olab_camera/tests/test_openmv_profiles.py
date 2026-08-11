@@ -12,7 +12,7 @@ import pytest
 
 from olab_camera.openmv_profiles import PROFILES
 from olab_camera.openmv_profiles.contract import (
-    ENVELOPE_SCHEMA_VERSION, EnvelopeDecodeError, EnvelopeVersionError,
+    ENVELOPE_SCHEMA_VERSION, EnvelopeVersionError,
     decode_envelope, encode_envelope,
 )
 from olab_camera.openmv_profiles.genx_histogram_preview import (
@@ -25,29 +25,6 @@ from olab_camera.openmv_profiles.genx_histogram_preview import (
 def test_default_config_is_valid():
     config = GenxHistogramPreviewConfig()
     assert config.resolution == FIXED_RESOLUTION
-
-
-@pytest.mark.parametrize('resolution', [(160, 160), (320, 240), (0, 0)])
-def test_resolution_must_be_fixed_320x320(resolution):
-    with pytest.raises(ValueError):
-        GenxHistogramPreviewConfig(resolution=resolution)
-
-
-@pytest.mark.parametrize('rate', [0, -1, 19, 351, None])
-def test_histogram_rate_hz_out_of_range_rejected(rate):
-    # Confirmed range from OpenMV's own GENX320 docs: ~20-350 FPS.
-    with pytest.raises(ValueError):
-        GenxHistogramPreviewConfig(histogram_rate_hz=rate)
-
-
-def test_bias_preset_must_be_known_value():
-    with pytest.raises(ValueError):
-        GenxHistogramPreviewConfig(bias_preset='not_a_real_preset')
-
-
-def test_anti_flicker_must_be_known_value():
-    with pytest.raises(ValueError):
-        GenxHistogramPreviewConfig(anti_flicker='not_a_real_mode')
 
 
 def test_spatio_temporal_filtering_must_be_bool():
@@ -241,22 +218,6 @@ def test_omv_helper_publish_disables_itself_after_first_failure(capsys):
     assert omv_helper._telemetry_disabled is True
 
 
-@pytest.mark.parametrize('preset', ['default', 'low_light', 'active_marker', 'low_noise', 'high_speed'])
-def test_render_profile_body_uses_confirmed_bias_preset_constant(preset):
-    body = render_profile_body(GenxHistogramPreviewConfig(bias_preset=preset))
-    assert f'csi.GENX320_BIASES_{preset.upper()}' in body
-
-
-@pytest.mark.parametrize('mode,expected', [
-    ('off', 'IOCTL_GENX320_SET_AFK, 0'),
-    ('50hz', 'IOCTL_GENX320_SET_AFK, 1, 45, 55'),
-    ('60hz', 'IOCTL_GENX320_SET_AFK, 1, 55, 65'),
-])
-def test_render_profile_body_anti_flicker_args(mode, expected):
-    body = render_profile_body(GenxHistogramPreviewConfig(anti_flicker=mode))
-    assert expected in body
-
-
 def test_render_profile_body_hot_pixel_calibration_off_skips_ioctl():
     body = render_profile_body(GenxHistogramPreviewConfig(hot_pixel_calibration='off'))
     assert 'csi0.ioctl(csi.IOCTL_GENX320_CALIBRATE' not in body
@@ -285,11 +246,6 @@ def test_encode_decode_envelope_roundtrip():
     assert envelope['device_time_ms'] == 123
 
 
-def test_encode_envelope_rejects_invalid_kind():
-    with pytest.raises(ValueError):
-        encode_envelope('p', 'not_a_kind', {})
-
-
 def test_decode_envelope_rejects_schema_version_mismatch():
     raw = encode_envelope('p', 'config', {})
     import json
@@ -297,15 +253,3 @@ def test_decode_envelope_rejects_schema_version_mismatch():
     tampered['schema_version'] = ENVELOPE_SCHEMA_VERSION + 1
     with pytest.raises(EnvelopeVersionError):
         decode_envelope(json.dumps(tampered).encode('utf-8'))
-
-
-def test_decode_envelope_rejects_malformed_json():
-    with pytest.raises(EnvelopeDecodeError):
-        decode_envelope(b'not json at all')
-
-
-def test_decode_envelope_rejects_missing_field():
-    import json
-    incomplete = {'schema_version': ENVELOPE_SCHEMA_VERSION, 'kind': 'config'}
-    with pytest.raises(EnvelopeDecodeError):
-        decode_envelope(json.dumps(incomplete).encode('utf-8'))

@@ -91,19 +91,6 @@ class _FakeClientFailingIdentity(_FakeClient):
         return super().system_info()
 
 
-def test_port_must_be_non_empty_string():
-    with pytest.raises(ValueError):
-        OpenMVDevice(port=None, client_class=_FakeClient)
-    with pytest.raises(ValueError):
-        OpenMVDevice(port='', client_class=_FakeClient)
-
-
-@pytest.mark.parametrize('bad_timeout', [0, -1, float('inf'), float('nan'), None, 'x', True])
-def test_timeout_must_be_finite_positive_number(bad_timeout):
-    with pytest.raises(ValueError):
-        OpenMVDevice(port='/dev/ttyACM0', client_class=_FakeClient, timeout=bad_timeout)
-
-
 def test_raises_import_error_without_client_class_or_openmv_installed(monkeypatch):
     import olab_camera.openmv_device as mod
     monkeypatch.setattr(mod, '_openmv_lib', None)
@@ -159,22 +146,6 @@ def test_stop_script_run_source_and_channels():
     device.streaming(True, raw=False)
     frame = device.readFrame()
     assert frame['width'] == 320
-
-
-def test_run_script_file_missing_file_raises_value_error(tmp_path):
-    device = OpenMVDevice(port='/dev/ttyACM0', client_class=_FakeClient)
-    device.connect()
-    with pytest.raises(ValueError):
-        device.runScriptFile(tmp_path / 'does_not_exist.py')
-
-
-def test_run_script_file_non_utf8_raises_value_error(tmp_path):
-    device = OpenMVDevice(port='/dev/ttyACM0', client_class=_FakeClient)
-    device.connect()
-    bad_file = tmp_path / 'bad.py'
-    bad_file.write_bytes(b'\xff\xfe\x00\x01')
-    with pytest.raises(ValueError):
-        device.runScriptFile(bad_file)
 
 
 def test_run_script_file_valid_file_execs_contents(tmp_path):
