@@ -96,8 +96,11 @@ def main():
             grew = '' if meta['sequence'] == last_seq else '  (new frames arriving)'
             last_seq = meta['sequence']
             elapsed = args.seconds - (deadline - time.monotonic())
+            # cam.fps['capture'] is a _make_fps_dict object, not a float --
+            # read its .actual field (recalculates every ~5s).
+            fps_actual = getattr(cam.fps.get('capture'), 'actual', 0.0)
             print(f'  t+{elapsed:4.1f}s  frame={frame.shape} seq={meta["sequence"]} '
-                  f'fps~{cam.fps.get("capture", 0):.1f}{grew}')
+                  f'fps~{fps_actual:.1f}{grew}')
             if args.mode == 'regions' and cam.latestMovementRecord:
                 regs = cam.latestMovementRecord.get('regions', [])
                 print(f'            movement regions: {len(regs)} -> {regs}')
