@@ -6,6 +6,9 @@ from olab_camera.openmv_movement import (
 from olab_camera.openmv_profiles.genx_movement_regions import (
 	GenxMovementRegionsProfile,
 )
+from olab_camera.openmv_profiles.genx_histogram_regions import (
+	GenxHistogramRegionsProfile,
+)
 
 
 def test_decode_and_render_movement_record():
@@ -26,3 +29,13 @@ def test_profile_does_not_replace_an_unread_channel_record():
 	source = GenxMovementRegionsProfile().render_script()
 	assert 'if not _ready and time.ticks_diff(now_ms, last_report_ms)' in source
 	compile(source, 'genx_movement_regions.py', 'exec')
+
+
+def test_regions_script_selects_auxiliary_stream_source():
+	# olab_code#46: without stream=True the GENX320 aux CSI delivers region
+	# telemetry but no host frames. genx_histogram_regions inherits the same
+	# script, so the public mode is covered too.
+	for profile in (GenxMovementRegionsProfile(), GenxHistogramRegionsProfile()):
+		source = profile.render_script()
+		assert 'csi.CSI(cid=csi.GENX320, stream=True)' in source
+		assert 'csi.IOCTL_GENX320_SET_MODE, csi.GENX320_MODE_HISTO' in source

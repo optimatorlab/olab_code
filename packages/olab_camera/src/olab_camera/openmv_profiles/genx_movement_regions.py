@@ -45,7 +45,12 @@ PIXELS_THRESHOLD = {pixels_threshold}
 AREA_THRESHOLD = {area_threshold}
 MAX_REGIONS = {max_regions}
 
-csi0 = csi.CSI(cid=csi.GENX320)
+# GENX320 is an auxiliary CSI on the RT1062; snapshots only reach the host
+# frame stream (OpenMVDevice.readFrame) when the sensor is selected with
+# stream=True.  Without it the region-telemetry channel still works but the
+# histogram display frames never arrive (see olab_code#46 / the histogram-
+# preview no-frame fix).
+csi0 = csi.CSI(cid=csi.GENX320, stream=True)
 csi0.reset()
 csi0.ioctl(csi.IOCTL_GENX320_SET_MODE, csi.GENX320_MODE_HISTO)
 csi0.pixformat(csi.GRAYSCALE)
