@@ -32,7 +32,14 @@ realsense = ["pyrealsense2>=2.55"]
 # openmv itself only requires Python >=3.8 (confirmed against the published
 # 1.0.7 wheel metadata) -- it follows the base package's own >=3.10 floor,
 # no separate/stricter version requirement.
-openmv = ["openmv>=1.0.7"]
+#
+# Pinned exactly to 1.0.7: it is the only PyPI release and the version the
+# GENX320 frame/format handling in camera_openmv.py is validated against. An
+# unbounded `>=1.0.7` would let a future breaking release install silently.
+# NOTE: the installed 1.0.7 package's internal `openmv.__version__` string
+# erroneously reports "2.0.0" -- trust `pip show openmv` (the dist metadata),
+# not that attribute.
+openmv = ["openmv==1.0.7"]
 all = ["olab-camera[yolo,ros,websocket,webrtc,realsense,openmv]"]
 
 [project.scripts]
