@@ -1,3 +1,7 @@
+import contextlib
+import os
+import threading
+
 import numpy as np
 import pyaudio
 
@@ -16,6 +20,42 @@ def _passFunction(*args, **kwargs):
 def _exceptionFunction(msg, *args, **kwargs):
 	'''The default function to call when an exception is raised. Other functions could be called instead.'''
 	print(msg)
+
+
+# PIPEWIRE_PROPS is process-global, while PipeWire reads it when an ALSA
+# compatibility stream is opened.  Serialize the brief override so two
+# concurrent Mic.start() calls cannot attach each other's identity.
+_PIPEWIRE_PROPS_LOCK = threading.Lock()
+_pipewire_stream_sequence = 0
+
+
+def _pipewire_props_with_mic_identity(existing_props, identity):
+	"""Add Mic identity properties while retaining a valid caller dictionary."""
+	identity_props = f'node.name = "{identity}" application.name = "{identity}"'
+	if existing_props:
+		stripped = existing_props.rstrip()
+		if stripped.lstrip().startswith('{') and stripped.endswith('}'):
+			# Later keys win in PipeWire's property parser, so our identity
+			# deliberately overrides any inherited generic name.
+			return f'{stripped[:-1]} {identity_props} }}'
+	return f'{{ {identity_props} }}'
+
+
+@contextlib.contextmanager
+def _temporary_pipewire_mic_identity():
+	"""Expose a fresh PipeWire identity only for one PortAudio stream open."""
+	global _pipewire_stream_sequence
+	previous_props = os.environ.get('PIPEWIRE_PROPS')
+	_pipewire_stream_sequence += 1
+	identity = f'olab_audio.Mic.pid{os.getpid()}.stream{_pipewire_stream_sequence}'
+	os.environ['PIPEWIRE_PROPS'] = _pipewire_props_with_mic_identity(previous_props, identity)
+	try:
+		yield identity
+	finally:
+		if previous_props is None:
+			os.environ.pop('PIPEWIRE_PROPS', None)
+		else:
+			os.environ['PIPEWIRE_PROPS'] = previous_props
 
 
 class Mic():
@@ -198,11 +238,17 @@ class Mic():
 			self.reachbackFunc = reachbackFunc
 
 			self.postFunc = defaultFromNone(postFunc, self.POSTFUNC)
-
-			# Start capturing
-			self.stream = audio.open(format=self.frmt, channels=self.channels,
-							rate=self.samplerate, input=True, input_device_index = self.deviceID,
-							frames_per_buffer=self.frames_per_buffer, output=False, stream_callback=self.callbackFunc)
+			# PipeWire's ALSA compatibility layer otherwise gives every Python
+			# client the generic interpreter identity. WirePlumber can persist a
+			# source-output move against that identity, causing a loopback move
+			# from one process to be silently replayed onto an unrelated future
+			# microphone stream. Give each open a fresh identity, but restore the
+			# caller's environment immediately after PipeWire has read it.
+			with _PIPEWIRE_PROPS_LOCK:
+				with _temporary_pipewire_mic_identity():
+					self.stream = audio.open(format=self.frmt, channels=self.channels,
+										rate=self.samplerate, input=True, input_device_index = self.deviceID,
+										frames_per_buffer=self.frames_per_buffer, output=False, stream_callback=self.callbackFunc)
 
 			self.micOn = True
 		except Exception as e:
