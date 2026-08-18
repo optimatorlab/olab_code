@@ -17,6 +17,9 @@ Examples
     # Raw EVT2.0 events: tally polarity, optionally record the session.
     python genx_hardware_test.py --mode raw --record ./genx-session
 
+    # Histogram preview, also recorded as a watchable .mp4.
+    python genx_hardware_test.py --mode histogram --movie-out ./genx-session.mp4
+
 Stop early any time with Ctrl-C; the camera is still shut down cleanly.
 """
 
@@ -55,7 +58,17 @@ def main():
                     help='Leaf-cert dir used for the stream (default: %(default)s).')
     ap.add_argument('--record', metavar='DIR', default=None,
                     help='raw mode only: record EVT2.0 batches to this directory.')
+    ap.add_argument('--movie-out', metavar='PATH', default=None,
+                    help='histogram/regions modes only: also record the rendered '
+                         'preview frames to this .mp4 file (for watching back, not '
+                         'motion analysis -- see --record for that).')
+    ap.add_argument('--movie-fps', type=float, default=15.0,
+                    help='playback fps for --movie-out (default: 15).')
     args = ap.parse_args()
+
+    if args.movie_out and args.mode == 'raw':
+        ap.error('--movie-out only applies to histogram/regions modes; '
+                  'use --record for raw mode.')
 
     profile = MODES[args.mode]
     print(f'Opening {args.port!r} in mode {args.mode!r} (profile={profile!r}) '
@@ -85,6 +98,22 @@ def main():
         if args.stream:
             print(f'  streaming: https://<this-host>:{args.port_out}/  (self-signed/leaf cert)')
 
+        if args.movie_out:
+            # recordVideoLocal() needs a first frame to size the writer -- give
+            # the capture thread a bounded moment to deliver one.
+            deadline_first_frame = time.monotonic() + min(args.seconds, 5.0)
+            while time.monotonic() < deadline_first_frame:
+                try:
+                    cam.getFrameAndMeta()
+                    break
+                except IndexError:
+                    time.sleep(0.1)
+            movie_dir, movie_file = os.path.split(args.movie_out)
+            path, filename = cam.recordVideoLocal(path=movie_dir or '.', filename=movie_file,
+                                                   fps=args.movie_fps)
+            if filename is None:
+                print('  WARNING: --movie-out failed to start (no frame available yet)')
+
         deadline = time.monotonic() + args.seconds
         while time.monotonic() < deadline:
             time.sleep(1.0)
@@ -110,12 +139,16 @@ def main():
     except KeyboardInterrupt:
         print('\nInterrupted -- shutting down.')
     finally:
+        if args.movie_out:
+            cam.stopRecordVideoLocal()
         cam.shutdown()
 
     # ---- summary ----
     print('\n=== summary ===')
     print(f'mode           : {args.mode} ({profile})')
     print(f'last frame seq : {last_seq}')
+    if args.movie_out:
+        print(f'movie          : {args.movie_out}')
     if args.mode == 'raw':
         print(f'raw tally      : {raw_tally}')
         print(f'event stats    : {cam.eventStats}')
