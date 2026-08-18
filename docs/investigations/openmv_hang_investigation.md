@@ -1528,3 +1528,39 @@ STC disabled, `IOCTL_GENX320_CALIBRATE(10000, 0.5)` visibly progressed from
 cannot begin until it completes. It did not crash the board. `auto` is retained
 as an explicit opt-in for a setup session with sufficient scene activity;
 `off` is the default required for immediate live preview frames.
+
+### 2026-08-11 — olab_code#48 Phase A: JPEG vs raw histogram stream — option 2 REGRESSES, do not implement
+
+Live single-owner probe on `/dev/ttyACM0` (OpenMV IMXRT1062 / GENX320, fw 5.0.0,
+protocol 1.0.2, USB 37C5:1060). Exclusive pyserial open preflight passed (IDE
+closed). Profile `genx_histogram_preview`, default config; installed openmv is
+1.0.7. `stopScript()`+`disconnect()` in `finally`; clean exit 0.
+
+Measured, same session, 30 frames each, back-to-back:
+
+| mode | wire `raw_size` | `format` | decoded `len(data)` | mean read | eff fps |
+|---|---|---|---|---|---|
+| `streaming(True, raw=False)` (JPEG, current default) | 40,442 B | `0x06060000` (PIXFORMAT_JPEG) | 307,200 | 51.6 ms (40.5–62.7) | 19.4 |
+| `streaming(True, raw=True, resolution=(320,320))` | 102,400 B | `0x08020001` (PIXFORMAT_GRAYSCALE) | 307,200 | 105.6 ms (93.7–112.7) | 9.5 |
+
+Confirms the source-based deductions exactly: the current histogram wire is
+**grayscale JPEG** (format `0x06060000`, ~40 KB compressed → `_convert_jpeg` →
+307,200-B R=G=B RGB888); the raw framebuffer path delivers frames on the aux CSI
+with the library `GRAYSCALE` format `0x08020001`, `raw_size` exactly 102,400 B
+(1 byte/pixel), library-expanded to 307,200 B.
+
+**But the optimization is a net regression.** Raw streaming is ~2× slower per
+frame (105.6 vs 51.6 ms) and halves throughput (9.5 vs 19.4 fps). The host
+per-frame cost is **transport-bound, not JPEG-decode-bound**: the JPEG wire is
+~40 KB vs 102 KB raw, and moving the extra ~62 KB over the fragmented V2
+protocol costs far more than the JPEG decode it removes. JPEG compression is
+therefore *helping* host throughput on this link, not hurting it.
+
+**Conclusion for #48:** the issue's premise (drop 1-channel/raw to reduce host
+cost) does not hold — the wire was never a redundant 3-channel raw payload, and
+switching to raw grayscale measurably regresses fps. **Do NOT implement Phase B
+(`streaming(raw=True)`).** Recommend keeping the current JPEG stream and closing
+#48 as "won't optimize — measured regression," retaining only the Phase-0
+`openmv==1.0.7` pin (an independent, worthwhile fix). Any real throughput win
+would have to *reduce* wire bytes further (lower JPEG quality, smaller frame,
+or more on-device processing) — separate scope from #48.
