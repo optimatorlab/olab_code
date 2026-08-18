@@ -6,7 +6,7 @@ and ROS camera topics with extensive computer vision capabilities.
 
 Main Features:
     - Multiple camera backends (USB, Raspberry Pi Camera Module, Gazebo Transport topics, ROS topics,
-      Intel RealSense)
+      Intel RealSense, OpenMV)
     - Video streaming over HTTPS — three protocol options:
         * MJPEG  (default, no extra deps)
         * WebSocket + JPEG  (pip install olab-camera[websocket])
@@ -30,6 +30,8 @@ Classes:
     CameraUSB: USB camera and RTSP stream implementation
     CameraRealSense: Intel RealSense camera (color + optional depth + optional IMU)
     CameraWebSocket: Virtual camera — accepts pushed JPEG frames via WSS (sim/Cesium use)
+    CameraOpenMV: OpenMV camera, GENX320 histogram pixels, optional movement
+      regions, or raw polarity-event preview/callbacks
 
 Dependencies:
     - numpy
@@ -105,6 +107,8 @@ from .camera_ros import CameraROS
 from .camera_usb import CameraUSB
 from .camera_realsense import CameraRealSense
 from .camera_websocket import CameraWebSocket, _WebSocketReceiveServer
+from .camera_openmv import CameraOpenMV
+from .openmv_device import OpenMVDevice
 
 
 '''

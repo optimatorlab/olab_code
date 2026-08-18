@@ -26,6 +26,7 @@ class _FakePyAudio:
         self.fail_open = fail_open
         self.device_count = device_count
         self.opened_with = None
+        self.pipewire_props_at_open = None
 
     def get_device_count(self):
         return self.device_count
@@ -37,6 +38,7 @@ class _FakePyAudio:
         if self.fail_open:
             raise OSError("[Errno -9997] Invalid sample rate")
         self.opened_with = kwargs
+        self.pipewire_props_at_open = os.environ.get('PIPEWIRE_PROPS')
         return _FakeStream()
 
 
@@ -69,6 +71,51 @@ def test_mic_start_uses_explicit_samplerate_when_given(monkeypatch):
 
     assert mic.samplerate == 48000
     assert fake_audio.opened_with['rate'] == 48000
+
+
+def test_mic_start_uses_unique_temporary_pipewire_identity(monkeypatch):
+    """The PipeWire ALSA stream must not inherit the generic interpreter
+    identity that WirePlumber can use to replay another process's source move."""
+    fake_audio = _FakePyAudio(default_rate=32000.0)
+    monkeypatch.setattr("olab_audio.mic.audio", fake_audio)
+    original_props = '{ media.role = "Communication" }'
+    monkeypatch.setenv('PIPEWIRE_PROPS', original_props)
+
+    first = Mic(deviceID=3)
+    first.start()
+    first_props = fake_audio.pipewire_props_at_open
+
+    second = Mic(deviceID=3)
+    second.start()
+    second_props = fake_audio.pipewire_props_at_open
+
+    assert 'media.role = "Communication"' in first_props
+    assert 'node.name = "olab_audio.Mic.pid' in first_props
+    assert 'application.name = "olab_audio.Mic.pid' in first_props
+    assert first_props != second_props
+    assert os.environ['PIPEWIRE_PROPS'] == original_props
+
+
+def test_mic_start_removes_temporary_pipewire_identity_when_unset(monkeypatch):
+    fake_audio = _FakePyAudio(default_rate=32000.0)
+    monkeypatch.setattr("olab_audio.mic.audio", fake_audio)
+    monkeypatch.delenv('PIPEWIRE_PROPS', raising=False)
+
+    Mic(deviceID=3).start()
+
+    assert fake_audio.pipewire_props_at_open is not None
+    assert 'olab_audio.Mic.pid' in fake_audio.pipewire_props_at_open
+    assert 'PIPEWIRE_PROPS' not in os.environ
+
+
+def test_mic_start_restores_pipewire_props_when_open_fails(monkeypatch):
+    fake_audio = _FakePyAudio(fail_open=True)
+    monkeypatch.setattr("olab_audio.mic.audio", fake_audio)
+    monkeypatch.setenv('PIPEWIRE_PROPS', '{ media.role = "Communication" }')
+
+    Mic(deviceID=3).start()
+
+    assert os.environ['PIPEWIRE_PROPS'] == '{ media.role = "Communication" }'
 
 
 def test_mic_stop_after_failed_start_does_not_raise(monkeypatch):

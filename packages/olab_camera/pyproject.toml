@@ -29,7 +29,18 @@ ros = ["rospy", "cv-bridge", "sensor-msgs"]
 websocket = ["websockets>=12.0"]
 webrtc = ["aiortc>=1.9.0", "aiohttp>=3.9.0"]
 realsense = ["pyrealsense2>=2.55"]
-all = ["olab-camera[yolo,ros,websocket,webrtc,realsense]"]
+# openmv itself only requires Python >=3.8 (confirmed against the published
+# 1.0.7 wheel metadata) -- it follows the base package's own >=3.10 floor,
+# no separate/stricter version requirement.
+#
+# Pinned exactly to 1.0.7: it is the only PyPI release and the version the
+# GENX320 frame/format handling in camera_openmv.py is validated against. An
+# unbounded `>=1.0.7` would let a future breaking release install silently.
+# NOTE: the installed 1.0.7 package's internal `openmv.__version__` string
+# erroneously reports "2.0.0" -- trust `pip show openmv` (the dist metadata),
+# not that attribute.
+openmv = ["openmv==1.0.7"]
+all = ["olab-camera[yolo,ros,websocket,webrtc,realsense,openmv]"]
 
 [project.scripts]
 olab-camera-generate-cert = "olab_camera.tls:generate_cert_main"
@@ -38,3 +49,14 @@ olab-camera-issue-cert = "olab_camera.ca:issue_cert_main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/olab_camera"]
+
+[tool.pytest.ini_options]
+# First custom pytest marker in this repo (no sibling package registers one
+# yet). CI runs plain `pytest packages/olab_camera/tests -v` with no `-m`
+# filter (see .github/workflows/ci.yml), so `addopts` is what actually
+# excludes "slow" (clean-install/wheel-build) tests by default -- run them
+# explicitly with `pytest -m slow`.
+markers = [
+    "slow: clean-install/wheel-build tests excluded from the default run",
+]
+addopts = "-m 'not slow'"

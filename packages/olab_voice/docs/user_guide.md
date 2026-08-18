@@ -85,6 +85,20 @@ print(transcript.text)
 synthesize_to_wav("107 is listening", "response.wav")
 ```
 
+Batch STT backends (currently Faster-Whisper) also populate
+`transcript.segments`, a list of `TranscriptSegment(text, start_time,
+end_time, confidence)`, for callers that need per-segment timing (for
+example, generating an SRT file):
+
+```python
+for segment in transcript.segments:
+    print(f"[{segment.start_time:.2f} - {segment.end_time:.2f}] {segment.text}")
+```
+
+`segments` defaults to an empty list and is absent from older serialized
+`TranscriptEvent` payloads, so existing consumers that only read `text`,
+`start_time`, `end_time`, and `confidence` are unaffected.
+
 For push-to-talk workflows that already have audio bytes:
 
 ```python

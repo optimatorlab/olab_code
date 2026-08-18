@@ -154,12 +154,94 @@ python3 --version
 - **3.11 (e.g. Raspberry Pi OS Bookworm's default) / 3.13 (e.g. Debian
   Trixie's default) on aarch64, or any other platform without a matching
   wheel**: `pip install pyrealsense2` will fail with "no matching
-  distribution." Options: install one of the supported Python versions
+  distribution." Two options: install one of the supported Python versions
   alongside the system default just for this venv (e.g. via your distro's
-  packages, `pyenv`, or `deadsnakes`), or build `librealsense` (with Python
-  bindings enabled) from source per Intel's official
-  [librealsense installation guide](https://github.com/IntelRealSense/librealsense/blob/master/doc/installation.md).
-  **Neither path is verified in this repo yet.**
+  packages, `pyenv`, or `deadsnakes` -- **not verified in this repo**), or
+  build `librealsense` from source with Python bindings enabled --
+  **verified end-to-end** (2026-07-30, Raspberry Pi CM5, Debian Trixie
+  (13), Python 3.13.5, aarch64, kernel `6.12.47+rpt-rpi-2712`; librealsense
+  `2.58.3` from
+  [github.com/realsenseai/librealsense](https://github.com/realsenseai/librealsense)
+  -- the project moved from `IntelRealSense/librealsense`, use the new URL):
+
+  ```bash
+  sudo apt-get update
+  sudo apt-get install -y libusb-1.0-0-dev libudev-dev libssl-dev pkg-config libgtk-3-dev
+  sudo apt-get install -y git wget cmake build-essential
+  sudo apt-get install -y libglfw3-dev libgl1-mesa-dev libglu1-mesa-dev
+  sudo apt-get install -y python3-dev python3.13-dev   # match your actual Python version
+  ```
+  `python3-dev`/`python3.NN-dev` (the actual headers + `libpython3.NN.so`)
+  are **required**, separately from the base `python3` package -- without
+  them, `cmake` fails with `Could NOT find Python (missing:
+  Python_INCLUDE_DIRS Python_LIBRARIES ...)` even though the legacy
+  `PythonInterp`/`PythonLibs` detection reports the interpreter found fine.
+
+  ```bash
+  cd ~/Projects   # or wherever you keep repos
+  git clone https://github.com/realsenseai/librealsense.git
+  cd librealsense
+  ./scripts/setup_udev_rules.sh
+  mkdir build && cd build
+  cmake .. -DCMAKE_BUILD_TYPE=Release -DFORCE_RSUSB_BACKEND=ON -DBUILD_PYTHON_BINDINGS=true -DPYTHON_EXECUTABLE=$(which python3) -DBUILD_EXAMPLES=false -DBUILD_GRAPHICAL_EXAMPLES=false -DBUILD_TOOLS=false -DCHECK_FOR_UPDATES=false
+  make -j$(nproc)   # ~20 minutes on a CM5's 4 cores
+  sudo make install
+  sudo ldconfig
+  ```
+  - **`./scripts/setup_udev_rules.sh` prompts** with `read -p "Remove all
+    RealSense cameras attached. Hit any key when ready"` whenever *any*
+    `/dev/video*` node exists on the machine -- true on essentially every
+    CM5 here, since Pi cameras are typically already attached. This is
+    fine interactively (just hit Enter) -- it only becomes a problem when
+    running this non-interactively (e.g. over `ssh host cmd` with no pty),
+    where nothing can ever answer it and it hangs forever with zero
+    output. If automating this, pipe an answer in explicitly, e.g. `echo |
+    sudo ./scripts/setup_udev_rules.sh`.
+  - **`-DBUILD_EXAMPLES=false -DBUILD_GRAPHICAL_EXAMPLES=false
+    -DBUILD_TOOLS=false -DCHECK_FOR_UPDATES=false`**: we only need the
+    core library + Python bindings, not the GUI viewer/depth-quality
+    tools or firmware-updater. Confirmed via a real build failure on a
+    second CM5 (olab-131, 2026-07-31): with the defaults (all four of
+    these are ON by default on Linux), `realsense-viewer` and
+    `rs-depth-quality` failed to link with `undefined reference to
+    idn2_*` -- `CHECK_FOR_UPDATES` (ON by default on Linux) pulls in a
+    bundled libcurl built with IDN support, but the final link of those
+    two tool binaries never actually links `libidn2.so`, so the build
+    fails. Disabling examples/tools/update-checking sidesteps the broken
+    link entirely (we don't need any of it) rather than chasing the idn2
+    linkage itself, and also cuts build time.
+  - **`FORCE_RSUSB_BACKEND=ON`**: Intel's kernel-patch scripts
+    (`patch-realsense-*.sh`) only support Ubuntu 20/22/24 LTS -- Debian
+    isn't covered. `FORCE_RSUSB_BACKEND` uses a userspace USB backend
+    instead, needing no kernel patches at all; it's explicitly documented
+    as "optional for Linux" (vs. mandatory on Windows/macOS/Android),
+    exactly for this situation.
+  - **`-DPYTHON_EXECUTABLE=$(which python3)`**: run this with your target
+    venv activated. `sudo make install` installs the compiled
+    `pyrealsense2` package **directly into that venv's own
+    site-packages** (with proper `__init__.py` + versioned `.so` symlinks)
+    -- no manual copying, no `PYTHONPATH` fiddling needed. (An earlier
+    version of this guide assumed a manual copy step was required; it
+    wasn't -- verified by watching `make install`'s actual output
+    location.)
+  - Confirm: `python3 -c "import pyrealsense2 as rs;
+    print(rs.context().query_devices())"` should print a real device list
+    (or an empty one if nothing's plugged in), no `ModuleNotFoundError`.
+  - **Do not run `pip install olab-camera[realsense]` after a source
+    build.** That extra tries to pull `pyrealsense2` from PyPI, which has
+    no wheel for this platform/Python combination and will just fail --
+    `pyrealsense2` is already provided by the build above, and
+    `olab-camera`'s other dependencies install normally on their own.
+
+  **Same-hardware transfer**: on an *identical* CM5 (same Debian point
+  release, same Python 3.13.x), you don't need to rebuild --
+  `rsync`/copy the whole `librealsense/build/` directory over and run
+  `sudo make install` there too (fast, since everything's already
+  compiled). Still need `./scripts/setup_udev_rules.sh` and your own
+  `99-realsense-iio.rules`/group setup (below) on the second machine --
+  those aren't part of the build tree. If the two machines ever drift
+  onto different OS/kernel/Python versions, don't assume binary
+  compatibility -- rebuild and re-verify.
 
 **Device permissions (Linux)**: if `query_devices()` finds nothing despite
 a RealSense camera being plugged in, it's usually a udev-rules issue (the
@@ -242,9 +324,39 @@ shell worked immediately. Two ways to actually pick up the new group:
 Create `/etc/udev/rules.d/99-realsense-iio.rules`:
 ```
 SUBSYSTEM=="iio", ATTRS{idVendor}=="8086", ATTRS{idProduct}=="0b3a", ACTION=="add", RUN+="/bin/sh -c 'chgrp -R realsense /sys%p 2>/dev/null; chmod -R g+rwX,o-rwx /sys%p 2>/dev/null || true'"
-KERNEL=="hidraw*", ATTRS{idVendor}=="8086", ATTRS{idProduct}=="0b3a", GROUP="realsense", MODE="0660"
-SUBSYSTEM=="iio", ATTRS{idVendor}=="8086", ATTRS{idProduct}=="0b3a", KERNEL=="iio:device*", GROUP="realsense", MODE="0660"
+KERNEL=="hidraw*", ATTRS{idVendor}=="8086", ATTRS{idProduct}=="0b3a", GROUP:="realsense", MODE:="0660"
+SUBSYSTEM=="iio", ATTRS{idVendor}=="8086", ATTRS{idProduct}=="0b3a", KERNEL=="iio:device*", GROUP:="realsense", MODE:="0660"
 ```
+**Use `GROUP:=`/`MODE:=` (the "final assignment" operator), not plain
+`GROUP=`/`MODE=`.** If you built `librealsense` from source, you already
+ran `./scripts/setup_udev_rules.sh`, which installs Intel's own
+`99-realsense-libusb.rules` -- and confirmed on a real CM5 that this file
+sorts *after* `99-realsense-iio.rules` alphabetically and re-assigns the
+same `hidraw` device to `GROUP=plugdev, MODE=0666` (world-permissive),
+silently overriding a plain `GROUP=`/`MODE=` assignment in ours. `:=`
+makes an assignment immune to being overridden by any later-processed
+rule, regardless of filename ordering (verified: `udevadm test
+/dev/hidrawN` showed `99-realsense-libusb.rules` applying its own
+`GROUP`/`MODE` right after ours, before the fix). Diagnose this yourself
+via `sudo udevadm test /dev/hidrawN 2>&1 | grep -E "GROUP|MODE"` -- it
+prints every rule file that touches those properties, in the order
+applied; the last one listed is what wins under plain `=`.
+
+**Type or paste this file carefully -- a corrupted rule here can silently
+break unrelated devices system-wide, not just the RealSense.** Confirmed
+the hard way: pasting the long `RUN+=` line into a terminal without
+bracketed-paste support let the terminal's own line-wrap become a literal
+newline mid-word, splitting one rule into two broken fragments. The
+tail fragment of a different line ended up as `MODE="0660"` on its own,
+with **no match conditions at all** -- an unconditional rule that
+applied `0660` permissions to *every* device udev processed afterward,
+including `/dev/null`, silently breaking it (and likely others) until a
+reboot reasserted correct defaults. After creating/editing this file,
+always run `cat -n /etc/udev/rules.d/99-realsense-iio.rules` and confirm
+it's **exactly 3 lines** before reloading -- if `ACTION=="add"` or
+`MODE=` land on a line by themselves, edit it directly (e.g. `sudo nano`)
+rather than re-pasting.
+
 Then apply it (no reboot/replug needed -- `--action=add` re-triggers udev's
 add event for the already-present device):
 ```bash
@@ -292,13 +404,31 @@ before assuming the udev rule itself is wrong:
   `accel_3d`/`gyro_3d` triggers first).
 
 **Companion computer (e.g. Raspberry Pi CM5) note**: this whole IMU-udev
-issue is a general Linux/IIO permissions gap, not specific to this
-particular dev machine -- expect to need the same
-`99-realsense-iio.rules` file there too if `enableIMU=True` hits the same
-`Permission denied`/`busy` errors. This is separate from, and unaffected
-by, the CM5's still-undecided `pyrealsense2` install path for Python 3.13
-aarch64 (see above) -- the udev rule matters once `pyrealsense2` is
-installed and importable, regardless of how it got there.
+permissions gap is general to Linux/IIO, not specific to any one machine
+-- expect to need the same `99-realsense-iio.rules` file (with the `:=`
+fix above) on a CM5 too. This is separate from, and unaffected by,
+whichever `pyrealsense2` install path you used (see above) -- the udev
+rule matters once `pyrealsense2` is installed and importable, regardless
+of how it got there.
+
+**Confirmed IMU limitation on the Raspberry Pi Foundation's CM5 kernel**
+(2026-07-30, `6.12.47+rpt-rpi-2712`, Debian Trixie): `enableIMU=True`
+cannot work at all on this kernel, and it's not a permissions issue --
+`/lib/modules/$(uname -r)/kernel/drivers/iio/` ships only the base
+`industrialio` framework; `hid_sensor_hub`, `hid_sensor_accel_3d`, and
+`hid_sensor_gyro_3d` (the glue drivers that expose a HID sensor
+collection like the D435i's IMU as `/dev/iio:deviceN`) are entirely
+absent -- confirmed via `find /lib/modules/$(uname -r) -iname
+"*hid_sensor*"` (no results) and `dmesg`, which shows the kernel binding
+the IMU's HID interface with the generic `hid-generic` driver instead of
+`hid-sensor-hub`. No `/dev/iio:device*` node is ever created as a result.
+Getting IMU working on this specific kernel would need out-of-tree
+kernel module compilation (a distinct, larger task from anything in this
+guide) -- not attempted yet, tracked in
+[olab_code#41](https://github.com/optimatorlab/olab_code/issues/41).
+**Color and depth are unaffected** (confirmed working on this same
+machine/kernel) -- they only need standard USB/UVC access, not the IIO
+subsystem.
 
 **Color-only** (the default -- behaves like any other camera class):
 ```python
@@ -371,6 +501,102 @@ Notes:
   hole-filling, but doesn't eliminate it -- it's inherent to the sensors'
   physical baseline, not a bug.
 - Point-cloud generation is not yet supported (tracked in a separate GitHub issue).
+
+### 6.  OpenMV cameras (GENX320 histogram preview)
+
+`CameraOpenMV` wraps the official `openmv` host protocol client. Install the
+optional dependency first:
+```bash
+pip install olab-camera[openmv]
+```
+`openmv`'s own published wheel metadata only requires Python >=3.8 -- it is
+`olab_camera`'s own base `requires-python = ">=3.10"` that applies here, not
+a separate or stricter floor imposed by the `openmv` extra.
+
+This first release integrates one profile, `genx_histogram_preview`: a
+fixed 320x320 grayscale event-activity preview from a single GENX320 module,
+streamed through the same MJPEG/WebSocket/WebRTC paths every other backend
+uses. Raw GENX320 event streaming/recording, the `mt9v034_frame_passthrough`
+profile, and multi-camera sync are later work -- see
+`docs/plans/olab_camera_openmv_support_plan.md`.
+
+**What's hardware-confirmed vs. pending in this profile:** every GENX320
+sensor-control call this profile issues (`csi.CSI(cid=csi.GENX320)`,
+`pixformat`/`framesize`/`framerate`/`brightness`/`contrast`/`snapshot`, and
+the `ioctl()` calls + constants for bias presets, anti-flicker, hot-pixel
+calibration, and spatio-temporal filtering) is confirmed against
+[OpenMV's own published GENX320 documentation](https://docs.openmv.io/dev/openmvcam/sensors/genx320.html)
+-- not guessed. The exact numeric defaults (anti-flicker Hz windows,
+hot-pixel calibration event-count/sigma) are reasonable choices, not
+hardware-tuned ones, and the profile as a whole has not yet been run
+against a physical board (hardware bring-up is step 5 of the plan doc, out
+of scope this round) -- so "confirmed API" here means *the calls are real
+and documented*, not *this exact configuration has been validated on a
+GENX320*. The supplementary config/health telemetry channel this profile
+also publishes is an independent, best-effort mechanism: it prints a
+"not yet implemented" notice and does not affect the frame stream, pending
+that same bring-up confirming the on-device channel-write primitive (which
+is a separate, new protocol feature unrelated to the sensor APIs above).
+
+```python
+import olab_camera
+
+camera = olab_camera.CameraOpenMV(devicePort='/dev/ttyACM0')
+camera.start(startStream=True, port=8003)
+# Visit https://localhost:8003/stream.mjpg
+
+# Host receipt time + sequence, paired atomically with the current frame --
+# use this (not a separate getFrame() call) whenever you need metadata:
+frame, meta = camera.getFrameAndMeta()
+
+camera.shutdown()
+```
+
+Notes:
+- **The laptop/host connects to the OpenMV board over USB**, addressed by
+  its serial device path (e.g. `/dev/ttyACM0` on Linux) -- that's what
+  `devicePort` is. The `csi` module referenced above is entirely on-device
+  MicroPython code running on the OpenMV board itself, talking to its
+  attached GENX320 module over the board's internal sensor interface --
+  it has nothing to do with any port/interface on the host machine, and
+  nothing in this integration expects the host to have a CSI port of its
+  own.
+- **`devicePort` is the OpenMV serial path** (e.g. `/dev/ttyACM0`), not the
+  same thing as `start()`'s `port` argument (the streaming port, exactly
+  like every other backend). There's no discovery/default-device policy
+  yet -- name the port explicitly.
+- The profile's resolution (320x320) and histogram rate are fixed once
+  configured; passing a different `res_rows`/`res_cols`/`framerate` to
+  `start()` raises `ValueError` before any device interaction, rather than
+  silently ignoring the request. `changeResolutionFramerate()` can change
+  the histogram rate (via a stop/restart cycle, same as `CameraRealSense`),
+  not the resolution.
+- `getFrameAndMeta()` is the only way to get frame + metadata as a matched
+  pair -- `getFrame()` and inspecting metadata separately are *not*
+  guaranteed to correspond to the same frame, since the capture thread can
+  replace the single-slot frame buffer between the two calls. The metadata
+  is **host receipt time**, never a sensor-exposure timestamp.
+
+#### Custom scripts and the helper/channel contract
+
+Maintained profiles are recommended so you don't have to write OpenMV
+MicroPython yourself. If you do write a custom script, the helper contract
+it should use is a single reserved top-level name: **`_OmvHelper`** -- a
+class providing versioned envelope encode/decode and channel-publish
+primitives (see `olab_camera.openmv_profiles.contract` for the host-side
+envelope format: `schema_version`, `profile_id`, `device_seq`,
+`device_time_ms`, `kind` (`config`/`health`/`result`/`error`), `payload`).
+Every maintained profile's rendered script is `_OmvHelper`'s source text,
+followed by two blank lines, then the profile body calling
+`_OmvHelper.publish(...)` -- a hand-assembled custom script that reuses this
+convention must not itself define a top-level `_OmvHelper` name, since
+that's the entire reserved collision surface.
+
+`OpenMVDevice.runScriptFile(path)` is the low-level primitive for uploading
+an arbitrary local `.py` file -- it only guarantees script upload/execution
+and stdout, not profile-level channels or frame/event semantics. This is
+explicitly an experimental, low-level path; the helper contract above is
+what interoperates with `olab_camera`'s own tooling.
 
 ---
 

@@ -130,7 +130,13 @@ class StreamingHandler(server.BaseHTTPRequestHandler):
 						success = self.camObject.condition.wait(STREAM_MAX_WAIT_TIME_SEC)
 					
 					# We don't get here until the wait condition has finished 
-					if (success):
+					if success:
+						# A wake-up can occur before the first capture frame is
+						# published. Treat that as normal startup and wait again rather
+						# than indexing an empty frame deque through getFrameCopy().
+						with self.camObject.condition:
+							if not self.camObject.frameDeque:
+								continue
 						# Must use a copy if we decorate the frame.
 						# Otherwise, our vision processing functions get messed up.
 						# myNumpyArray = np.frombuffer(self.camObject.frame, dtype=np.uint8).reshape(self.camObject.res_rows, self.camObject.res_cols, 3)
@@ -589,5 +595,4 @@ class WebRTCStreamingServer:
 				await pc.close()
 			self.pcs.clear()
 			await runner.cleanup()
-
 

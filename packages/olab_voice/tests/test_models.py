@@ -1,5 +1,5 @@
 from olab_voice.audio.models import AudioBlob, AudioFrame
-from olab_voice.stt.base import TranscriptEvent
+from olab_voice.stt.base import TranscriptEvent, TranscriptSegment
 from olab_voice.tts.base import TtsAudio, TtsRequest
 
 
@@ -52,6 +52,7 @@ def test_transcript_event_defaults():
 
     assert event.type == "transcript.segment_final"
     assert event.text == "hey 107 take off"
+    assert event.segments == []
 
 
 def test_transcript_event_round_trip():
@@ -86,6 +87,69 @@ def test_transcript_event_streaming_fields_round_trip():
     restored = TranscriptEvent.from_dict(event.to_dict())
 
     assert restored == event
+
+
+def test_transcript_segment_round_trip():
+    segment = TranscriptSegment(text="hey 107", start_time=0.0, end_time=0.8)
+
+    restored = TranscriptSegment.from_dict(segment.to_dict())
+
+    assert restored == segment
+    assert restored.confidence is None
+
+
+def test_transcript_event_segments_round_trip():
+    event = TranscriptEvent(
+        text="hey 107 take off",
+        segments=[
+            TranscriptSegment(text="hey 107", start_time=0.0, end_time=0.8, confidence=-0.1),
+            TranscriptSegment(text="take off", start_time=0.8, end_time=1.5, confidence=-0.2),
+        ],
+    )
+
+    restored = TranscriptEvent.from_dict(event.to_dict())
+
+    assert restored == event
+
+
+def test_transcript_event_from_dict_defaults_segments_when_absent():
+    payload = {"text": "hey 107 take off", "session_id": "session-1"}
+
+    restored = TranscriptEvent.from_dict(payload)
+
+    assert restored.segments == []
+
+
+def test_transcript_event_positional_construction_preserves_timestamp():
+    event = TranscriptEvent(
+        "hey 107 take off",  # text
+        "transcript.segment_final",  # type
+        "session-1",  # session_id
+        7,  # user_id
+        107,  # asset_id
+        -0.2,  # confidence
+        0.1,  # start_time
+        1.5,  # end_time
+        "service-1:1",  # segment_id
+        0,  # revision
+        "faster_whisper",  # engine
+        False,  # is_fallback
+        None,  # capture_start_time
+        None,  # capture_end_time
+        {},  # metadata
+        123.456,  # timestamp
+    )
+
+    assert event.timestamp == 123.456
+    assert event.segments == []
+
+
+def test_transcript_segment_public_imports():
+    from olab_voice import TranscriptSegment as TopLevelTranscriptSegment
+    from olab_voice.stt import TranscriptSegment as SttTranscriptSegment
+
+    assert TopLevelTranscriptSegment is TranscriptSegment
+    assert SttTranscriptSegment is TranscriptSegment
 
 
 def test_tts_request_defaults():

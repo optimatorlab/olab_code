@@ -18,7 +18,7 @@ from olab_voice.playback import (
     TtsResult,
 )
 from olab_voice.sessions import CommandSession
-from olab_voice.stt.base import TranscriptEvent
+from olab_voice.stt.base import TranscriptEvent, TranscriptSegment
 from olab_voice.tts.base import TtsAudio, TtsRequest
 
 __all__ = [
@@ -30,6 +30,7 @@ __all__ = [
     "PlaybackUnavailableError",
     "ServiceStatus",
     "TranscriptEvent",
+    "TranscriptSegment",
     "TtsAudio",
     "TtsJob",
     "TtsPlaybackService",

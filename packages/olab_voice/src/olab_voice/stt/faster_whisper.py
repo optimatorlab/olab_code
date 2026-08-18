@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from olab_voice.audio.models import AudioBlob
-from olab_voice.stt.base import TranscriptEvent
+from olab_voice.stt.base import TranscriptEvent, TranscriptSegment
 
 
 class FasterWhisperUnavailableError(RuntimeError):
@@ -87,6 +87,16 @@ class FasterWhisperTranscriber:
         start_time = min((segment.start for segment in collected), default=None)
         end_time = max((segment.end for segment in collected), default=None)
         confidence = _average_probability(collected)
+        transcript_segments = [
+            TranscriptSegment(
+                text=segment.text.strip(),
+                start_time=segment.start,
+                end_time=segment.end,
+                confidence=segment.avg_logprob,
+            )
+            for segment in collected
+            if segment.text.strip()
+        ]
 
         return TranscriptEvent(
             text=text,
@@ -96,6 +106,7 @@ class FasterWhisperTranscriber:
             confidence=confidence,
             start_time=start_time,
             end_time=end_time,
+            segments=transcript_segments,
         )
 
 

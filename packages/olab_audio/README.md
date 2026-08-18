@@ -75,6 +75,15 @@ mic.recordStop()
 mic.stop()
 ```
 
+## PipeWire capture identity
+
+On PipeWire's ALSA compatibility device, each `Mic.start()` open is also given
+a fresh `node.name`/`application.name` identity for that open. This prevents a
+WirePlumber stream-restore rule made for one `start_loopback_capture()` stream
+from being replayed onto an unrelated process's microphone capture. Any valid
+caller-provided `PIPEWIRE_PROPS` dictionary is retained for the open and the
+environment is restored immediately afterward.
+
 ## MP3 output
 
 Install the optional encoder first:
