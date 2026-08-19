@@ -104,6 +104,13 @@ class Mic():
 		self.recording      = None      # Can become a Recording object
 		self.isRecording    = False
 
+		# Multi-subscriber support, alongside the single reachbackFunc set in
+		# start(). Persists across stop()/start() -- a caller may subscribe
+		# before start() is ever called, and a restart doesn't drop
+		# registrations.
+		self._subscribers       = []
+		self._subscribers_lock  = threading.Lock()
+
 		# self.stream stays None until start() successfully opens a PortAudio
 		# stream. Any code that touches self.stream (_stop_stream()) checks
 		# for None first, so a failed/never-started open can never leave a
@@ -121,6 +128,57 @@ class Mic():
 	def db(self):
 		return convert_to_db(self.np_data)
 
+	def subscribe(self, callback):
+		'''
+		Register callback(deviceID=..., data=...) to fire on every captured
+		chunk, alongside reachbackFunc. Idempotent -- re-subscribing the same
+		callable is a no-op (prevents accidental double-registration from
+		silently double-processing every chunk).
+		'''
+		with self._subscribers_lock:
+			if callback not in self._subscribers:
+				self._subscribers.append(callback)
+
+	def unsubscribe(self, callback):
+		'''
+		Remove a previously subscribed callback. No-op if not subscribed.
+		'''
+		with self._subscribers_lock:
+			if callback in self._subscribers:
+				self._subscribers.remove(callback)
+
+	def _report_callback_error(self, msg):
+		# excFunc is caller-supplied and must never itself be allowed to break
+		# the fan-out loop or the PortAudio callback thread -- if it raises,
+		# fall back to print() rather than letting that exception propagate.
+		try:
+			self.excFunc(msg=msg)
+		except Exception as e:
+			print(f'ERROR: excFunc itself raised while reporting {msg!r}: {e}')
+
+	def _fire_callbacks(self, data):
+		'''
+		Call reachbackFunc (unchanged position/behavior), then every
+		subscribe()d callback, in registration order. Each call is
+		independently exception-isolated: one misbehaving callback (or a
+		misbehaving excFunc) never prevents the others from firing and never
+		crashes the PortAudio callback thread. The subscriber list is
+		snapshotted under the lock and iterated outside it, so subscribe()/
+		unsubscribe() are never blocked behind arbitrary callback code.
+		'''
+		try:
+			self.reachbackFunc(deviceID=self.deviceID, data=data)
+		except Exception as e:
+			self._report_callback_error(f'ERROR in reachbackFunc subscriber: {e}')
+
+		with self._subscribers_lock:
+			subscribers = list(self._subscribers)
+		for callback in subscribers:
+			try:
+				callback(deviceID=self.deviceID, data=data)
+			except Exception as e:
+				self._report_callback_error(f'ERROR in Mic subscriber: {e}')
+
 	def _callback_record_bytes(self, in_data, frame_count, time_info, status):
 		'''
 		in_data is raw bytes data
@@ -135,7 +193,7 @@ class Mic():
 			else:
 				self.recordStop()
 
-		self.reachbackFunc(deviceID=self.deviceID, data=in_data)
+		self._fire_callbacks(in_data)
 
 		return (in_data, pyaudio.paContinue)
 
@@ -155,7 +213,7 @@ class Mic():
 			else:
 				self.recordStop()
 
-		self.reachbackFunc(deviceID=self.deviceID, data=self.np_data)
+		self._fire_callbacks(self.np_data)
 
 		return (in_data, pyaudio.paContinue)
 

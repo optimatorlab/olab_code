@@ -32,6 +32,8 @@ Classes:
     CameraWebSocket: Virtual camera — accepts pushed JPEG frames via WSS (sim/Cesium use)
     CameraOpenMV: OpenMV camera, GENX320 histogram pixels, optional movement
       regions, or raw polarity-event preview/callbacks
+    AVWebcam: Thin composition of one CameraUSB + one Mic for a single
+      paired USB webcam (pip install olab-camera[av])
 
 Dependencies:
     - numpy
@@ -109,6 +111,7 @@ from .camera_realsense import CameraRealSense
 from .camera_websocket import CameraWebSocket, _WebSocketReceiveServer
 from .camera_openmv import CameraOpenMV
 from .openmv_device import OpenMVDevice
+from .av_webcam import AVWebcam
 
 
 '''

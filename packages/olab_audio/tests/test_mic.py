@@ -1,5 +1,6 @@
 import os
 import sys
+import threading
 
 import numpy as np
 import pytest
@@ -282,6 +283,223 @@ def test_mic_record_start_returns_false_and_leaves_clean_state_on_failure(monkey
     assert mic.isRecording is False
     assert mic.recording is None
     assert any('ERROR in recordStart' in m for m in errors)
+
+
+# --- subscribe()/unsubscribe() multi-subscriber tests ----------------------
+
+def _drive_one_chunk(fake_audio, frame_count=240, value=500):
+    pcm = np.full(frame_count, value, dtype=np.int16).tobytes()
+    fake_audio.opened_with['stream_callback'](pcm, frame_count, {}, 0)
+
+
+def test_reachbackfunc_still_fires_alone_with_no_subscribers(monkeypatch):
+    fake_audio = _FakePyAudio(default_rate=44100.0)
+    monkeypatch.setattr("olab_audio.mic.audio", fake_audio)
+
+    received = []
+    mic = Mic(deviceID=3)
+    mic.start(reachbackFunc=lambda deviceID, data: received.append(deviceID))
+
+    _drive_one_chunk(fake_audio)
+
+    assert received == [3]
+
+
+def test_subscribers_fire_alongside_reachbackfunc(monkeypatch):
+    fake_audio = _FakePyAudio(default_rate=44100.0)
+    monkeypatch.setattr("olab_audio.mic.audio", fake_audio)
+
+    calls = []
+    mic = Mic(deviceID=3)
+    mic.start(reachbackFunc=lambda deviceID, data: calls.append('reachback'))
+    mic.subscribe(lambda deviceID, data: calls.append('sub1'))
+    mic.subscribe(lambda deviceID, data: calls.append('sub2'))
+
+    _drive_one_chunk(fake_audio)
+
+    assert calls == ['reachback', 'sub1', 'sub2']
+
+
+def test_unsubscribe_stops_a_callback_from_firing(monkeypatch):
+    fake_audio = _FakePyAudio(default_rate=44100.0)
+    monkeypatch.setattr("olab_audio.mic.audio", fake_audio)
+
+    calls = []
+    def sub(deviceID, data):
+        calls.append('sub')
+
+    mic = Mic(deviceID=3)
+    mic.start()
+    mic.subscribe(sub)
+    _drive_one_chunk(fake_audio)
+    assert calls == ['sub']
+
+    mic.unsubscribe(sub)
+    _drive_one_chunk(fake_audio)
+    assert calls == ['sub']  # unchanged -- sub no longer fires
+
+
+def test_unsubscribe_never_subscribed_is_a_noop(monkeypatch):
+    fake_audio = _FakePyAudio(default_rate=44100.0)
+    monkeypatch.setattr("olab_audio.mic.audio", fake_audio)
+
+    mic = Mic(deviceID=3)
+    mic.unsubscribe(lambda deviceID, data: None)  # must not raise
+
+
+def test_subscribe_is_idempotent_fires_once_per_chunk(monkeypatch):
+    fake_audio = _FakePyAudio(default_rate=44100.0)
+    monkeypatch.setattr("olab_audio.mic.audio", fake_audio)
+
+    calls = []
+    def sub(deviceID, data):
+        calls.append('sub')
+
+    mic = Mic(deviceID=3)
+    mic.start()
+    mic.subscribe(sub)
+    mic.subscribe(sub)  # duplicate -- should be a no-op
+
+    _drive_one_chunk(fake_audio)
+
+    assert calls == ['sub']
+
+
+def test_raising_subscriber_does_not_block_others_or_reachbackfunc(monkeypatch):
+    fake_audio = _FakePyAudio(default_rate=44100.0)
+    monkeypatch.setattr("olab_audio.mic.audio", fake_audio)
+
+    calls = []
+    errors = []
+
+    def bad_sub(deviceID, data):
+        raise RuntimeError('boom')
+
+    def good_sub(deviceID, data):
+        calls.append('good_sub')
+
+    mic = Mic(deviceID=3, excFunc=lambda msg: errors.append(msg))
+    mic.start(reachbackFunc=lambda deviceID, data: calls.append('reachback'))
+    mic.subscribe(bad_sub)
+    mic.subscribe(good_sub)
+
+    _drive_one_chunk(fake_audio)  # must not raise
+
+    assert calls == ['reachback', 'good_sub']
+    assert any('ERROR in Mic subscriber' in m for m in errors)
+
+
+def test_raising_excfunc_does_not_block_remaining_callbacks(monkeypatch):
+    """Reviewer finding: a caller-supplied excFunc that itself raises must
+    not cascade and prevent sibling callbacks from firing."""
+    fake_audio = _FakePyAudio(default_rate=44100.0)
+    monkeypatch.setattr("olab_audio.mic.audio", fake_audio)
+
+    calls = []
+
+    def raising_excfunc(msg):
+        raise RuntimeError('excFunc itself is broken')
+
+    def bad_sub(deviceID, data):
+        raise RuntimeError('boom')
+
+    def good_sub(deviceID, data):
+        calls.append('good_sub')
+
+    mic = Mic(deviceID=3, excFunc=raising_excfunc)
+    mic.start(reachbackFunc=lambda deviceID, data: calls.append('reachback'))
+    mic.subscribe(bad_sub)
+    mic.subscribe(good_sub)
+
+    _drive_one_chunk(fake_audio)  # must not raise, despite excFunc raising
+
+    assert calls == ['reachback', 'good_sub']
+
+
+def test_subscriptions_persist_across_stop_start(monkeypatch):
+    fake_audio = _FakePyAudio(default_rate=44100.0)
+    monkeypatch.setattr("olab_audio.mic.audio", fake_audio)
+
+    calls = []
+    mic = Mic(deviceID=3)
+    mic.start()
+    mic.subscribe(lambda deviceID, data: calls.append('sub'))
+
+    mic.stop()
+    mic.start()
+    _drive_one_chunk(fake_audio)
+
+    assert calls == ['sub']
+
+
+def test_subscribe_unsubscribe_during_callback_execution_uses_snapshot_semantics(monkeypatch):
+    """Adversarial lock-interleaving test (reviewer finding #1). Proves two
+    things at once: (1) subscribe()/unsubscribe() do not block behind a
+    slow-running callback -- a regression that held _subscribers_lock across
+    callback invocation, rather than just the list copy, would deadlock this
+    test; and (2) a subscription change made while one chunk's callbacks are
+    still running does not affect that chunk, only the next one (snapshot,
+    not live-list, semantics)."""
+    fake_audio = _FakePyAudio(default_rate=44100.0)
+    monkeypatch.setattr("olab_audio.mic.audio", fake_audio)
+
+    mic = Mic(deviceID=3)
+    mic.start()
+
+    slow_started = threading.Event()
+    release_slow = threading.Event()
+    calls = []
+
+    def slow_sub(deviceID, data):
+        calls.append('slow_start')
+        slow_started.set()
+        assert release_slow.wait(timeout=2), 'release_slow was never set -- deadlock?'
+        calls.append('slow_end')
+
+    def late_sub(deviceID, data):
+        calls.append('late')
+
+    mic.subscribe(slow_sub)
+
+    fire_thread = threading.Thread(target=mic._fire_callbacks, args=(b'\x00\x00',))
+    fire_thread.start()
+    assert slow_started.wait(timeout=2), 'slow_sub never started'
+
+    # slow_sub is blocked mid-callback right now, holding no lock. If
+    # subscribe()/unsubscribe() regressed to holding _subscribers_lock
+    # during callback iteration (not just the list copy), these calls would
+    # hang until slow_sub returns -- the timeout below would then fail.
+    mic.subscribe(late_sub)
+    mic.unsubscribe(slow_sub)
+
+    release_slow.set()
+    fire_thread.join(timeout=2)
+    assert not fire_thread.is_alive(), 'subscribe()/unsubscribe() deadlocked behind the running callback'
+
+    # This chunk's subscriber list was snapshotted before slow_sub started --
+    # late_sub (subscribed mid-flight) must not have fired for this chunk.
+    assert calls == ['slow_start', 'slow_end']
+
+    # The next chunk reflects the updated list: slow_sub is gone, late_sub fires.
+    calls.clear()
+    _drive_one_chunk(fake_audio)
+    assert calls == ['late']
+
+
+def test_bytes_callback_also_fans_out_to_subscribers(monkeypatch):
+    fake_audio = _FakePyAudio(default_rate=44100.0)
+    monkeypatch.setattr("olab_audio.mic.audio", fake_audio)
+
+    calls = []
+    mic = Mic(deviceID=3, callbackType='bytes')
+    mic.start(reachbackFunc=lambda deviceID, data: calls.append(('reachback', data)))
+    mic.subscribe(lambda deviceID, data: calls.append(('sub', data)))
+
+    frame_count = 240
+    pcm = np.full(frame_count, 500, dtype=np.int16).tobytes()
+    fake_audio.opened_with['stream_callback'](pcm, frame_count, {}, 0)
+
+    assert calls == [('reachback', pcm), ('sub', pcm)]
 
 
 # --- start_loopback_capture() fixtures -------------------------------------

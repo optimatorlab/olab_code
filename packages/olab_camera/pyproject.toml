@@ -40,7 +40,11 @@ realsense = ["pyrealsense2>=2.55"]
 # erroneously reports "2.0.0" -- trust `pip show openmv` (the dist metadata),
 # not that attribute.
 openmv = ["openmv==1.0.7"]
-all = ["olab-camera[yolo,ros,websocket,webrtc,realsense,openmv]"]
+# AVWebcam composes a CameraUSB with an olab_audio.Mic -- olab_camera does
+# not depend on olab_audio otherwise, so this stays an extra, guarded the
+# same way as the others (see av_webcam.py's try/except import).
+av = ["olab-audio"]
+all = ["olab-camera[yolo,ros,websocket,webrtc,realsense,openmv,av]"]
 
 [project.scripts]
 olab-camera-generate-cert = "olab_camera.tls:generate_cert_main"
