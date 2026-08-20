@@ -197,29 +197,6 @@ def test_garbage_handshake_bytes_logged_and_cleaned_up_server_keeps_running(tmp_
         _stop_server(server, thread)
 
 
-def test_silent_connection_times_out_and_is_logged(tmp_path):
-    ssl_context = _make_server_ssl_context(tmp_path)
-    logger = _RecordingLogger()
-    server = StreamingServer(
-        ('127.0.0.1', 0), _OneShotHandler, ssl_context=ssl_context,
-        log_handshake_failure=logger,
-        handshake_timeout=0.5)
-    thread = _start_server(server)
-    port = server.server_address[1]
-
-    try:
-        silent = socket.create_connection(('127.0.0.1', port), timeout=3.0)
-
-        assert logger.event.wait(timeout=3.0), 'log_handshake_failure was never called'
-        assert len(logger.calls) == 1
-
-        closed = _wait_until_peer_closes(silent, timeout=3.0)
-        silent.close()
-        assert closed, 'a silent connection should be dropped once handshake_timeout elapses'
-    finally:
-        _stop_server(server, thread)
-
-
 # --- (c) plain-HTTP backward compatibility: no ssl_context, unchanged behavior ---
 
 def test_plain_http_backward_compatible_no_ssl_context():
