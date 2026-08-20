@@ -9,6 +9,11 @@ olab_audio.mic.audio.
 
 import pytest
 
+pytest.importorskip(
+    "olab_audio",
+    reason="AVWebcam's 'av' extra (olab-audio) is not installed in this env",
+)
+
 from olab_audio.mic import Mic
 from olab_camera.av_webcam import AVWebcam
 from olab_camera.camera_usb import CameraUSB
