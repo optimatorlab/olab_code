@@ -1084,6 +1084,31 @@ def decorateUltralytics(img, w, h, idName, results, drawBox, drawLabel, maskOutl
 		'''
 	except Exception as e:
 		print(f'Error in decorateUltralytics: {e}')
+
+def decorateRFDETR(img, result, drawBox=True, drawLabel=True, maskOutline=False, color=(0, 255, 255)):
+	"""Draw a normalized RF-DETR result without depending on RF-DETR itself."""
+	try:
+		for mask in result.get('masks', []):
+			mask = np.asarray(mask, dtype=bool)
+			if mask.shape != img.shape[:2]:
+				mask = cv2.resize(mask.astype(np.uint8), (img.shape[1], img.shape[0]), interpolation=cv2.INTER_NEAREST).astype(bool)
+			if maskOutline:
+				contours, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+				cv2.drawContours(img, contours, -1, color, 2)
+			else:
+				img[mask] = (0.6 * img[mask] + 0.4 * np.asarray(color)).astype(img.dtype)
+		for index, box in enumerate(result.get('xyxy', [])):
+			pt1, pt2 = tuple(map(int, box[:2])), tuple(map(int, box[2:]))
+			if drawBox:
+				cv2.rectangle(img, pt1, pt2, color, 2, cv2.LINE_AA)
+			if drawLabel:
+				name = result.get('class', ['?'])[index]
+				confidence = result.get('class_conf', [0.0])[index]
+				track_ids = result.get('track_id', [])
+				prefix = f'ID:{track_ids[index]} ' if index < len(track_ids) and track_ids[index] >= 0 else ''
+				cv2.putText(img, f'{prefix}{name} {confidence:.2f}', (pt1[0], max(15, pt1[1] - 5)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
+	except Exception as e:
+		print(f'Error in decorateRFDETR: {e}')
 		
 def degCtoF(degC):
 	# Convert degrees Celsius to Fahrenheit

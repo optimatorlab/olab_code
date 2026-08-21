@@ -1967,4 +1967,113 @@ class _Ultralytics():
 		except Exception as e:
 			self.camObject.logger.log(f'Error in ultralytics stop: {e}.', severity=olab_utils.SEVERITY_ERROR)
 
+
+class _RFDETR():
+	"""Local RF-DETR feature thread; imports optional dependencies lazily."""
+	_MODEL_CLASSES = {
+		('detect', 'nano'): 'RFDETRNano', ('detect', 'small'): 'RFDETRSmall',
+		('detect', 'medium'): 'RFDETRMedium', ('detect', 'large'): 'RFDETRLarge',
+		('segment', 'nano'): 'RFDETRSegNano', ('segment', 'small'): 'RFDETRSegSmall',
+		('segment', 'medium'): 'RFDETRSegMedium', ('segment', 'large'): 'RFDETRSegLarge',
+	}
+
+	def __init__(self, camObject, idName, task, model_variant, weights_path, res_rows, res_cols,
+				 fps_target, postFunction, postFunctionArgs, color, conf_threshold, tracker,
+				 drawBox, drawLabel, maskOutline, decorate=True, device='cpu'):
+		self.camObject, self.idName, self.task = camObject, idName, task
+		self.res_rows, self.res_cols, self.fps_target = res_rows, res_cols, fps_target
+		self.threadSleep = 1 / fps_target
+		self.color, self.conf_threshold = color, conf_threshold
+		self.drawBox, self.drawLabel, self.maskOutline, self.decorate = drawBox, drawLabel, maskOutline, decorate
+		self.decorationID = None
+		self.postFunction = postFunction or olab_utils._passFunction
+		self.postFunctionArgs = dict(postFunctionArgs or {})
+		self.postFunctionArgs['idName'] = idName
+		self.fps = _make_fps_dict(recheckInterval=5)
+		self.deque = deque(maxlen=1)
+		self.deque.append(self._empty_result())
+		self.isThreadActive = False
+		self._thread = None
+		try:
+			import rfdetr
+			model_class = getattr(rfdetr, self._MODEL_CLASSES[(task, model_variant)])
+			model = model_class(pretrain_weights=weights_path, device=device)
+			tracker_object = None
+			if tracker == 'bytetrack':
+				from trackers import ByteTrackTracker
+				tracker_object = ByteTrackTracker(frame_rate=float(fps_target))
+			self.model = model
+			self.tracker = tracker_object
+		except Exception as e:
+			self.camObject.logger.log(f'Error in RF-DETR import/init: {e}', severity=olab_utils.SEVERITY_ERROR)
+
+	def _empty_result(self):
+		return {'class': [], 'class_id': [], 'class_conf': [], 'xyxy': [], 'track_id': [], 'masks': [], 'detections': None}
+
+	def _normalise(self, detections):
+		data = getattr(detections, 'data', {}) or {}
+		class_ids = [] if getattr(detections, 'class_id', None) is None else np.asarray(detections.class_id).astype(int).tolist()
+		classes = data.get('class_name', [])
+		classes = np.asarray(classes).tolist() if len(classes) else [str(value) for value in class_ids]
+		confidence = [] if getattr(detections, 'confidence', None) is None else np.asarray(detections.confidence).astype(float).tolist()
+		track_ids = [] if self.tracker is None or getattr(detections, 'tracker_id', None) is None else np.asarray(detections.tracker_id).astype(int).tolist()
+		masks = [] if getattr(detections, 'mask', None) is None else list(detections.mask)
+		return {'class': classes, 'class_id': class_ids, 'class_conf': confidence,
+				'xyxy': np.asarray(detections.xyxy).astype(int).tolist(), 'track_id': track_ids,
+				'masks': masks, 'detections': detections}
+
+	def _decorate(self, img, **kwargs):
+		olab_utils.decorateRFDETR(img, self.deque[0], self.drawBox, self.drawLabel, self.maskOutline, self.color)
+
+	def _thread_RFDETR(self):
+		self.isThreadActive = True
+		while self.camObject.camOn and self.isThreadActive:
+			try:
+				timeNow = time.time()
+				if self.fps.actual >= self.camObject.fps['capture'].actual:
+					with self.camObject.condition:
+						self.camObject.condition.wait(1)
+				img = self.camObject.getFrameCopy(resOption=(self.res_cols, self.res_rows))
+				rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+				detections = self.model.predict(rgb, threshold=self.conf_threshold, include_source_image=False)
+				if self.tracker is not None:
+					detections = self.tracker.update(detections)
+				result = self._normalise(detections)
+				self.deque.append(result)
+				args = dict(self.postFunctionArgs)
+				args.update({'result': result, 'detections': detections})
+				self.postFunction(args)
+				self.camObject.calcFramerate(self.fps, 'rfdetr')
+				self.camObject.reachback_pubCamStatus()
+			except Exception as e:
+				self.camObject.logger.log(f'Error in RF-DETR {self.idName} thread: {e}', severity=olab_utils.SEVERITY_ERROR)
+				break
+			delta = max(0, timeNow + self.threadSleep - time.time())
+			if delta:
+				time.sleep(delta)
+		self.stop()
+
+	def start(self):
+		if not hasattr(self, 'model'):
+			return
+		if self.decorate:
+			self.decorationID = int(time.time() * 1000)
+			self.camObject.dec['dequeAdd'].append({'function': self._decorate, 'idName': self.idName, 'decorationID': self.decorationID})
+		self._thread = threading.Thread(target=self._thread_RFDETR, daemon=True)
+		self._thread.start()
+
+	def stop(self):
+		if not self.isThreadActive and not self.deque:
+			return
+		self.isThreadActive = False
+		thread, self._thread = self._thread, None
+		if thread is not None and thread is not threading.current_thread():
+			thread.join(timeout=3.0)
+			if thread.is_alive():
+				self.camObject.logger.log(f'RF-DETR {self.idName} stop timed out waiting for in-flight inference', severity=olab_utils.SEVERITY_WARNING)
+		if self.decorationID is not None:
+			self.camObject.dec['dequeRemove'].append(self.decorationID)
+			self.decorationID = None
+		self.deque.clear()
+
 				

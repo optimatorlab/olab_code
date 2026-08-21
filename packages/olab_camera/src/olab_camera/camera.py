@@ -17,7 +17,7 @@ import numpy as np
 
 import olab_utils				# A bunch of (somewhat) helpful functions and variables
 
-from .cv_features import _Aruco, _Calibrate, _Barcode, _QRCode, _FaceDetect, _Timelapse, _ROI, _Ultralytics
+from .cv_features import _Aruco, _Calibrate, _Barcode, _QRCode, _FaceDetect, _Timelapse, _ROI, _Ultralytics, _RFDETR
 from .streaming import (
 	StreamingHandler, StreamingServer, WebSocketStreamingServer, WebRTCStreamingServer,
 	_make_fps_dict, STREAM_MAX_WAIT_TIME_SEC, _HAS_WEBSOCKETS, _HAS_WEBRTC,
@@ -245,6 +245,7 @@ class Camera():
 		self.timelapse   = {}
 		self.facedetect  = {}
 		self.ultralytics = {}
+		self.rfdetr      = {}
 		# self.decorations = {'aruco': [], 'roi': [], 'barcode': [], 'calibrate': []}
 		self.dec = {'active': [], 'dequeAdd': deque(), 'dequeRemove': deque(), 'dequeEdit': deque()}
  
@@ -841,6 +842,54 @@ class Camera():
 			
 		except Exception as e:
 			self.logger.log(f'Error in addUltralytics: {e}.', severity=olab_utils.SEVERITY_ERROR)
+
+	def addRFDETR(self, idName=None, task='detect', model_variant='small', weights_path=None,
+					 res_rows=None, res_cols=None, fps_target=None, postFunction=None, postFunctionArgs=None,
+					 color=(0,255,255), conf_threshold=0.25, tracker=None,
+					 drawBox=True, drawLabel=True, maskOutline=False, decorate=True, device='cpu'):
+		"""Start local RF-DETR detection or segmentation on camera frames.
+
+		`weights_path` must name an existing local checkpoint.  This method never
+		downloads model weights or uses hosted Roboflow inference.  Install the
+		optional dependency with ``olab-camera[rfdetr]`` first.
+		"""
+		try:
+			if not isinstance(idName, str) or not idName:
+				self.logger.log('Error in addRFDETR: idName must be a non-empty string', severity=olab_utils.SEVERITY_ERROR)
+				return
+			if task not in ('detect', 'segment'):
+				self.logger.log('Error in addRFDETR: task must be "detect" or "segment"', severity=olab_utils.SEVERITY_ERROR)
+				return
+			if model_variant not in ('nano', 'small', 'medium', 'large'):
+				self.logger.log('Error in addRFDETR: model_variant must be nano, small, medium, or large', severity=olab_utils.SEVERITY_ERROR)
+				return
+			if tracker not in (None, 'bytetrack'):
+				self.logger.log('Error in addRFDETR: tracker must be None or "bytetrack"', severity=olab_utils.SEVERITY_ERROR)
+				return
+			if not isinstance(device, str) or not device:
+				self.logger.log('Error in addRFDETR: device must be a non-empty string', severity=olab_utils.SEVERITY_ERROR)
+				return
+			if not isinstance(weights_path, (str, os.PathLike)):
+				self.logger.log('Error in addRFDETR: weights_path must name a local file', severity=olab_utils.SEVERITY_ERROR)
+				return
+			weights_path = os.fspath(weights_path)
+			if not os.path.isabs(weights_path):
+				weights_path = os.path.join(os.path.expanduser('~/Projects/olab_models'), weights_path)
+			if not os.path.isfile(weights_path):
+				self.logger.log(f'Error in addRFDETR: checkpoint not found: {weights_path}', severity=olab_utils.SEVERITY_ERROR)
+				return
+			if idName in self.rfdetr and self.rfdetr[idName].isThreadActive:
+				self.rfdetr[idName].stop()
+			res_rows = self.defaultFromNone(res_rows, self.res_rows, int)
+			res_cols = self.defaultFromNone(res_cols, self.res_cols, int)
+			fps_target = self.defaultFromNone(fps_target, self.fps_target, int)
+			self.rfdetr[idName] = _RFDETR(self, idName, task, model_variant, os.path.abspath(weights_path),
+				res_rows, res_cols, int(fps_target), postFunction, postFunctionArgs, color,
+				conf_threshold, tracker, drawBox, drawLabel, maskOutline, decorate, device)
+			if hasattr(self.rfdetr[idName], 'model'):
+				self.rfdetr[idName].start()
+		except Exception as e:
+			self.logger.log(f'Error in addRFDETR: {e}', severity=olab_utils.SEVERITY_ERROR)
 				
 
 	# FIXME -- Remove this function
@@ -1768,5 +1817,3 @@ class Camera():
 			thread.join(timeout=timeout)
 		self._videoRecordStopEvent = None
 		self._videoRecordThread = None
-
-

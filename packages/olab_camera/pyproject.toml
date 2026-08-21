@@ -25,6 +25,7 @@ dependencies = [
 [project.optional-dependencies]
 # Extras carried over from ub_code's existing, already-proven convention.
 yolo = ["ultralytics>=8.3.0"]
+rfdetr = ["rfdetr==1.9.0", "trackers==2.6.0"]
 ros = ["rospy", "cv-bridge", "sensor-msgs"]
 websocket = ["websockets>=12.0"]
 webrtc = ["aiortc>=1.9.0", "aiohttp>=3.9.0"]
@@ -44,7 +45,7 @@ openmv = ["openmv==1.0.7"]
 # not depend on olab_audio otherwise, so this stays an extra, guarded the
 # same way as the others (see av_webcam.py's try/except import).
 av = ["olab-audio"]
-all = ["olab-camera[yolo,ros,websocket,webrtc,realsense,openmv,av]"]
+all = ["olab-camera[yolo,rfdetr,ros,websocket,webrtc,realsense,openmv,av]"]
 
 [project.scripts]
 olab-camera-generate-cert = "olab_camera.tls:generate_cert_main"
