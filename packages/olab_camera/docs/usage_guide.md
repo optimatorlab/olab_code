@@ -954,6 +954,51 @@ camera.facedetect['default'].stop()
 
 ---
 
+### Generic local multi-object tracking
+
+Install the local-only tracking extra in this checkout's virtual environment:
+
+```bash
+./venv/bin/pip install -e "packages/olab_camera[tracking]"
+```
+
+`addTracker()` owns tracker state, callbacks, the latest-result deque, and an
+optional stream overlay; it does not own a detector or a worker thread. Submit
+one normalized detector result to explicitly named trackers to compare the
+same sequence under SORT, ByteTrack, OC-SORT, or BoT-SORT. `xyxy` is the only
+required field; `class_id`, `class`, `class_conf`, and `masks` may be omitted.
+
+```python
+from olab_camera import Camera
+
+camera = Camera({'res_rows': 480, 'res_cols': 640, 'fps_target': 30})
+for name, algorithm in [('sort', 'sort'), ('byte', 'bytetrack'),
+                        ('oc', 'ocsort'), ('bot', 'botsort')]:
+    camera.addTracker(name, algorithm, decorate=False)
+
+results = camera.updateTrackers(
+    {'xyxy': [[20, 30, 120, 190]], 'class_id': [0],
+     'class': ['person'], 'class_conf': [0.95]},
+    ('sort', 'byte', 'oc', 'bot'), timestamp=12.5,
+)
+```
+
+Each successful mapping entry is that tracker's normalized latest result;
+`None` means that named backend/callback failed. A malformed payload, or an
+invalid selection containing one or more string names, returns each supplied
+string name as `None` without advancing any backend.
+Track IDs are local to one tracker instance and reset when it is stopped or
+re-added. The same stream must have only one tracking owner: prefer
+Ultralytics' native tracking when it meets the need, and do not feed already
+native-tracked results into this API. RF-DETR's existing
+`tracker='bytetrack'` remains independent.
+
+All four initial algorithms run locally and this API downloads neither models
+nor tracker assets. McByte is intentionally deferred; its mask mode will need
+explicit pre-provisioned local assets. The `trackers` dependency may install
+plain OpenCV; if that displaces this package's required contrib runtime, use
+the README's existing OpenCV recovery command.
+
 ### RF-DETR (local detection and segmentation)
 
 RF-DETR is optional: install `olab-camera[rfdetr]` and provision model

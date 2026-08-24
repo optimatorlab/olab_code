@@ -241,6 +241,7 @@ class CameraGazebo(Camera):
 	def stop(self, stopStream=True):
 		"""Stop Gazebo topic subscription and optionally stop streaming."""
 		try:
+			self._stopTrackers()
 			self.camOn = False
 			self.stopROStopic()
 
@@ -281,5 +282,4 @@ class CameraGazebo(Camera):
 	def changeZoom(self, zoomLevel):
 		"""Change camera zoom level using digital zoom (crop and resize)."""
 		self._changeZoom(zoomLevel)
-
 

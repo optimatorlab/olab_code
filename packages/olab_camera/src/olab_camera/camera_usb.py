@@ -326,6 +326,7 @@ class CameraUSB(Camera):
 			stopStream (bool): Whether to also stop the streaming server.
 				Set False when changing resolution/framerate mid-stream.
 		"""
+		self._stopTrackers()
 		self.camOn = False
 		self._stopCaptureThread()
 		if self.cap is not None:
@@ -431,4 +432,3 @@ class CameraUSB(Camera):
 # ---------------------------------------------------------------------------
 # WebSocket frame-receiver — sim / virtual camera
 # ---------------------------------------------------------------------------
-

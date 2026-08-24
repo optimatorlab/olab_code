@@ -279,6 +279,7 @@ class CameraROS(Camera):
 
 	def stop(self):
 		try:
+			self._stopTrackers()
 			self.stopStream()
 			if (self.camTopicSubscriber is not None):
 				self.camTopicSubscriber.unregister()

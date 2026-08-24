@@ -98,6 +98,7 @@ except PackageNotFoundError:
 	__version__ = "0.0.0"
 
 from .cv_features import _Aruco, _Calibrate, _Barcode, _QRCode, _FaceDetect, _Timelapse, _ROI, _Ultralytics, _RFDETR
+from .tracking import _TrackerFeature
 from .streaming import (
 	StreamingHandler, StreamingServer, WebSocketStreamingServer, CameraVideoTrack,
 	WebRTCStreamingServer, _make_fps_dict, STREAM_MAX_WAIT_TIME_SEC,

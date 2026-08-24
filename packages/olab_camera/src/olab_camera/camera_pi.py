@@ -299,7 +299,8 @@ class CameraPi(Camera):
 		Stop RPi camera from recording
 		'''	
 		try:
-			self.camOn = False		
+			self._stopTrackers()
+			self.camOn = False
 			self.cap.stop_recording()		
 			self.stopStream()			
 		except Exception as e:
@@ -686,11 +687,10 @@ class CameraPi2(Camera):
 	def stop(self):
 		"""Stop camera capture and streaming."""
 		try:
+			self._stopTrackers()
 			self.camOn = False
 			self._stopCaptureThread()
 			self.cap.stop()
 			self.stopStream()
 		except Exception as e:
 			raise Exception(f'Error in camera stop: {e}')
-
-

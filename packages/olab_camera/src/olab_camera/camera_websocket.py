@@ -204,6 +204,7 @@ class CameraWebSocket(Camera):
 
 	def shutdown(self):
 		"""Stop the WebSocket receive server and any active outbound stream."""
+		self._stopTrackers()
 		self._ws_server.stop()
 		self.stopStream()
 		self.camOn = False

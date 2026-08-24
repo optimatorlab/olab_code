@@ -18,6 +18,7 @@ import numpy as np
 import olab_utils				# A bunch of (somewhat) helpful functions and variables
 
 from .cv_features import _Aruco, _Calibrate, _Barcode, _QRCode, _FaceDetect, _Timelapse, _ROI, _Ultralytics, _RFDETR
+from .tracking import _TrackerFeature, _normalise_payload
 from .streaming import (
 	StreamingHandler, StreamingServer, WebSocketStreamingServer, WebRTCStreamingServer,
 	_make_fps_dict, STREAM_MAX_WAIT_TIME_SEC, _HAS_WEBSOCKETS, _HAS_WEBRTC,
@@ -246,6 +247,8 @@ class Camera():
 		self.facedetect  = {}
 		self.ultralytics = {}
 		self.rfdetr      = {}
+		self.trackers    = {}
+		self._trackersLock = threading.Lock()
 		# self.decorations = {'aruco': [], 'roi': [], 'barcode': [], 'calibrate': []}
 		self.dec = {'active': [], 'dequeAdd': deque(), 'dequeRemove': deque(), 'dequeEdit': deque()}
  
@@ -890,6 +893,88 @@ class Camera():
 				self.rfdetr[idName].start()
 		except Exception as e:
 			self.logger.log(f'Error in addRFDETR: {e}', severity=olab_utils.SEVERITY_ERROR)
+
+	def addTracker(self, idName=None, algorithm='bytetrack', *, fps_target=None,
+				   postFunction=None, postFunctionArgs=None, color=(0,255,255),
+				   drawBox=True, drawLabel=True, maskOutline=False, decorate=True):
+		"""Register one synchronous local multi-object tracker.
+
+		Use :meth:`updateTrackers` to submit detector-normalized results.  This
+		method never starts inference or frame-capture work of its own.
+		"""
+		try:
+			if not isinstance(idName, str) or not idName:
+				raise ValueError('idName must be a non-empty string')
+			if algorithm not in ('sort', 'bytetrack', 'ocsort', 'botsort'):
+				raise ValueError('algorithm must be sort, bytetrack, ocsort, or botsort')
+			fps_target = self.defaultFromNone(fps_target, self.fps_target, int)
+			if fps_target <= 0:
+				raise ValueError('fps_target must be positive')
+			new_feature = _TrackerFeature(self, idName, algorithm, int(fps_target),
+				postFunction, postFunctionArgs, color, drawBox, drawLabel, maskOutline, decorate)
+			with self._trackersLock:
+				old_feature = self.trackers.get(idName)
+				if old_feature is not None:
+					old_feature.stop()
+				new_feature.start()
+				self.trackers[idName] = new_feature
+		except Exception as e:
+			self.logger.log(f'Error in addTracker: {e}', severity=olab_utils.SEVERITY_ERROR)
+
+	def updateTrackers(self, detections, tracker_names, *, frame=None, timestamp=None):
+		"""Fan one detector-neutral payload out to explicitly named trackers."""
+		if isinstance(tracker_names, str):
+			names = [tracker_names]
+			selection_error = ValueError('tracker_names must be a sequence of strings, not a string')
+		else:
+			try:
+				names = list(tracker_names)
+				selection_error = None
+			except Exception as e:
+				names = []
+				selection_error = e
+		result_map = {name: None for name in names if isinstance(name, str)}
+		try:
+			if selection_error is not None:
+				raise selection_error
+			if not names or any(not isinstance(name, str) for name in names) or len(set(names)) != len(names):
+				raise ValueError('tracker_names must be a non-empty duplicate-free sequence of strings')
+		except Exception as e:
+			self.logger.log(f'Error in updateTrackers: {e}', severity=olab_utils.SEVERITY_ERROR)
+			return result_map
+		try:
+			payload = _normalise_payload(detections)
+			if frame is not None:
+				frame = np.array(frame, copy=True)
+				frame.setflags(write=False)
+			if timestamp is not None and (not np.isfinite(timestamp) or timestamp < 0):
+				raise ValueError('timestamp must be finite and non-negative')
+			with self._trackersLock:
+				features = [self.trackers.get(name) for name in names]
+			if any(feature is None or not feature.isThreadActive for feature in features):
+				raise ValueError('every requested tracker must be registered and active')
+			if timestamp is not None and any(feature._last_timestamp is not None and timestamp < feature._last_timestamp for feature in features):
+				raise ValueError('timestamp is earlier than a requested tracker\'s previous update')
+		except Exception as e:
+			self.logger.log(f'Error in updateTrackers: {e}', severity=olab_utils.SEVERITY_ERROR)
+			return result_map
+		for name, feature in zip(names, features):
+			try:
+				result_map[name] = feature.update(payload, frame=frame, timestamp=timestamp)
+			except Exception as e:
+				self.logger.log(f'Error updating tracker {name}: {e}', severity=olab_utils.SEVERITY_ERROR)
+		return result_map
+
+	def _stopTrackers(self):
+		"""Idempotently disarm synchronous tracker features during camera stop."""
+		with self._trackersLock:
+			features = list(self.trackers.values())
+			self.trackers.clear()
+		for feature in features:
+			try:
+				feature.stop()
+			except Exception as e:
+				self.logger.log(f'Error stopping tracker {feature.idName}: {e}', severity=olab_utils.SEVERITY_ERROR)
 				
 
 	# FIXME -- Remove this function

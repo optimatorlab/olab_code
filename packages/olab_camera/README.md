@@ -35,6 +35,7 @@ one at a time:
 | Extra | Adds | Notes |
 |---|---|---|
 | `yolo` | `ultralytics` (YOLO object detection) | Handles the `opencv-contrib-python`/`opencv-python` conflict below correctly on its own. |
+| `tracking` | local SORT, ByteTrack, OC-SORT, and BoT-SORT | Detector-agnostic comparison API; no models, hosted inference, or automatic downloads. |
 | `rfdetr` | local RF-DETR detection/segmentation plus Roboflow ByteTrack | Supply an existing local checkpoint. Relative names resolve in `~/Projects/olab_models/`; absolute paths also work. The usage guide documents an explicit, one-time optional provisioning download. This feature never downloads weights or uses hosted inference at runtime. Keep `opencv-contrib-python` active using the recovery process below if a dependency installs plain OpenCV. |
 | `websocket` | `websockets` | WebSocket + JPEG streaming. |
 | `webrtc` | `aiortc`, `aiohttp` | WebRTC streaming. |
