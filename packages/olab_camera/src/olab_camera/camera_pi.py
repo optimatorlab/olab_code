@@ -95,60 +95,60 @@ class CameraPi(Camera):
 			self.picamera = picamera	# We have some namespace issues, since importing module inside class.
 			# self.logger.log(f'i think picamera has been imported', severity=olab_utils.SEVERITY_DEBUG)
 		except Exception as e:
-			# raise Exception(f'Failed to init CameraPi: {e}') 
+			# raise Exception(f'Failed to init CameraPi: {e}')
 			# self.logger.log(f'Failed to init CameraPi: {e}', severity=olab_utils.SEVERITY_ERROR)
 			print(f'Failed to init CameraPi: {e}')
-			
+
 		super().__init__(paramDict, logger, sslPath, pubCamStatusFunction, initROSnode, showFPS, ipAllowlist, ipBlocklist)
-	
-		self.cap = None	
-	
+
+		self.cap = None
+
 	def _changeFramerate(self, req_framerate):
-		try:			
+		try:
 			if (req_framerate == self.fps_target):
 				# Nothing to change
 				return (True, '')
 
-			# FIXME -- Need to show new framerate in Cesium		
+			# FIXME -- Need to show new framerate in Cesium
 			if (self.fpsMin <= req_framerate <= self.fpsMax):
 				delta = req_framerate - self.cap.framerate - self.cap.framerate_delta
-				self.cap.framerate_delta += delta				
+				self.cap.framerate_delta += delta
 				self.updateFramerate(self.cap.framerate + self.cap.framerate_delta)
 				return (True, '')
 			else:
 				return (False, 'picam framerate is at limit')
-					
+
 		except Exception as e:
 			return (False, f'Could not change picam framerate: {e}')
 
-		
-		
+
+
 	def _changeResolution(self, req_height, req_width):
 		try:
 			if (self.cap.resolution != (req_width, req_height)):
 				self.cap.stop_recording()
-	
+
 				# FIXME -- Do we need to shut off ROI/ArUco threads?
-				# self.setCamFunction(None, None)	
+				# self.setCamFunction(None, None)
 
 				time.sleep(1)
-	
+
 				self.cap.resolution = (req_width, req_height)
-	
+
 				time.sleep(1)
 
-				self.updateResolution(req_height, req_width) 
-	
+				self.updateResolution(req_height, req_width)
+
 				self.cap.start_recording(self, format='bgr')
-	
+
 				return (True, '')
 			else:
 				return (False, f'picam resolution is already {req_width}x{req_height}.')
 
 		except Exception as e:
 			return (False, f'Could not change picam resolution to {req_width}x{req_height}: {e}.')
-				
-		
+
+
 	def changeZoom(self, zoomLevel):
 		"""Change camera zoom level using hardware zoom.
 
@@ -179,32 +179,32 @@ class CameraPi(Camera):
 			w = h = min(1/zoomLevel, 1)
 			x = y = (1 - w)/2
 			self.cap.zoom = (x, y, w, h)
-			
-			self.updateZoom(zoomLevel)			
+
+			self.updateZoom(zoomLevel)
 		except Exception as e:
 			# raise Exception(f'Could not change picam zoomLevel to {zoomLevel}x: {e}.')
 			self.logger.log(f'Could not change picam zoomLevel to {zoomLevel}x: {e}', severity=olab_utils.SEVERITY_ERROR)
-		
+
 	def changeResolutionFramerate(self, res_rows=None, res_cols=None, framerate=None):
 		'''
-		Change resolution and/or framerate		
+		Change resolution and/or framerate
 		'''
 		try:
 			# If user didn't provide a parameter, use the default value
 			res_rows  = self.defaultFromNone(res_rows,  self.res_rows,   int)
 			res_cols  = self.defaultFromNone(res_cols,  self.res_cols,   int)
 			framerate = self.defaultFromNone(framerate, self.fps_target, int)
-			
-			(successFr,  msgFr)  = self._changeFramerate(framerate)			
+
+			(successFr,  msgFr)  = self._changeFramerate(framerate)
 			(successRes, msgRes) = self._changeResolution(res_rows, res_cols)
-				
+
 			if ((not successFr) or (not successRes)):
-				raise Exception(f'{msgFr} {msgRes}')	
-			
+				raise Exception(f'{msgFr} {msgRes}')
+
 		except Exception as e:
 			# raise Exception(f'Failed to change to {res_rows} rows, {res_cols} cols, {framerate} framerate: {e}')
 			self.logger.log(f'Failed to change to {res_rows} rows, {res_cols} cols, {framerate} framerate: {e}', severity=olab_utils.SEVERITY_ERROR)
-					 
+
 	def shutdown(self):
 		"""Shutdown camera and release all resources.
 
@@ -219,14 +219,14 @@ class CameraPi(Camera):
 		"""
 		try:
 			if (self.cap):
-				self.stop()	
+				self.stop()
 				self.cap.close()
 				time.sleep(STREAM_MAX_WAIT_TIME_SEC + 1)
 
 		except Exception as e:
 			# raise Exception(f'Error in camera shutdown: {e}')
 			self.logger.log(f'Error in camera shutdown: {e}', severity=olab_utils.SEVERITY_ERROR)
-					 
+
 	def start(self, assetID=None, res_rows=None, res_cols=None, framerate=None, startStream=False, port=None, protocol='mjpeg', imgTopic=None, compImgTopic=None):
 		"""Initialize and start Raspberry Pi camera recording.
 
@@ -264,20 +264,20 @@ class CameraPi(Camera):
 			framerate    = self.defaultFromNone(framerate, self.fps_target, int)
 			port         = self.defaultFromNone(port, self.outputPort)
 			# compImgTopic =
-					
-			self.cap = self.picamera.PiCamera(resolution=f'{res_cols}x{res_rows}', framerate=framerate)		
+
+			self.cap = self.picamera.PiCamera(resolution=f'{res_cols}x{res_rows}', framerate=framerate)
 
 			# FIXME -- Need to verify that the updates actually went thru
 			(width, height) = self.cap.resolution
 			self.updateResolution(height, width)
 			frate = self.cap.framerate
 			self.updateFramerate(frate)
-			
-			# camera.start_recording(output, format='bgr', splitter_port=2, resize=(320,240))		
+
+			# camera.start_recording(output, format='bgr', splitter_port=2, resize=(320,240))
 			self.cap.start_recording(self, format='bgr')
-			
+
 			self.camOn = True
-			
+
 			# Start streaming?
 			if (startStream):
 				if (port is None):
@@ -287,26 +287,26 @@ class CameraPi(Camera):
 
 			# Start publishing to ROS compressed image topic?
 			if ((imgTopic is not None) or (compImgTopic is not None)):
-				self.startROStopic(imgTopic=imgTopic, compImgTopic=compImgTopic)	
-			
-			self.reachback_pubCamStatus()				
+				self.startROStopic(imgTopic=imgTopic, compImgTopic=compImgTopic)
+
+			self.reachback_pubCamStatus()
 		except Exception as e:
 			# raise Exception(f'Error in camera start: {e}')
 			self.logger.log(f'Error in camera start: {e}', severity=olab_utils.SEVERITY_ERROR)
-			
+
 	def stop(self):
 		'''
 		Stop RPi camera from recording
-		'''	
+		'''
 		try:
 			self._stopTrackers()
 			self.camOn = False
-			self.cap.stop_recording()		
-			self.stopStream()			
+			self.cap.stop_recording()
+			self.stopStream()
 		except Exception as e:
 			raise Exception(f'Error in camera stop: {e}')
-			
-		
+
+
 	def write(self, buf):
 		"""Callback method for receiving frames from picamera recording stream.
 
@@ -329,29 +329,29 @@ class CameraPi(Camera):
 		try:
 			# self.myNumpyArray = np.frombuffer(buf, dtype=np.uint8).reshape(self.res_rows, self.res_cols, 3)
 			self.frameDeque.append(np.frombuffer(buf, dtype=np.uint8).reshape(self.res_rows, self.res_cols, 3))
-			
+
 			'''
 			# Only call this if we actually have optical flow capabilities/hardware
 			# if (self.vhcl.useOptFlowCam):
 			# 	self.vhcl.optFlowPub(self.myNumpyArray, self.vhcl.oflow.camera_matrix, self.vhcl.oflow.dist_coeffs)
-			
+
 			# create a copy, as appropriate?
-			
+
 			# FIXME -- NEED TO FIX THESE
 			#self.vhcl.asset.camAuto['thread_function'][self.vhcl.asset.camAuto['camName']](self.myNumpyArray)
-	
+
 			#self.pub()
 			'''
-			
+
 			self.announceCondition()
-			
+
 			self.calcFramerate(self.fps['capture'], 'capture')
-			
+
 		except Exception as e:
 			self.logger.log(f'Error writing picam frame: {e}', severity=olab_utils.SEVERITY_ERROR)
-			
 
-		return		
+
+		return
 
 class CameraPi2(Camera):
 	"""Raspberry Pi camera implementation using the picamera2 package.

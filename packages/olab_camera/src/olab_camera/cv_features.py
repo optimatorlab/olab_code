@@ -85,30 +85,30 @@ class _Aruco():
 
 	def _decorate(self, img, **kwargs):
 		olab_utils.arucoDrawDetections(img, self.deque[0]['corners'],
-									        self.deque[0]['ids'], 
-									        self.deque[0]['centers'], 
-									        self.deque[0]['rotations'], self.config)		
-		
+									        self.deque[0]['ids'],
+									        self.deque[0]['centers'],
+									        self.deque[0]['rotations'], self.config)
+
 	def _thread_Aruco(self):
 		'''
 		THIS IS A THREAD
 		rate is in [Hz] (frames/second)
 		self.camObject is the parent (from Camera).
-		We are in self.camObject.aruco[idName] 
+		We are in self.camObject.aruco[idName]
 		'''
 		self.isThreadActive = True
 
 		while self.camObject.camOn:
-			try:	
+			try:
 				timeNow = time.time()
-							
+
 				# FIXME -- It would be nice to cut out the `if` statements...
-				
+
 				# Throttle things if we're going faster than capture speed
 				if (self.fps.actual >= self.camObject.fps['capture'].actual):
 					with self.camObject.condition:
 						self.camObject.condition.wait(1)   # added a timeout, just to keep from getting permanently stuck here
-				
+
 				# FIXME -- Why are we calculating this each time (in loop)?
 				# We should only set resOption when properties change.
 				img_x_y  = (self.res_cols, self.res_rows)
@@ -117,9 +117,9 @@ class _Aruco():
 					resOption = None
 				else:
 					resOption = img_x_y
-				
+
 				img = self.camObject.getFrameCopy(colorOption='gray', resOption=resOption)
-								
+
 				# `corners` will be of same scale as original (captured) image
 				(corners, ids, rejected, centers, rotations) = olab_utils.arucoDetectMarkers(img,
 																		 self.cv2dict,
@@ -127,30 +127,30 @@ class _Aruco():
 																		 img_x_y  = img_x_y,
 																		 orig_x_y = orig_x_y,
 																		 detector = self.arucoDetector)
-	
+
 				'''
 				centers = []
 				rotations = []
 				for i in range(0, len(corners)):
 					# Find midpoint, using corner points 1 (NE) and 3 (SW)
 					# NOTE:  These are not int coordinates.
-					mp = ((corners[i][0][3][0] + corners[i][0][1][0])/2, 
-						  (corners[i][0][3][1] + corners[i][0][1][1])/2) 
+					mp = ((corners[i][0][3][0] + corners[i][0][1][0])/2,
+						  (corners[i][0][3][1] + corners[i][0][1][1])/2)
 					centers.append(mp)
-					if (self.calcRotations):					
+					if (self.calcRotations):
 						# point 0 is top left, 3 is bottom left.  x increases to right, y increases down
 						x = corners[i][0][0][0] - corners[i][0][3][0]
 						y = corners[i][0][0][1] - corners[i][0][3][1]
 						theta = math.atan2(x, -y)  # NOTE:  This is in [radians]
-					
-						rotations.append(theta) 
+
+						rotations.append(theta)
 						print(np.rad2deg(theta))
-				'''		
+				'''
 				'''
 				if (len(corners) > 0):
 					print(corners, centers, rotations)
 				'''
-									
+
 				# Add detection info to deque:
 				# print(len(self.deque))
 				if (self.ids_of_interest is None):
@@ -161,10 +161,10 @@ class _Aruco():
 						self.deque.append({'ids': ids[indices], 'corners': corners[indices], 'centers': centers[indices], 'rotations': rotations[indices]})
 					else:
 						self.deque.append({'ids': [], 'corners': [], 'centers': [], 'rotations': []})
-						
-					
+
+
 					'''
-					# self.camObject.logger.log(f'{ids=}, {corners=}, {type(ids)}, {type(corners)}', severity=olab_utils.SEVERITY_DEBUG)	
+					# self.camObject.logger.log(f'{ids=}, {corners=}, {type(ids)}, {type(corners)}', severity=olab_utils.SEVERITY_DEBUG)
 					if (ids is None):
 						self.deque.append({'ids': [], 'corners': [], 'centers': [], 'rotations': []})
 					else:
@@ -175,36 +175,36 @@ class _Aruco():
 						else:
 							self.deque.append({'ids': [], 'corners': [], 'centers': [], 'rotations': []})
 					'''
-					
+
 				# Do some post-processing:
 				self.postFunction(self.postFunctionArgs)
-								
+
 				self.camObject.calcFramerate(self.fps, 'aruco')
-				
+
 				self.camObject.reachback_pubCamStatus()
 			except Exception as e:
 				self.stop()
-				self.camObject.logger.log(f'Error in Aruco {self.idName} thread: {e}', severity=olab_utils.SEVERITY_ERROR)				
+				self.camObject.logger.log(f'Error in Aruco {self.idName} thread: {e}', severity=olab_utils.SEVERITY_ERROR)
 				break
-	
+
 			if (not self.isThreadActive):
 				self.stop()
 				self.camObject.logger.log(f'Stopping ArUco {self.idName} thread - no longer active.', severity=olab_utils.SEVERITY_INFO)
 				break
-	
+
 			# Simplified version of rospy.sleep
 			delta = max(0, timeNow + self.threadSleep - time.time())
 			if (delta > 0):
 				time.sleep(delta)
-		
+
 		# If while loop stops, shut down aruco:
-		self.stop()	
+		self.stop()
 
 
 	def start(self):
-		try:			
+		try:
 			self.camObject.logger.log(f'Starting ArUco {self.idName} thread at {self.fps_target} fps', severity=olab_utils.SEVERITY_INFO)
-			
+
 			arucoThread = threading.Thread(target=self._thread_Aruco, args=())
 			arucoThread.daemon = True    # Allows your main script to exit, shutting down this thread, too.
 			arucoThread.start()
@@ -224,13 +224,13 @@ class _Aruco():
 				# Remove idName from self.camObject.decorations['aruco']
 				if (self.idName in self.camObject.decorations['aruco']):
 					self.camObject.decorations['aruco'].remove(self.idName)
-				'''	
-				self.camObject.dec['dequeRemove'].append(self.decorationID)	
+				'''
+				self.camObject.dec['dequeRemove'].append(self.decorationID)
 
 				self.camObject.logger.log(f'Stopping ArUco {self.idName} thread.', severity=olab_utils.SEVERITY_INFO)
-				
+
 				self.isThreadActive = False
-				self.deque.clear()					
+				self.deque.clear()
 			else:
 				self.camObject.logger.log(f'In stop, aruco {self.idName} dictionary is not defined', severity=olab_utils.SEVERITY_ERROR)
 		except Exception as e:
@@ -244,14 +244,14 @@ class _Aruco():
 				if ((res_cols, res_rows) != (self.res_cols, self.res_rows)):
 					(self.res_cols, self.res_rows) = (int(res_cols), int(res_rows))
 					self.resolution = f'{res_cols}x{res_rows}'
-			
+
 			if (fps_target != self.fps_target):
 				self.fps_target = int(fps_target)
 				self.threadSleep = 1/self.fps_target
-				
+
 			if (postFunction is not None):
 				self.postFunction = postFunction
-				
+
 			if (color is not None):
 				self.color = color
 		except Exception as e:
@@ -299,12 +299,12 @@ class _Calibrate():
 		"""
 		try:
 			self.camObject = camObject  # This is the parent!
-								
+
 			self.idName   = idName
 			self.decorationID = None
-			
+
 			self.res_rows = res_rows
-			self.res_cols = res_cols		
+			self.res_cols = res_cols
 			self.resolution = f'{res_cols}x{res_rows}'
 
 			# self.fps_target  = fps_target		# Hz
@@ -312,7 +312,7 @@ class _Calibrate():
 			# self.fps = _make_fps_dict(recheckInterval=5)
 			self.threadSleep = secBetweenImages		# seconds
 
-				
+
 			self.numImages    = numImages
 			self.timeoutSec   = timeoutSec
 			self.pattern_size = pattern_size
@@ -322,42 +322,42 @@ class _Calibrate():
 				self.postFunction = olab_utils._passFunction
 			else:
 				self.postFunction = postFunction
-			
+
 			self.deque = deque(maxlen=1)
 			self.deque.append({'checkerboard': None, 'corners': None, 'count': 0, 'img_x_y': (), 'orig_x_y': ()})
-								
-			self.isThreadActive = False			
+
+			self.isThreadActive = False
 		except Exception as e:
 			self.camObject.logger.log(f'Error in barcode init: {e}.', severity=olab_utils.SEVERITY_ERROR)
-			
+
 	def _decorate(self, img, **kwargs):
-		olab_utils.decorateCalibrate(img, 
-									 self.deque[0]['checkerboard'], 
-									 self.deque[0]['corners'], 
-									 self.deque[0]['count'], 
-									 self.deque[0]['img_x_y'], 
+		olab_utils.decorateCalibrate(img,
+									 self.deque[0]['checkerboard'],
+									 self.deque[0]['corners'],
+									 self.deque[0]['count'],
+									 self.deque[0]['img_x_y'],
 									 self.deque[0]['orig_x_y'], addText=True)
 
 	def _thread_Calibrate(self):
 		# See https://github.com/opencv/opencv/blob/master/samples/python/calibrate.py
 		# See https://learnopencv.com/camera-calibration-using-opencv/
-		
+
 		# Defining the dimensions of checkerboard
 		CHECKERBOARD = self.pattern_size   # e.g., (6,9)
-		
+
 		# FIXME -- What is this???
 		criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
-		
+
 		# Create vector to store vectors of 3D points for each checkerboard image
 		objpoints = []
 		# Create vector to store vectors of 2D points for each checkerboard image
-		imgpoints = [] 
-		
+		imgpoints = []
+
 		# Define the world coordinates for 3D points
 		objp = np.zeros((1, CHECKERBOARD[0] * CHECKERBOARD[1], 3), np.float32)
 		objp[0,:,:2] = np.mgrid[0:CHECKERBOARD[0], 0:CHECKERBOARD[1]].T.reshape(-1, 2)
 		objp *= self.square_size
-		
+
 		# Initialize return values
 		success     = False
 		mtx         = []
@@ -373,36 +373,36 @@ class _Calibrate():
 			resOption = img_x_y
 
 		timeStart = time.time()
-			
+
 		self.isThreadActive = True
 
 		try:
 			while self.isThreadActive:
 				# We should be going very slowly...no need to wait for next frame.
 				timeNow = time.time()
-								
+
 				gray = self.camObject.getFrameCopy(colorOption='gray', resOption=resOption)
 
 				# Find the chess board corners
 				# If desired number of corners are found in the image then ret = true
 				ret, corners = cv2.findChessboardCorners(gray, CHECKERBOARD, cv2.CALIB_CB_ADAPTIVE_THRESH + cv2.CALIB_CB_FAST_CHECK + cv2.CALIB_CB_NORMALIZE_IMAGE)
-				 
+
 				"""
 				If desired number of corners are detected,
-				refine the pixel coordinates and display 
+				refine the pixel coordinates and display
 				them on the images of checker board
 				"""
 				if ret == True:
 					objpoints.append(objp)
 					# refining pixel coordinates for given 2d points.
 					corners2 = cv2.cornerSubPix(gray, corners, (11,11),(-1,-1), criteria)
-					 
+
 					imgpoints.append(corners2)
-					
+
 					# Draw and display the corners
 					# FIXME -- Need to decorate
 					# img = cv2.drawChessboardCorners(img, CHECKERBOARD, corners2, ret)
-					# 
+					#
 
 					# Add detection info to deque:
 					self.deque.append({'checkerboard': CHECKERBOARD, 'corners': corners2, 'count': len(imgpoints), 'img_x_y': img_x_y, 'orig_x_y': orig_x_y})
@@ -411,30 +411,30 @@ class _Calibrate():
 					timeStart = time.time()
 				else:
 					self.deque.append({'checkerboard': None, 'corners': None, 'count': len(imgpoints), 'img_x_y': img_x_y, 'orig_x_y': orig_x_y})
-										
-								
+
+
 				# Do some post-processing:
 				# self.postFunction()
-				
+
 				# Simplified version of rospy.sleep
 				delta = max(0, timeNow + self.threadSleep - time.time())
 				if (delta > 0):
 					time.sleep(delta)
 
-				self.isThreadActive = self.camObject.camOn 
+				self.isThreadActive = self.camObject.camOn
 				if ((time.time() - timeStart >= self.timeoutSec) or (len(imgpoints) >= self.numImages)):
 					self.isThreadActive = False
-					
-					
+
+
 			if (len(imgpoints) >= self.numImages):
 				"""
-				Perform camera calibration by 
+				Perform camera calibration by
 				passing the value of known 3D points (objpoints)
-				and corresponding pixel coordinates of the 
+				and corresponding pixel coordinates of the
 				detected corners (imgpoints)
 				"""
 				ret, mtx, dist, rvecs, tvecs = cv2.calibrateCamera(objpoints, imgpoints, gray.shape[::-1], None, None)
-				
+
 				# self.camObject.logger.log(f'Error in barcode init: {e}.', severity=olab_utils.SEVERITY_ERROR)
 				print("Camera matrix : \n")
 				print(mtx)
@@ -444,7 +444,7 @@ class _Calibrate():
 				print(rvecs)
 				print("tvecs : \n")
 				print(tvecs)
-				print(f"Resolution: {self.resolution}") 
+				print(f"Resolution: {self.resolution}")
 
 				# Check Reprojection Error.
 				# See bottom of https://docs.opencv.org/4.x/dc/dbb/tutorial_py_calibration.html
@@ -478,15 +478,15 @@ class _Calibrate():
 					'rms': None, 'mean_error': None, 'matrix': None, 'dist': None})
 
 			self.stop()
-			
+
 		except Exception as e:
 			self.stop()
-			self.camObject.logger.log(f'Error in calibration {self.idName} thread: {e}', severity=olab_utils.SEVERITY_ERROR)				
+			self.camObject.logger.log(f'Error in calibration {self.idName} thread: {e}', severity=olab_utils.SEVERITY_ERROR)
 
 		finally:
 			self.postFunction(success=success, res=f'{self.res_cols}x{self.res_rows}', mtx=mtx, dist=dist, total_error=total_error, mean_error=mean_error)
 
-			
+
 	def start(self):
 		"""Start calibration thread to collect checkerboard images.
 
@@ -513,7 +513,7 @@ class _Calibrate():
 			calThread.start()
 		except Exception as e:
 			self.camObject.logger.log(f'Error in calibrate start: {e}.', severity=olab_utils.SEVERITY_ERROR)
-		
+
 	def stop(self):
 		"""Stop calibration thread and clean up resources.
 
@@ -540,9 +540,9 @@ class _Calibrate():
 			else:
 				self.camObject.logger.log(f'In stop, calibrate {self.idName} name is not defined', severity=olab_utils.SEVERITY_ERROR)
 		except Exception as e:
-			self.camObject.logger.log(f'Error in calibrate stop: {e}.', severity=olab_utils.SEVERITY_ERROR)	
-		
-		
+			self.camObject.logger.log(f'Error in calibrate stop: {e}.', severity=olab_utils.SEVERITY_ERROR)
+
+
 class _Barcode():
 	"""Internal barcode detection feature class using pyzbar library.
 
@@ -592,28 +592,28 @@ class _Barcode():
 			self.idName   = idName
 			self.decorate = decorate
 			self.decorationID = None
-			
+
 			self.res_rows = res_rows
-			self.res_cols = res_cols		
+			self.res_cols = res_cols
 			self.resolution = f'{res_cols}x{res_rows}'
 
 			self.fps_target  = fps_target		# Hz
 			self.threadSleep = 1/fps_target		# seconds
-				
+
 			self.postFunctionArgs = postFunctionArgs
-			self.postFunctionArgs['idName'] = idName	
+			self.postFunctionArgs['idName'] = idName
 			if (postFunction is None):
 				self.postFunction = olab_utils._passFunction
 			else:
 				self.postFunction = postFunction
 
 			self.color = color
-			
+
 			self.fps = _make_fps_dict(recheckInterval=5)
 
 			self.deque = deque(maxlen=1)
 			self.deque.append({'data': [], 'codeTypes': [], 'qualities': [], 'corners': [], 'color': self.color})
-								
+
 			self.isThreadActive = False
 
 		except Exception as e:
@@ -623,9 +623,9 @@ class _Barcode():
 	def _decorate(self, img, **kwargs):
 		# print('idName:', idName, 'barcode[idName]:', self.barcode[idName].deque[0])
 		# print(self.barcode[idName].deque[0])
-		olab_utils.decorateBarcode(img, 
-								   self.deque[0]['corners'], 
-								   self.deque[0]['data'], 
+		olab_utils.decorateBarcode(img,
+								   self.deque[0]['corners'],
+								   self.deque[0]['data'],
 								   self.deque[0]['color'], addText=True)
 
 
@@ -635,16 +635,16 @@ class _Barcode():
 		THIS IS A THREAD
 		rate is in [Hz] (frames/second)
 		self.camObject is the parent (from Camera).
-		We are in self.camObject.barcode['default] 
+		We are in self.camObject.barcode['default]
 		'''
 		self.isThreadActive = True
 
 		while self.camObject.camOn:
 			try:
 				timeNow = time.time()
-							
+
 				# FIXME -- It would be nice to cut out the `if` statements...
-				
+
 				# Throttle things if we're going faster than capture speed
 				if (self.fps.actual >= self.camObject.fps['capture'].actual):
 					with self.camObject.condition:
@@ -662,7 +662,7 @@ class _Barcode():
 				data      = []
 				codeTypes = []
 				qualities = []
-				corners   = []	
+				corners   = []
 
 				codeList = self.pyzbar.decode(self.camObject.getFrameCopy())	   # Don't need a copy?
 				for detections in codeList:
@@ -677,34 +677,34 @@ class _Barcode():
 						poly.append([vertex.x, vertex.y])
 					corners.append(np.array(poly, np.int32).reshape((-1, 1, 2)))
 					'''
-					rect = [(int(detections.rect.left), int(detections.rect.top)), 
+					rect = [(int(detections.rect.left), int(detections.rect.top)),
 							(int(detections.rect.left+detections.rect.width), int(detections.rect.top+detections.rect.height))]
 					corners.append(rect)
-											
+
 				# Add detection info to deque:
 				self.deque.append({'data': data, 'codeTypes': codeTypes, 'qualities': qualities, 'corners': corners, 'color': self.color})
-								
+
 				# Do some post-processing:
 				self.postFunction(self.postFunctionArgs)
-				
+
 				self.camObject.calcFramerate(self.fps, 'barcode')
 
 				self.camObject.reachback_pubCamStatus()
 			except Exception as e:
 				self.stop()
-				self.camObject.logger.log(f'Error in barcode {self.idName} thread: {e}', severity=olab_utils.SEVERITY_ERROR)				
+				self.camObject.logger.log(f'Error in barcode {self.idName} thread: {e}', severity=olab_utils.SEVERITY_ERROR)
 				break
-	
+
 			if (not self.isThreadActive):
 				self.stop()
 				self.camObject.logger.log(f'Stopping barcode {self.idName} thread.', severity=olab_utils.SEVERITY_INFO)
 				break
-	
+
 			# Simplified version of rospy.sleep
 			delta = max(0, timeNow + self.threadSleep - time.time())
 			if (delta > 0):
 				time.sleep(delta)
-				
+
 		# If while loop stops, shut down barcode:
 		self.stop()
 
@@ -737,7 +737,7 @@ class _Barcode():
 		except Exception as e:
 			self.camObject.logger.log(f'Error in barcode start: {e}.', severity=olab_utils.SEVERITY_ERROR)
 
-		
+
 	def stop(self):
 		"""Stop barcode detection thread and clean up resources.
 
@@ -762,8 +762,8 @@ class _Barcode():
 				self.camObject.logger.log(f'In stop, barcode {self.idName} name is not defined', severity=olab_utils.SEVERITY_ERROR)
 		except Exception as e:
 			self.camObject.logger.log(f'Error in barcode stop: {e}.', severity=olab_utils.SEVERITY_ERROR)
-		
-		
+
+
 	def edit(self, fps_target=None, res_rows=None, res_cols=None):
 		self.camObject.logger.log('Sorry, barcode editing is not supported.', severity=olab_utils.SEVERITY_WARNING)
 
@@ -1263,7 +1263,7 @@ class _FaceDetect():
 		except Exception as e:
 			self.camObject.logger.log(f'Error in facedetect start: {e}.', severity=olab_utils.SEVERITY_ERROR)
 
-		
+
 	def stop(self):
 		"""Stop face detection thread and clean up resources.
 
@@ -1288,11 +1288,11 @@ class _FaceDetect():
 				self.camObject.logger.log(f'In stop, FaceDetect {self.idName} name is not defined', severity=olab_utils.SEVERITY_ERROR)
 		except Exception as e:
 			self.camObject.logger.log(f'Error in FaceDetect stop: {e}.', severity=olab_utils.SEVERITY_ERROR)
-		
-		
+
+
 	def edit(self, fps_target=None, res_rows=None, res_cols=None):
 		self.camObject.logger.log('Sorry, FaceDetect editing is not supported.', severity=olab_utils.SEVERITY_WARNING)
-		
+
 
 
 class _Timelapse():
@@ -1333,20 +1333,20 @@ class _Timelapse():
 		"""
 		try:
 			self.camObject = camObject  # This is the parent!
-						
+
 			self.idName     = idName
 			self.decorationID = None   # We're not going to use this.
-			
+
 			self.outputDir = outputDir
 			# self.secBetwPhotos = secBetwPhotos
 			self.timeLimitSec  = timeLimitSec
 			self.delayStartSec = delayStartSec
 			# self.res_rows = res_rows
-			# self.res_cols = res_cols		
+			# self.res_cols = res_cols
 			self.resOption = (res_cols, res_rows)   # (width x, height y)
 
 			self.threadSleep = secBetwPhotos   # seconds
-		
+
 			# In other threads, this is where we do post-processing (per capture).
 			# For timelapse, we have postPostProcessing (after thread ends)
 			if (postPostFunction is None):
@@ -1363,7 +1363,7 @@ class _Timelapse():
 		THIS IS A THREAD
 		rate is in [Hz] (frames/second)
 		self.camObject is the parent (from Camera).
-		We are in self.camObject.timelapse['default] 
+		We are in self.camObject.timelapse['default]
 		'''
 
 		# Add a delayed start
@@ -1371,57 +1371,57 @@ class _Timelapse():
 
 		# Create directory (if it does not already exist)
 		if (not os.path.exists(self.outputDir)):
-			print('Directory {} does not exist.  Making it now.'.format(self.outputDir))            
+			print('Directory {} does not exist.  Making it now.'.format(self.outputDir))
 			os.makedirs(self.outputDir, exist_ok=True)
-		
+
 		startTime = time.time()
-		
+
 		self.isThreadActive = True
 
 		while self.camObject.camOn:
 			try:
 				timeNow = time.time()
-							
+
 				# Save Photo self.camObject.getFrameCopy( change res )
 				self.camObject.takePhotoLocal(path=self.outputDir, filename=None, resOption=self.resOption)
 				# (roiSuccess, roiBox) = olab_utils.roiTrack(self.roiTracker, self.camObject.getFrameCopy())
-				
+
 				# Add detection info to deque:
 				# self.deque.append({'success': roiSuccess, 'box': roiBox, 'color': self.color})
-	
+
 				# In other threads, this is where we do post-processing (per capture).
 				# For timelapse, we have postPostProcessing (after thread ends)
 				# Do some post-processing:
 				# self.postFunction()
-				
+
 				# self.camObject.calcFramerate(self.fps, 'roi')
 
 				self.camObject.reachback_pubCamStatus()
 			except Exception as e:
 				self.stop()
-				self.camObject.logger.log(f'Error in Timelapse {self.idName} thread: {e}', severity=olab_utils.SEVERITY_ERROR)				
+				self.camObject.logger.log(f'Error in Timelapse {self.idName} thread: {e}', severity=olab_utils.SEVERITY_ERROR)
 				break
-	
+
 			if (not self.isThreadActive):
 				self.stop()
 				self.camObject.logger.log(f'Stopping Timelapse {self.idName} thread.', severity=olab_utils.SEVERITY_INFO)
 				break
-	
+
 			# Simplified version of rospy.sleep
 			delta = max(0, timeNow + self.threadSleep - time.time())
 			if (delta > 0):
 				time.sleep(delta)
-								
-			# Check for hitting time limit	
+
+			# Check for hitting time limit
 			if (self.timeLimitSec is not None):
 				if ((time.time() - startTime) >= self.timeLimitSec):
 					self.stop()
 					self.camObject.logger.log(f'Stopping Timelapse {self.idName} thread; time limit reached', severity=olab_utils.SEVERITY_INFO)
 					break
-			
+
 		# If while loop stops, shut down timelapse:
 		self.stop()
-		
+
 	def start(self):
 		"""Start timelapse capture thread with configured intervals.
 
@@ -1444,7 +1444,7 @@ class _Timelapse():
 			tlThread.start()
 		except Exception as e:
 			self.camObject.logger.log(f'Error in Timelapse start: {e}.', severity=olab_utils.SEVERITY_ERROR)
-		
+
 	def stop(self):
 		"""Stop timelapse capture thread.
 
@@ -1462,10 +1462,10 @@ class _Timelapse():
 			else:
 				self.camObject.logger.log(f'In stop, timelapse {self.idName} name is not defined', severity=olab_utils.SEVERITY_ERROR)
 		except Exception as e:
-			self.camObject.logger.log(f'Error in timelapse stop: {e}.', severity=olab_utils.SEVERITY_ERROR)	
+			self.camObject.logger.log(f'Error in timelapse stop: {e}.', severity=olab_utils.SEVERITY_ERROR)
 
-		
-			
+
+
 
 class _ROI():
 	"""Internal region-of-interest tracking feature class using OpenCV trackers.
@@ -1516,31 +1516,31 @@ class _ROI():
 			self.idName     = idName
 			self.decorate = decorate
 			self.decorationID = None
-							
+
 			self.roiBB      = roiBB  #  (x, y, w, h)
 			self.roiTracker = olab_utils.OPENCV_OBJECT_TRACKERS[roiTrackerName]()
 			self.roiTracker.init(self.camObject.getFrameCopy(), self.roiBB)
 
 			# We must maintain same resolution as the camera feed.
 			self.res_rows = self.camObject.res_rows
-			self.res_cols = self.camObject.res_cols		
+			self.res_cols = self.camObject.res_cols
 			self.resolution = f'{self.res_cols}x{self.res_rows}'
 
 			self.fps_target  = fps_target		# Hz
 			self.threadSleep = 1/fps_target		# seconds
-				
+
 			if (postFunction is None):
 				self.postFunction = olab_utils._passFunction
 			else:
 				self.postFunction = postFunction
 
 			self.color = color
-			
+
 			self.fps = _make_fps_dict(recheckInterval=5)
 
 			self.deque = deque(maxlen=1)
 			self.deque.append({'success': False, 'box': [], 'color': self.color})
-								
+
 			self.isThreadActive = False
 
 		except Exception as e:
@@ -1550,22 +1550,22 @@ class _ROI():
 	def _decorate(self, img, **kwargs):
 		if (self.deque[0]['success']):
 			olab_utils.roiDrawBox(img, self.deque[0]['box'], self.deque[0]['color'])
-		
+
 	def _thread_ROI(self):
 		'''
 		THIS IS A THREAD
 		rate is in [Hz] (frames/second)
 		self.camObject is the parent (from Camera).
-		We are in self.camObject.roi['default] 
+		We are in self.camObject.roi['default]
 		'''
 		self.isThreadActive = True
 
 		while self.camObject.camOn:
 			try:
 				timeNow = time.time()
-							
+
 				# FIXME -- It would be nice to cut out the `if` statements...
-				
+
 				# Throttle things if we're going faster than capture speed
 				if (self.fps.actual >= self.camObject.fps['capture'].actual):
 					with self.camObject.condition:
@@ -1576,37 +1576,37 @@ class _ROI():
 					raise Exception('Resolution changed. Stopping ROI thread')
 					# self.stop()
 					# break
-				
+
 				(roiSuccess, roiBox) = olab_utils.roiTrack(self.roiTracker, self.camObject.getFrameCopy())
-				
+
 				# Add detection info to deque:
 				self.deque.append({'success': roiSuccess, 'box': roiBox, 'color': self.color})
-	
+
 				# Do some post-processing:
 				self.postFunction()
-				
+
 				self.camObject.calcFramerate(self.fps, 'roi')
 
 				self.camObject.reachback_pubCamStatus()
 			except Exception as e:
 				self.stop()
-				self.camObject.logger.log(f'Error in ROI {self.idName} thread: {e}', severity=olab_utils.SEVERITY_ERROR)				
+				self.camObject.logger.log(f'Error in ROI {self.idName} thread: {e}', severity=olab_utils.SEVERITY_ERROR)
 				break
-	
+
 			if (not self.isThreadActive):
 				self.stop()
 				self.camObject.logger.log(f'Stopping ROI {self.idName} thread.', severity=olab_utils.SEVERITY_INFO)
 				break
-	
+
 			# Simplified version of rospy.sleep
 			delta = max(0, timeNow + self.threadSleep - time.time())
 			if (delta > 0):
 				time.sleep(delta)
-				
+
 		# If while loop stops, shut down roi:
 		self.stop()
-	
-	
+
+
 	def start(self):
 		"""Start ROI tracking thread at the configured frame rate.
 
@@ -1633,8 +1633,8 @@ class _ROI():
 			roiThread.start()
 		except Exception as e:
 			self.camObject.logger.log(f'Error in ROI start: {e}.', severity=olab_utils.SEVERITY_ERROR)
-				
-		
+
+
 	def stop(self):
 		"""Stop ROI tracking thread and clean up resources.
 
@@ -1658,8 +1658,8 @@ class _ROI():
 				self.camObject.logger.log(f'In stop, ROI {self.idName} name is not defined', severity=olab_utils.SEVERITY_ERROR)
 		except Exception as e:
 			self.camObject.logger.log(f'Error in ROI stop: {e}.', severity=olab_utils.SEVERITY_ERROR)
-		
-	
+
+
 	def edit(self):
 		self.camObject.logger.log('Sorry, ROI editing is not supported.', severity=olab_utils.SEVERITY_WARNING)
 
@@ -1732,28 +1732,28 @@ class _Ultralytics():
 			self.model = YOLO(model_name)
 			self.device = device
 			self.verbose = verbose
-			if (drawBox is None): 
+			if (drawBox is None):
 				if (idName == 'pose'):
 					self.drawBox = False
 				else:
 					self.drawBox = True
 			else:
-				self.drawBox = drawBox	
+				self.drawBox = drawBox
 			if (drawLabel is None):
 				self.drawLabel = self.drawBox
 			else:
-				self.drawLabel = drawLabel	
+				self.drawLabel = drawLabel
 			self.maskOutline = maskOutline
-						
+
 			self.decorationID = None   # FIXU -- What will this be?
-			
+
 			self.res_rows = res_rows
-			self.res_cols = res_cols		
+			self.res_cols = res_cols
 			self.resolution = f'{res_cols}x{res_rows}'
-			
+
 			self.fps_target  = fps_target		# Hz
 			self.threadSleep = 1/fps_target		# seconds
-				
+
 			self.postFunctionArgs = postFunctionArgs
 			self.postFunctionArgs['idName'] = idName
 			if (postFunction is None):
@@ -1762,14 +1762,14 @@ class _Ultralytics():
 				self.postFunction = postFunction
 
 			self.color = color
-			
+
 			self.conf_threshold = conf_threshold
-			
+
 			self.fps = _make_fps_dict(recheckInterval=5)
 
 			self.deque = deque(maxlen=1)
-			self.deque.append(self._initDeque()) 
-			
+			self.deque.append(self._initDeque())
+
 			self.isThreadActive = False
 
 		except Exception as e:
@@ -1782,37 +1782,37 @@ class _Ultralytics():
 		# FIXU -- Needs to match deque as defined in __init__
 
 	def _initDeque(self):
-		return {'class': [], 'class_conf': [], 'is_track': False, 'id': [], 
+		return {'class': [], 'class_conf': [], 'is_track': False, 'id': [],
 				'xywh': [], 'xyxy': [],
-				'xywhr': [], 'xyxyxyxy': [],  
-				'keypoints': [], 'keypoints_conf': [],  
+				'xywhr': [], 'xyxyxyxy': [],
+				'keypoints': [], 'keypoints_conf': [],
 				'masks_data': [], 'masks_xy': []}
 
 	def _to_np(self, x):
 		'''
 		Converts Cuda tensor to numpy array
 		Tensor -> NumPy on CPU; passthrough for NumPy arrays.
-		'''			
+		'''
 		if isinstance(x, np.ndarray):
 			return x
 		else:
 			return x.detach().cpu().numpy()
-		
-		# I'm trying to avoid importing torch	
+
+		# I'm trying to avoid importing torch
 		# if isinstance(x, torch.Tensor):
 		#	return x.detach().cpu().numpy()
 
 		raise TypeError(f"Unsupported type: {type(x)}")
-		
-		
+
+
 	def _processResults(self, results):
 		dequeInfo = self._initDeque()
 
 		np_res  = np.array([self.res_cols, self.res_rows])
 		np_res2 = np.array([self.res_cols, self.res_rows, self.res_cols, self.res_rows])
-		 
-		if results[0].boxes is not None:		
-			bx = results[0].boxes 
+
+		if results[0].boxes is not None:
+			bx = results[0].boxes
 			dequeInfo['xywh'] = (self._to_np(bx.xywhn)*(np_res2)).astype(int).tolist()
 			# dequeInfo['xywhn'] = bx.xywhn.tolist()
 			# dequeInfo['xywhr'] = []
@@ -1823,7 +1823,7 @@ class _Ultralytics():
 			bx = results[0].obb
 			# dequeInfo['xywh'] = []
 			dequeInfo['xywhr'] = self._to_np(bx.xywhr).tolist()    # This is the center point of obb, in original resolution
-			# dequeInfo['xywhrn'] = bx.xywhrn.tolist()  # There's no such thing as `xywhrn` 
+			# dequeInfo['xywhrn'] = bx.xywhrn.tolist()  # There's no such thing as `xywhrn`
 			# dequeInfo['xyxy'] = []
 			dequeInfo['xyxyxyxy'] = (self._to_np(bx.xyxyxyxyn)*(np_res)).astype(int).tolist()
 			# dequeInfo['xyxyxyxyn'] = bx.xyxyxyxyn.tolist()
@@ -1833,27 +1833,27 @@ class _Ultralytics():
 			'''
 			dequeInfo['class'] = []
 			dequeInfo['class_conf'] = []
-			dequeInfo['is_track'] = False 
-			dequeInfo['id'] = [] 
+			dequeInfo['is_track'] = False
+			dequeInfo['id'] = []
 			dequeInfo['xywh'] = []
 			dequeInfo['xywhr'] = []
 			dequeInfo['xyxy'] = []
 			dequeInfo['xyxyxyxy'] = []
 			'''
-						
+
 		if bx is not None:
 			dequeInfo['class'] = [results[0].names.get(key) for key in bx.cls.tolist()]
 			dequeInfo['class_conf'] = bx.conf.tolist()
-			dequeInfo['is_track'] = bx.is_track 
+			dequeInfo['is_track'] = bx.is_track
 			dequeInfo['id'] = bx.id.tolist() if bx.id is not None else []
-		
+
 		if (results[0].keypoints is not None):
 			# dequeInfo['keypoints'] = results[0].keypoints.xyn.tolist() if results[0].keypoints.xyn is not None else []
 			# dequeInfo['keypoints'] = (results[0].keypoints.xyn*np_res).int().tolist() if results[0].keypoints.xyn is not None else []
 			dequeInfo['keypoints'] = (self._to_np(results[0].keypoints.xyn)*np_res).astype(int) if results[0].keypoints.has_visible else []
 			dequeInfo['keypoints_conf'] = self._to_np(results[0].keypoints.conf).tolist() if results[0].keypoints.conf is not None else []
 		# else:
-		# 	dequeInfo['keypoints'] = [] 
+		# 	dequeInfo['keypoints'] = []
 		#	dequeInfo['keypoints_conf'] = []
 
 		if (results[0].masks is not None):
@@ -1862,27 +1862,27 @@ class _Ultralytics():
 					cv2.resize(self._to_np(results[0].masks.data[i]), np_res, interpolation=cv2.INTER_LINEAR).round())
 				dequeInfo['masks_xy'].append((self._to_np(results[0].masks.xyn[i])*np_res).astype(int))
 		# else:
-		#	dequeInfo['masks_data'] = [] 
+		#	dequeInfo['masks_data'] = []
 		#	dequeInfo['masks_xy'] = []
-		
+
 		return(dequeInfo)
-		
+
 	def _thread_Ultralytics(self):
 
 		'''
 		THIS IS A THREAD
 		rate is in [Hz] (frames/second)
 		self.camObject is the parent (from Camera).
-		We are in self.camObject.ultralytics[idName] 
+		We are in self.camObject.ultralytics[idName]
 		'''
 		self.isThreadActive = True
 
 		while self.camObject.camOn:
 			try:
 				timeNow = time.time()
-							
+
 				# FIXME -- It would be nice to cut out the `if` statements...
-				
+
 				# Throttle things if we're going faster than capture speed
 				if (self.fps.actual >= self.camObject.fps['capture'].actual):
 					with self.camObject.condition:
@@ -1896,35 +1896,35 @@ class _Ultralytics():
 					results = self.model.predict(self.camObject.getFrameCopy(), stream=False, conf=self.conf_threshold, verbose=self.verbose, device=self.device)
 					# FIXME -- Can also specify a subset of classes/objects to detect.
 					# See https://docs.ultralytics.com/modes/predict/#inference-arguments
-								
+
 				# Process the results
 				dequeInfo = self._processResults(results)
-				
+
 				# Add detection info to deque:
 				self.deque.append(dequeInfo)
-								
+
 				# Do some post-processing:
 				self.postFunctionArgs['results'] = results
 				self.postFunction(self.postFunctionArgs)
-				
-				self.camObject.calcFramerate(self.fps, 'ultralytics') 
+
+				self.camObject.calcFramerate(self.fps, 'ultralytics')
 
 				self.camObject.reachback_pubCamStatus()
 			except Exception as e:
 				self.stop()
-				self.camObject.logger.log(f'Error in ultralytics {self.idName} thread: {e}', severity=olab_utils.SEVERITY_ERROR)				
+				self.camObject.logger.log(f'Error in ultralytics {self.idName} thread: {e}', severity=olab_utils.SEVERITY_ERROR)
 				break
-	
+
 			if (not self.isThreadActive):
 				self.stop()
 				self.camObject.logger.log(f'Stopping ultralytics {self.idName} thread.', severity=olab_utils.SEVERITY_INFO)
 				break
-	
+
 			# Simplified version of rospy.sleep
 			delta = max(0, timeNow + self.threadSleep - time.time())
 			if (delta > 0):
 				time.sleep(delta)
-				
+
 		# If while loop stops, shut down ultralytics:
 		self.stop()
 
@@ -2091,4 +2091,4 @@ class _RFDETR():
 			self.decorationID = None
 		self.deque.clear()
 
-				
+
