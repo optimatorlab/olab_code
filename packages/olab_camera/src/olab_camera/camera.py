@@ -393,7 +393,7 @@ class Camera():
 		with self.condition:
 			self.condition.notify_all()
 
-	def addAruco(self, idName=None, res_rows=None, res_cols=None, fps_target=5, calcRotations=True, postFunction=None, postFunctionArgs={}, configOverrides={}, ids_of_interest=None, decorate=True):
+	def addAruco(self, idName=None, res_rows=None, res_cols=None, fps_target=5, calcRotations=True, postFunction=None, postFunctionArgs=None, configOverrides=None, ids_of_interest=None, decorate=True):
 		"""Start ArUco marker detection in a separate thread.
 
 		Creates and starts an _Aruco instance that continuously detects ArUco markers in
@@ -444,8 +444,10 @@ class Camera():
 					self.logger.log(f'An aruco thread for {idName} is already running.', severity=olab_utils.SEVERITY_ERROR)
 					return
 
-			configDict = configDefaults
-			for k,v in configOverrides:
+			# Each detector owns its drawing settings.  Do not let a caller's
+			# overrides mutate the module defaults used by future detectors.
+			configDict = configDefaults.copy()
+			for k, v in (configOverrides or {}).items():
 				configDict[k] = v
 				if ('Color' in k):
 					configDict[k] = self.defaultFromNone(v, olab_utils.ARUCO_DICT[idName]['color'], None)
@@ -453,7 +455,7 @@ class Camera():
 			res_rows  = self.defaultFromNone(res_rows,  self.res_rows,   int)
 			res_cols  = self.defaultFromNone(res_cols,  self.res_cols,   int)
 
-			self.aruco[idName] = _Aruco(self, idName, res_rows, res_cols, int(fps_target), calcRotations, postFunction, postFunctionArgs, configDict, ids_of_interest, decorate)
+			self.aruco[idName] = _Aruco(self, idName, res_rows, res_cols, int(fps_target), calcRotations, postFunction, dict(postFunctionArgs or {}), configDict, ids_of_interest, decorate)
 
 			self.aruco[idName].start()
 
@@ -790,7 +792,7 @@ class Camera():
 			self.logger.log(f'Error in addTimelapse: {e}.', severity=olab_utils.SEVERITY_ERROR)
 		
 
-	def addUltralytics(self, idName=None, res_rows=None, res_cols=None, fps_target=None, postFunction=None, postFunctionArgs={}, color=(0,255,255), conf_threshold=0.25, model_name=None, verbose=False, drawBox=None, drawLabel=None, maskOutline=False, decorate=True):
+	def addUltralytics(self, idName=None, res_rows=None, res_cols=None, fps_target=None, postFunction=None, postFunctionArgs={}, color=(0,255,255), conf_threshold=0.25, model_name=None, verbose=False, drawBox=None, drawLabel=None, maskOutline=False, decorate=True, device='cpu'):
 		"""Start Ultralytics YOLO model inference for object detection, segmentation, or pose estimation.
 
 		Creates and starts an _Ultralytics instance that runs YOLO models on camera frames
@@ -818,6 +820,7 @@ class Camera():
 				inference without drawing on the stream. Cannot be changed dynamically --
 				it's only read once, at start(); to change it, stop() this feature and
 				call addUltralytics() again.
+			device (str): Local inference device, such as 'cpu' or 'cuda:0'.
 
 		Notes:
 			- Requires Ultralytics library installation.
@@ -840,7 +843,7 @@ class Camera():
 			res_cols   = self.defaultFromNone(res_cols,   self.res_cols,   int)
 			fps_target = self.defaultFromNone(fps_target, self.fps_target, int)
 			
-			self.ultralytics[idName] = _Ultralytics(self, idName, res_rows, res_cols, int(fps_target), postFunction, postFunctionArgs, color, conf_threshold, model_name, verbose, drawBox, drawLabel, maskOutline, decorate)
+			self.ultralytics[idName] = _Ultralytics(self, idName, res_rows, res_cols, int(fps_target), postFunction, postFunctionArgs, color, conf_threshold, model_name, verbose, drawBox, drawLabel, maskOutline, decorate, device)
 			self.ultralytics[idName].start() 
 			
 		except Exception as e:
@@ -989,7 +992,7 @@ class Camera():
 				
 
 						
-	def startStream(self, port, protocol='mjpeg', force=False, signalingMode='html'):
+	def startStream(self, port, protocol='mjpeg', force=False, signalingMode='html', bindHost='', advertisedHost=None):
 		"""Start a video streaming server on the specified port.
 
 		Launches a threaded server that streams camera frames to connected clients.
@@ -1005,6 +1008,10 @@ class Camera():
 			signalingMode (str): WebRTC only. 'html' (default) serves a built-in
 				HTML+JS page at GET /webrtc. 'json' returns a JSON descriptor
 				instead, for integration into custom UIs.
+			bindHost (str): Interface address on which to listen. The default empty
+				string preserves the historical all-interface listener behavior.
+			advertisedHost (str or None): Host placed in the direct stream URL.
+				When None, preserves the historical `olab_utils.getIP()` behavior.
 
 		Notes:
 			- Server runs in a daemon thread and stops when the main program exits.
@@ -1029,7 +1036,7 @@ class Camera():
 			self.activeProtocol = protocol
 			self.streamPort     = port
 
-			_ip = olab_utils.getIP()
+			_ip = olab_utils.getIP() if advertisedHost is None else advertisedHost
 			if protocol == 'mjpeg':
 				self.streamURL = f'https://{_ip}:{port}/stream.mjpg'
 			elif protocol == 'websocket':
@@ -1041,11 +1048,11 @@ class Camera():
 				with self._mjpegLock:
 					self._mjpegGeneration += 1
 					generation = self._mjpegGeneration
-				strThread = threading.Thread(target=self._thread_stream_mjpeg, args=(port, generation))
+				strThread = threading.Thread(target=self._thread_stream_mjpeg, args=(port, generation, bindHost))
 			elif protocol == 'websocket':
-				strThread = threading.Thread(target=self._thread_stream_websocket, args=(port,))
+				strThread = threading.Thread(target=self._thread_stream_websocket, args=(port, bindHost))
 			elif protocol == 'webrtc':
-				strThread = threading.Thread(target=self._thread_stream_webrtc, args=(port, signalingMode))
+				strThread = threading.Thread(target=self._thread_stream_webrtc, args=(port, signalingMode, bindHost))
 
 			strThread.daemon = True
 			strThread.start()
@@ -1494,7 +1501,7 @@ class Camera():
 			# raise Exception(f'_thread_ros error: {e}')
 			self.logger.log(f'_thread_ros error: {e}.', severity=olab_utils.SEVERITY_ERROR)
 				
-	def _thread_stream_mjpeg(self, portNumber, generation):
+	def _thread_stream_mjpeg(self, portNumber, generation, bindHost=''):
 		'''
 		THIS IS A THREAD
 		It starts/runs the MJPEG streaming server
@@ -1504,7 +1511,7 @@ class Camera():
 			try:
 				self._ensureSslPath()		# Generate a local cert now, if one doesn't exist yet.
 
-				address = ('', portNumber)
+				address = (bindHost, portNumber)
 				handler = partial(StreamingHandler, self)				# self --> This CamUSB instance
 
 				# --- make this server secure (ssl/https) ---
@@ -1570,7 +1577,7 @@ class Camera():
 		except Exception as e:
 			self.logger.log(f'_thread_stream_mjpeg error: {e}.', severity=olab_utils.SEVERITY_ERROR)
 
-	def _thread_stream_websocket(self, portNumber):
+	def _thread_stream_websocket(self, portNumber, bindHost=''):
 		'''
 		THIS IS A THREAD
 		It starts/runs the WebSocket streaming server.
@@ -1594,7 +1601,7 @@ class Camera():
 					certfile = f'{self.sslPath}/ca.crt')
 
 				ws_server = WebSocketStreamingServer(self)
-				asyncio.run(ws_server.serve(portNumber, ssl_context))
+				asyncio.run(ws_server.serve(portNumber, ssl_context, bindHost))
 
 			finally:
 				self.logger.log('stopping _thread_stream_websocket thread', severity=olab_utils.SEVERITY_INFO)
@@ -1602,7 +1609,7 @@ class Camera():
 		except Exception as e:
 			self.logger.log(f'_thread_stream_websocket error: {e}.', severity=olab_utils.SEVERITY_ERROR)
 
-	def _thread_stream_webrtc(self, portNumber, signalingMode):
+	def _thread_stream_webrtc(self, portNumber, signalingMode, bindHost=''):
 		'''
 		THIS IS A THREAD
 		It starts/runs the WebRTC signaling server and manages peer connections.
@@ -1626,7 +1633,7 @@ class Camera():
 					certfile = f'{self.sslPath}/ca.crt')
 
 				webrtc_server = WebRTCStreamingServer(self, signalingMode)
-				asyncio.run(webrtc_server.serve(portNumber, ssl_context))
+				asyncio.run(webrtc_server.serve(portNumber, ssl_context, bindHost))
 
 			finally:
 				self.logger.log('stopping _thread_stream_webrtc thread', severity=olab_utils.SEVERITY_INFO)

@@ -129,5 +129,8 @@ camera.startStream(port=8002, protocol='webrtc')
 - Usage tutorial (camera init, ArUco, barcode/QR, face detection, YOLO
   variants, tracking, frame decoration): [`docs/usage_guide.md`](docs/usage_guide.md)
 - Streaming protocols, custom TLS certs, reverse-proxy deployment: [`docs/deployment.md`](docs/deployment.md)
+- Local HTTPS camera/feature browser playground: install `olab-playground`
+  alongside this package; see `packages/olab_playground/README.md` in the
+  olab_code checkout.
 - Extending the package (adding a camera class or feature class, code
   organization, testing your changes): [`docs/developer_guide.md`](docs/developer_guide.md)

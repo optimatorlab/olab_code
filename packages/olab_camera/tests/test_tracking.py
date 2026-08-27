@@ -2,6 +2,7 @@
 
 import numpy as np
 from olab_camera.camera import Camera
+from olab_camera.tracking import _TrackerFeature
 
 
 class _FakeBackend:
@@ -90,3 +91,11 @@ def test_failed_readd_keeps_old_tracker_and_callback_failure_is_contained(monkey
     results = camera.updateTrackers({'xyxy': [[1, 2, 3, 4]]}, ('callback', 'byte'))
     assert results == {'callback': None, 'byte': {'xyxy': [[1.0, 2.0, 3.0, 4.0]], 'track_id': [10]}}
     assert camera.trackers['callback'].deque[0]['track_id'] == [10]
+
+
+def test_tracker_automatic_drawing_defaults_to_visible_boxes_and_labels(monkeypatch):
+    camera, _made = _camera_with_fake_backends(monkeypatch)
+    feature = _TrackerFeature(camera, 'automatic', 'sort', 5, None, None,
+                              (0, 255, 255), None, None, False, False)
+    assert feature.drawBox is True
+    assert feature.drawLabel is True

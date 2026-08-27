@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>olab playground</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main>
+    <header><h1>olab playground</h1><p>Local HTTPS camera prototyping. One active session.</p></header>
+    <p id="notice" role="status"></p>
+    <section><h2>Camera</h2><label>Backend <select id="backend"></select></label><div id="camera-form"></div><details><summary>Camera intrinsics</summary><p>Optional calibration for the next camera. Select a saved local profile or enter values manually.</p><select id="intrinsics-profile"><option value="">No intrinsics</option></select><label>Resolution <input id="intrinsics-resolution" placeholder="640x480"></label><label>fx <input id="intrinsics-fx" type="number"></label><label>fy <input id="intrinsics-fy" type="number"></label><label>cx <input id="intrinsics-cx" type="number"></label><label>cy <input id="intrinsics-cy" type="number"></label><label>Distortion coefficients <input id="intrinsics-dist" placeholder="0, 0, 0, 0, 0"></label></details>
+      <fieldset><legend>Stream at startup</legend><label><input id="stream-enabled" type="checkbox" checked> Start stream</label>
+      <label>Protocol <select id="stream-protocol"><option>mjpeg</option><option>websocket</option><option>webrtc</option></select></label>
+      <label>Preferred port <input id="stream-port" type="number" min="1"></label><label class="check"><input id="auto-port" type="checkbox" checked> Find an available port if this is busy</label><span id="stream-port-range"></span>
+      <label class="check"><input id="lan-visible" type="checkbox"> LAN-visible</label>
+      <div id="lan-options" hidden><p class="warning">Anyone on the reachable network who knows this URL can view the stream.</p>
+        <label>Advertised IP or name <input id="advertised-host"></label>
+        <fieldset><legend>Certificate</legend>
+          <label class="check"><input type="radio" name="certificate-mode" value="current" checked> Use current certificate (warnings expected)</label>
+          <label class="check"><input type="radio" name="certificate-mode" value="generate"> Generate development certificate for this IP/name</label>
+          <label class="check"><input type="radio" name="certificate-mode" value="choose"> Choose certificate directory</label>
+          <div id="certificate-picker" hidden><button id="browse-certificates" type="button">Browse certificate directories</button><input id="certificate-path" placeholder="Selected directory containing ca.crt and ca.key"><pre id="certificate-list"></pre></div>
+        </fieldset>
+      </div></fieldset>
+      <button id="start-camera">Start / replace camera</button><button id="stop-camera">Stop camera</button></section>
+    <section><h2>Live status</h2><div class="status-actions"><button id="hide-preview">Hide preview</button><span id="negotiated"></span></div><div id="stream"></div><details><summary>Technical status</summary><pre id="status"></pre></details></section>
+    <section><h2>Features</h2><div id="running-features"></div><div id="features"></div></section>
+    <section><h2>Tracking</h2><p>A tracker receives boxes from an opted-in detector; it does not run camera inference by itself.</p><div id="tracking"></div></section>
+    <section><h2>Local paths</h2><button id="browse-models">Browse model root</button><button id="browse-outputs">Browse output root</button><pre id="paths"></pre><details><summary>Set up local YOLO models</summary><p>Install the optional dependency in the environment that runs this page: <code>pip install -e 'packages/olab_camera[yolo]'</code>.</p><p>Download model files yourself, then place them under the configured model root (by default <code>~/Projects/olab_models</code>). Refresh this page to discover them. The playground never downloads model weights.</p><table><thead><tr><th>Task</th><th>Suggested small local model</th></tr></thead><tbody><tr><td>Object detection</td><td><code>yolo11n.pt</code></td></tr><tr><td>Segmentation</td><td><code>yolo11n-seg.pt</code></td></tr><tr><td>Pose</td><td><code>yolo11n-pose.pt</code></td></tr><tr><td>Classification</td><td><code>yolo11n-cls.pt</code></td></tr><tr><td>Oriented bounding boxes</td><td><code>yolo11n-obb.pt</code></td></tr></tbody></table><p>Get task-compatible weights from the <a href="https://docs.ultralytics.com/models/" target="_blank" rel="noopener">official Ultralytics model documentation</a>.</p></details></section>
+    <section><h2>Python equivalent</h2><button id="copy">Copy</button><pre id="python"></pre></section>
+    <section><h2>Provision local YOLO models</h2><p>Before opening the browser UI, activate the <code>olab_code</code> virtual environment, change to the configured model root (normally <code>~/Projects/olab_models</code>), then explicitly instantiate only the models you want:</p><pre>cd ~/Projects/olab_models
+python
+&gt;&gt;&gt; from ultralytics import YOLO
+&gt;&gt;&gt; YOLO("yolo11n.pt")
+&gt;&gt;&gt; YOLO("yolo11n-seg.pt")
+&gt;&gt;&gt; YOLO("yolo11n-cls.pt")
+&gt;&gt;&gt; YOLO("yolo11n-pose.pt")
+&gt;&gt;&gt; YOLO("yolo11n-obb.pt")
+&gt;&gt;&gt; YOLO("yolo26n.pt")
+&gt;&gt;&gt; YOLO("yolo26n-seg.pt")
+&gt;&gt;&gt; YOLO("yolo26n-cls.pt")
+&gt;&gt;&gt; YOLO("yolo26n-pose.pt")
+&gt;&gt;&gt; YOLO("yolo26n-obb.pt")</pre><p>These are the YOLO11/YOLO26 small detect, segment, classify, pose, and OBB filenames. Track uses the same plain detect checkpoint as detect; there is no <code>-track</code> file family. The browser only lists existing compatible files and never downloads a model.</p><p>If installing YOLO support replaces the contrib OpenCV build, restore CSRT tracker support:</p><pre>python -m pip uninstall -y opencv-python opencv-contrib-python
+python -m pip install "opencv-contrib-python&gt;=4.10.0"
+python -c "import cv2; print(cv2.__version__, hasattr(cv2, 'TrackerCSRT_create'))"</pre></section>
+    <section><h2>LAN / TLS</h2><p>Trust this server certificate and the stream certificate on each browser. For phone access by IP/name, generate or supply a certificate with that IP/DNS SAN.</p></section>
+  </main>
+  <script>window.OLAB_CSRF = "__CSRF_TOKEN__";</script><script src="/app.js"></script>
+</body>
+</html>

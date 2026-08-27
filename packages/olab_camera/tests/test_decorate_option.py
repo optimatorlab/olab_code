@@ -28,6 +28,7 @@ import pytest
 
 import olab_utils
 from olab_camera.camera import Camera
+from olab_camera.cv_features import _Ultralytics
 
 
 def _make_camera_with_frame(img):
@@ -292,3 +293,127 @@ def test_addUltralytics_decorate_true_preserves_registration(img, fake_ultralyti
 
     _stop_feature_and_drain_decorations(cam, cam.ultralytics, 'detect')
     assert not cam.dec['active']
+
+
+def test_addUltralytics_forwards_explicit_device(monkeypatch, img):
+    received = []
+
+    class _FakeFeature:
+        def __init__(self, *args):
+            received.append(args)
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr('olab_camera.camera._Ultralytics', _FakeFeature)
+    cam = _make_camera_with_frame(img)
+    cam.addUltralytics(idName='detect', model_name='fake.pt', device='cuda:0')
+    assert received[0][-1] == 'cuda:0'
+
+
+@pytest.mark.parametrize(('id_name', 'method'), [('detect', 'predict'), ('track', 'track')])
+def test_ultralytics_thread_forwards_selected_device_to_both_call_modes(img, id_name, method):
+    calls = []
+    camera = types.SimpleNamespace(
+        camOn=True,
+        fps={'capture': types.SimpleNamespace(actual=20)},
+        getFrameCopy=lambda: img,
+        calcFramerate=lambda *_args: None,
+        reachback_pubCamStatus=lambda: None,
+    )
+
+    class _FakeModel:
+        def predict(self, *_args, **kwargs):
+            calls.append(('predict', kwargs))
+            camera.camOn = False
+            return []
+
+        def track(self, *_args, **kwargs):
+            calls.append(('track', kwargs))
+            camera.camOn = False
+            return []
+
+    feature = _Ultralytics.__new__(_Ultralytics)
+    feature.camObject = camera
+    feature.idName = id_name
+    feature.model = _FakeModel()
+    feature.conf_threshold = .25
+    feature.verbose = False
+    feature.device = 'cuda:0'
+    feature.fps = types.SimpleNamespace(actual=0)
+    feature.threadSleep = 0
+    feature.deque = []
+    feature.postFunctionArgs = {}
+    feature.postFunction = lambda _args: None
+    feature._processResults = lambda _results: {}
+    feature.stop = lambda: setattr(feature, 'isThreadActive', False)
+
+    feature._thread_Ultralytics()
+
+    assert calls == [(method, {
+        'stream': False, 'persist': True, 'conf': .25, 'verbose': False, 'device': 'cuda:0',
+    })] if method == 'track' else [(method, {
+        'stream': False, 'conf': .25, 'verbose': False, 'device': 'cuda:0',
+    })]
+
+
+class _FakeCudaTensor:
+    def __init__(self, value, transfers):
+        self.value = np.asarray(value)
+        self.transfers = transfers
+
+    def detach(self):
+        self.transfers.append('detach')
+        return self
+
+    def cpu(self):
+        self.transfers.append('cpu')
+        return self
+
+    def numpy(self):
+        self.transfers.append('numpy')
+        return self.value
+
+
+def _ultralytics_result_feature():
+    feature = _Ultralytics.__new__(_Ultralytics)
+    feature.res_cols, feature.res_rows = 4, 3
+    return feature
+
+
+def test_ultralytics_process_results_transfers_gpu_pose_tensors_before_numpy_math():
+    transfers = []
+    feature = _ultralytics_result_feature()
+    keypoints = types.SimpleNamespace(
+        xyn=_FakeCudaTensor([[[.25, .5], [.75, 1.0]]], transfers),
+        conf=_FakeCudaTensor([[.9, .8]], transfers), has_visible=True,
+    )
+    result = types.SimpleNamespace(boxes=None, obb=None, keypoints=keypoints, masks=None)
+
+    output = feature._processResults([result])
+
+    assert output['keypoints'].tolist() == [[[1, 1], [3, 3]]]
+    assert output['keypoints_conf'] == [[.9, .8]]
+    assert transfers == ['detach', 'cpu', 'numpy', 'detach', 'cpu', 'numpy']
+
+
+def test_ultralytics_process_results_transfers_gpu_mask_tensors_before_opencv_math():
+    transfers = []
+    feature = _ultralytics_result_feature()
+    masks = types.SimpleNamespace(
+        data=[_FakeCudaTensor(np.array([[0, 1], [1, 0]], dtype=np.float32), transfers)],
+        xyn=[_FakeCudaTensor([[.25, .5], [.75, 1.0]], transfers)],
+    )
+    result = types.SimpleNamespace(boxes=None, obb=None, keypoints=None, masks=masks)
+
+    output = feature._processResults([result])
+
+    assert output['masks_data'][0].shape == (3, 4)
+    assert output['masks_xy'][0].tolist() == [[1, 1], [3, 3]]
+    assert transfers == ['detach', 'cpu', 'numpy', 'detach', 'cpu', 'numpy']
+
+
+def test_ultralytics_to_np_preserves_numpy_input_identity():
+    feature = _ultralytics_result_feature()
+    value = np.array([[1, 2]], dtype=np.float32)
+    assert feature._to_np(value) is value

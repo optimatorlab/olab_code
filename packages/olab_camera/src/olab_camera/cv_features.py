@@ -468,6 +468,14 @@ class _Calibrate():
 				print( "mean error: {}".format(mean_error) )
 
 				success = True
+				self.deque.append({'state': 'success', 'reason': 'completed',
+					'resolution': self.resolution, 'count': len(imgpoints), 'rms': float(ret),
+					'mean_error': float(mean_error), 'matrix': mtx, 'dist': dist})
+			else:
+				reason = 'timeout' if self.camObject.camOn else 'stopped'
+				self.deque.append({'state': reason, 'reason': reason,
+					'resolution': self.resolution, 'count': len(imgpoints),
+					'rms': None, 'mean_error': None, 'matrix': None, 'dist': None})
 
 			self.stop()
 			
@@ -525,7 +533,10 @@ class _Calibrate():
 				self.camObject.logger.log(f'Stopping calibrate {self.idName} thread.', severity=olab_utils.SEVERITY_INFO)
 
 				self.isThreadActive = False
-				self.deque.clear()
+				# Retain a terminal calibration result for callers/UI status.  Ordinary
+				# in-progress samples are still discarded when the user stops early.
+				if not (self.deque and isinstance(self.deque[-1], dict) and self.deque[-1].get('state') in {'success', 'timeout', 'stopped'}):
+					self.deque.clear()
 			else:
 				self.camObject.logger.log(f'In stop, calibrate {self.idName} name is not defined', severity=olab_utils.SEVERITY_ERROR)
 		except Exception as e:
@@ -1684,7 +1695,7 @@ class _Ultralytics():
 		start(): Launches YOLO inference thread.
 		stop(): Terminates inference thread and cleans up resources.
 	"""
-	def __init__(self, camObject, idName, res_rows, res_cols, fps_target, postFunction, postFunctionArgs, color, conf_threshold, model_name, verbose, drawBox, drawLabel, maskOutline, decorate=True):
+	def __init__(self, camObject, idName, res_rows, res_cols, fps_target, postFunction, postFunctionArgs, color, conf_threshold, model_name, verbose, drawBox, drawLabel, maskOutline, decorate=True, device='cpu'):
 		"""Initialize Ultralytics YOLO feature.
 
 		Args:
@@ -1704,6 +1715,7 @@ class _Ultralytics():
 			maskOutline (bool): Draw mask outlines for segmentation tasks.
 			decorate (bool): Whether to register this feature's detection overlay on the
 				streamed frame. Default True.
+			device (str): Local Ultralytics inference device.
 		"""
 		self.camObject = camObject  # This is the parent!
 
@@ -1718,6 +1730,7 @@ class _Ultralytics():
 			self.decorate = decorate
 			self.model_name = model_name    # "yolo11n.pt", "yolo11n-cls.pt", etc
 			self.model = YOLO(model_name)
+			self.device = device
 			self.verbose = verbose
 			if (drawBox is None): 
 				if (idName == 'pose'):
@@ -1765,7 +1778,7 @@ class _Ultralytics():
 	def _decorate(self, img, **kwargs):
 		# print('idName:', idName, 'ultralytics[idName]:', self.ultralytics[idName].deque[0])
 		# print(self.ultralytics[idName].deque[0])
-		olab_utils.decorateUltralytics(img, self.res_cols, self.res_rows, self.idName, self.deque[0], self.drawBox, self.drawLabel, self.maskOutline)
+		olab_utils.decorateUltralytics(img, self.res_cols, self.res_rows, self.idName, self.deque[0], self.drawBox, self.drawLabel, self.maskOutline, self.color)
 		# FIXU -- Needs to match deque as defined in __init__
 
 	def _initDeque(self):
@@ -1837,8 +1850,8 @@ class _Ultralytics():
 		if (results[0].keypoints is not None):
 			# dequeInfo['keypoints'] = results[0].keypoints.xyn.tolist() if results[0].keypoints.xyn is not None else []
 			# dequeInfo['keypoints'] = (results[0].keypoints.xyn*np_res).int().tolist() if results[0].keypoints.xyn is not None else []
-			dequeInfo['keypoints'] = np.array(results[0].keypoints.xyn*np_res).astype(int) if results[0].keypoints.has_visible else []
-			dequeInfo['keypoints_conf'] = results[0].keypoints.conf.tolist() if results[0].keypoints.conf is not None else []
+			dequeInfo['keypoints'] = (self._to_np(results[0].keypoints.xyn)*np_res).astype(int) if results[0].keypoints.has_visible else []
+			dequeInfo['keypoints_conf'] = self._to_np(results[0].keypoints.conf).tolist() if results[0].keypoints.conf is not None else []
 		# else:
 		# 	dequeInfo['keypoints'] = [] 
 		#	dequeInfo['keypoints_conf'] = []
@@ -1846,8 +1859,8 @@ class _Ultralytics():
 		if (results[0].masks is not None):
 			for i in range(0, len(results[0].masks.data)):
 				dequeInfo['masks_data'].append(
-					cv2.resize(np.array(results[0].masks.data[i]), np_res, interpolation=cv2.INTER_LINEAR).round())  
-				dequeInfo['masks_xy'].append((results[0].masks.xyn[i]*np_res).astype(int)) 
+					cv2.resize(self._to_np(results[0].masks.data[i]), np_res, interpolation=cv2.INTER_LINEAR).round())
+				dequeInfo['masks_xy'].append((self._to_np(results[0].masks.xyn[i])*np_res).astype(int))
 		# else:
 		#	dequeInfo['masks_data'] = [] 
 		#	dequeInfo['masks_xy'] = []
@@ -1878,9 +1891,9 @@ class _Ultralytics():
 
 				# Predict or Track?
 				if (self.idName == 'track'):
-					results = self.model.track(self.camObject.getFrameCopy(), stream=False, persist=True, conf=self.conf_threshold, verbose=self.verbose) 
+					results = self.model.track(self.camObject.getFrameCopy(), stream=False, persist=True, conf=self.conf_threshold, verbose=self.verbose, device=self.device)
 				else:
-					results = self.model.predict(self.camObject.getFrameCopy(), stream=False, conf=self.conf_threshold, verbose=self.verbose) 
+					results = self.model.predict(self.camObject.getFrameCopy(), stream=False, conf=self.conf_threshold, verbose=self.verbose, device=self.device)
 					# FIXME -- Can also specify a subset of classes/objects to detect.
 					# See https://docs.ultralytics.com/modes/predict/#inference-arguments
 								
@@ -1984,7 +1997,9 @@ class _RFDETR():
 		self.res_rows, self.res_cols, self.fps_target = res_rows, res_cols, fps_target
 		self.threadSleep = 1 / fps_target
 		self.color, self.conf_threshold = color, conf_threshold
-		self.drawBox, self.drawLabel, self.maskOutline, self.decorate = drawBox, drawLabel, maskOutline, decorate
+		self.drawBox = True if drawBox is None else drawBox
+		self.drawLabel = self.drawBox if drawLabel is None else drawLabel
+		self.maskOutline, self.decorate = maskOutline, decorate
 		self.decorationID = None
 		self.postFunction = postFunction or olab_utils._passFunction
 		self.postFunctionArgs = dict(postFunctionArgs or {})

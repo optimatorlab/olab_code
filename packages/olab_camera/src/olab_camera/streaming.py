@@ -381,14 +381,15 @@ class WebSocketStreamingServer:
 			websockets.broadcast(self.clients, jpeg.tobytes())
 			self.camObject.calcFramerate(self.camObject.fps['stream'], 'stream')
 
-	async def serve(self, port, ssl_context):
+	async def serve(self, port, ssl_context, bindHost=''):
 		"""Start the WebSocket server and run the broadcaster until stopped.
 
 		Args:
 			port (int): TCP port to listen on.
 			ssl_context (ssl.SSLContext): TLS context for wss:// connections.
+			bindHost (str): Interface address on which to listen.
 		"""
-		async with websockets.serve(self._handler, '', port, ssl=ssl_context):
+		async with websockets.serve(self._handler, bindHost, port, ssl=ssl_context):
 			await self._broadcaster()
 
 
@@ -571,12 +572,13 @@ class WebRTCStreamingServer:
 			'type': pc.localDescription.type,
 		})
 
-	async def serve(self, port, ssl_context):
+	async def serve(self, port, ssl_context, bindHost=''):
 		"""Start the signaling server and run until keepStreaming goes False.
 
 		Args:
 			port (int): TCP port to listen on.
 			ssl_context (ssl.SSLContext): TLS context for https:// connections.
+			bindHost (str): Interface address on which to listen.
 		"""
 		app = aiohttp.web.Application()
 		app.router.add_get( '/webrtc', self._handle_webrtc_page)
@@ -584,7 +586,7 @@ class WebRTCStreamingServer:
 
 		runner = aiohttp.web.AppRunner(app)
 		await runner.setup()
-		site = aiohttp.web.TCPSite(runner, '', port, ssl_context=ssl_context)
+		site = aiohttp.web.TCPSite(runner, bindHost, port, ssl_context=ssl_context)
 		await site.start()
 
 		try:
@@ -595,4 +597,3 @@ class WebRTCStreamingServer:
 				await pc.close()
 			self.pcs.clear()
 			await runner.cleanup()
-

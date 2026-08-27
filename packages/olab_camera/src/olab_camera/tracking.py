@@ -147,8 +147,8 @@ class _TrackerFeature:
         self.idName = idName
         self.algorithm = algorithm
         self.color = color
-        self.drawBox = drawBox
-        self.drawLabel = drawLabel
+        self.drawBox = True if drawBox is None else drawBox
+        self.drawLabel = self.drawBox if drawLabel is None else drawLabel
         self.maskOutline = maskOutline
         self.decorate = decorate
         self.postFunction = postFunction or olab_utils._passFunction

@@ -70,6 +70,17 @@ def test_constructor_forces_explicit_cpu_device_by_default(monkeypatch, tmp_path
     assert received['device'] == 'cpu'
 
 
+def test_automatic_rfdetr_drawing_defaults_to_boxes_and_labels(monkeypatch, tmp_path):
+    path = tmp_path / 'weights.pth'
+    path.touch()
+    monkeypatch.setitem(sys.modules, 'rfdetr', SimpleNamespace(RFDETRSmall=lambda **kwargs: object()))
+    cam = Camera({'res_rows': 8, 'res_cols': 8, 'fps_target': 1})
+    feature = _RFDETR(cam, 'local', 'detect', 'small', str(path), 8, 8, 1,
+                       None, None, (0, 0, 0), .25, None, None, None, False)
+    assert feature.drawBox is True
+    assert feature.drawLabel is True
+
+
 def test_stop_waits_for_in_flight_predict(monkeypatch, tmp_path):
     path = tmp_path / 'weights.pth'
     path.touch()

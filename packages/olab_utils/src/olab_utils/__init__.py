@@ -954,10 +954,9 @@ def decorateOptFlow(img, shift):
 	
 	drawLine(img, (center_x, center_y), (int(center_x+5*shift[0]), int(center_y+5*shift[1])))
 	
-def decorateUltralytics(img, w, h, idName, results, drawBox, drawLabel, maskOutline):
+def decorateUltralytics(img, w, h, idName, results, drawBox, drawLabel, maskOutline, color=(0, 255, 55)):
 	try:
-		# FIXME -- assign color based on class
-		color=(0, 255, 55)
+		# The owning feature supplies OpenCV BGR drawing color.
 		
 		if (drawBox or drawLabel):
 			for i in range(0, len(results['class'])):
