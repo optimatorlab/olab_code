@@ -605,6 +605,7 @@ class CameraOpenMV(Camera):
 		Args:
 			stopStream (bool): Whether to also stop the streaming server.
 		"""
+		self._stopTrackers()
 		self.camOn = False
 		self._capture_running = False
 		self._stopping = True

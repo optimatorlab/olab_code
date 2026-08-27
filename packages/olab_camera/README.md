@@ -35,11 +35,13 @@ one at a time:
 | Extra | Adds | Notes |
 |---|---|---|
 | `yolo` | `ultralytics` (YOLO object detection) | Handles the `opencv-contrib-python`/`opencv-python` conflict below correctly on its own. |
+| `tracking` | local SORT, ByteTrack, OC-SORT, and BoT-SORT | Detector-agnostic comparison API; no models, hosted inference, or automatic downloads. |
+| `rfdetr` | local RF-DETR detection/segmentation plus Roboflow ByteTrack | Supply an existing local checkpoint. Relative names resolve in `~/Projects/olab_models/`; absolute paths also work. The usage guide documents an explicit, one-time optional provisioning download. This feature never downloads weights or uses hosted inference at runtime. Keep `opencv-contrib-python` active using the recovery process below if a dependency installs plain OpenCV. |
 | `websocket` | `websockets` | WebSocket + JPEG streaming. |
 | `webrtc` | `aiortc`, `aiohttp` | WebRTC streaming. |
 | `ros` | `rospy`, `cv-bridge`, `sensor-msgs` | **Not installable via plain `pip`** — these packages aren't on PyPI. Only add this extra inside an existing ROS-configured environment (e.g. `apt`-installed ROS packages already on the Python path); untested/undocumented outside that setup. |
 
-`all` bundles `yolo`, `ros`, `websocket`, and `webrtc` together — since
+`all` bundles `yolo`, `rfdetr`, `ros`, `websocket`, and `webrtc` together — since
 `ros` isn't plain-pip-installable, only use `all` inside a ROS environment;
 otherwise request extras individually.
 
@@ -127,5 +129,8 @@ camera.startStream(port=8002, protocol='webrtc')
 - Usage tutorial (camera init, ArUco, barcode/QR, face detection, YOLO
   variants, tracking, frame decoration): [`docs/usage_guide.md`](docs/usage_guide.md)
 - Streaming protocols, custom TLS certs, reverse-proxy deployment: [`docs/deployment.md`](docs/deployment.md)
+- Local HTTPS camera/feature browser playground: install `olab-playground`
+  alongside this package; see `packages/olab_playground/README.md` in the
+  olab_code checkout.
 - Extending the package (adding a camera class or feature class, code
   organization, testing your changes): [`docs/developer_guide.md`](docs/developer_guide.md)

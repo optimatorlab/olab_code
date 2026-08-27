@@ -13,6 +13,7 @@ import numpy as np
 import pytest
 
 import olab_utils
+import olab_camera.camera as camera_module
 from olab_camera.camera import Camera
 from olab_camera.cv_features import _Aruco
 
@@ -97,6 +98,30 @@ def test_addAruco_bad_idName_leaves_no_entry_logs_once_and_never_starts(monkeypa
     assert error_calls[0][0].startswith('Error in addAruco:')
 
     cam.camOn = False
+
+
+def test_addAruco_copies_drawing_defaults_and_accepts_a_mapping(monkeypatch):
+    captured = []
+
+    class FakeAruco:
+        def __init__(self, *args):
+            captured.append(args)
+            self.isThreadActive = False
+
+        def start(self):
+            self.isThreadActive = True
+
+    monkeypatch.setattr(camera_module, "_Aruco", FakeAruco)
+    cam = Camera({'res_rows': 480, 'res_cols': 640, 'fps_target': 5})
+    user_args = {}
+    default_border = olab_utils.ARUCO_DRAWING_DEFAULTS['borderDraw']
+
+    cam.addAruco('DICT_4X4_50', configOverrides={'borderDraw': False}, postFunctionArgs=user_args)
+
+    assert captured[0][7] == {}
+    assert captured[0][8]['borderDraw'] is False
+    assert olab_utils.ARUCO_DRAWING_DEFAULTS['borderDraw'] is default_border
+    assert user_args == {}
 
 
 # ─── _FaceDetect: fail-fast construction ────────────────────────────────────

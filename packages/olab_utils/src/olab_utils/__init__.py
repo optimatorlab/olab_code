@@ -54,7 +54,7 @@ class Logger():
 			else:
 				self.consolePublisher = None
 				print('Logger:  No topic name/type found.  Just using print()')
-				
+
 		except Exception as e:
 			self.consolePublisher = None
 			print(f'Error in Logger init: {e}')
@@ -67,16 +67,16 @@ class Logger():
 				c_msg          = self.consoleTopic()
 
 				c_msg.__setattr__(self.msgAttr, msgtext)
-	
+
 				if (hasattr(c_msg, 'severity')):
 					c_msg.severity = severity
 
 				for key in c_msg.__slots__:
 					if (key in kwargs):
 						c_msg.__setattr__(key, kwargs[key])
-								
+
 				self.consolePublisher.publish(c_msg)
-				
+
 				if (len(kwargs) > 0):
 					print(f'DEBUG FROM LOGGER: {msgtext}, {kwargs}')
 				else:
@@ -84,7 +84,7 @@ class Logger():
 			except Exception as e:
 				print(f"logger error: {e}.  Could not print {msgtext}")
 		else:
-			print(f'LOGGER: {msgtext}')	
+			print(f'LOGGER: {msgtext}')
 
 
 # https://pyimagesearch.com/2018/12/17/image-stitching-with-opencv-and-python/
@@ -133,7 +133,7 @@ def _buildOpenCvObjectTrackers(cv2_module=cv2):
 # A dictionary that maps strings to their corresponding OpenCV object
 # tracker implementations. See _buildOpenCvObjectTrackers()/_resolveTrackerFactory().
 OPENCV_OBJECT_TRACKERS = _buildOpenCvObjectTrackers()
-		
+
 # define names of each possible ArUco tag OpenCV supports
 ARUCO_DICT = {
 	"DICT_4X4_50":         {"dict": cv2.aruco.DICT_4X4_50,         "color": (244, 3, 252)},  # hot pink
@@ -179,9 +179,9 @@ def _resolveArucoDictAndParams(dictID, cv2_module=cv2):
 	return (aruco.getPredefinedDictionary(dictID), aruco.DetectorParameters())
 
 
-ARUCO_DRAWING_DEFAULTS = {'borderDraw': True, 'borderColor': (3, 186, 252), 
-						  'centerDraw': True, 'centerColor': (3, 186, 252), 'centerRadiusPx':   2, 
-						  'arrowDraw':  True, 'arrowColor':  (3, 186, 252), 'arrowThicknessPx': 1, 'arrowLengthPx': 25, 'arrowTipLength': 0.3, 
+ARUCO_DRAWING_DEFAULTS = {'borderDraw': True, 'borderColor': (3, 186, 252),
+						  'centerDraw': True, 'centerColor': (3, 186, 252), 'centerRadiusPx':   2,
+						  'arrowDraw':  True, 'arrowColor':  (3, 186, 252), 'arrowThicknessPx': 1, 'arrowLengthPx': 25, 'arrowTipLength': 0.3,
 						  'textDraw':   True, 'textColor':   (3, 186, 252), 'textThicknessPx':  1, 'textScale':     0.5}
 
 # ==================================================================================
@@ -213,20 +213,20 @@ def list_files(basePath, validExts=None, contains=None):
                 imagePath = os.path.join(rootDir, filename)
                 yield imagePath
 # ==================================================================================
-                
+
 
 def cropImageHack(stitched):
 	# create a 10 pixel border surrounding the stitched image
 	print("Cropping image ...")
 	stitched = cv2.copyMakeBorder(stitched, 10, 10, 10, 10,
 		cv2.BORDER_CONSTANT, (0, 0, 0))
-		
+
 	# convert the stitched image to grayscale and threshold it
 	# such that all pixels greater than zero are set to 255
 	# (foreground) while all others remain 0 (background)
 	gray = cv2.cvtColor(stitched, cv2.COLOR_BGR2GRAY)
 	thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY)[1]
-	
+
 	# find all external contours in the threshold image then find
 	# the *largest* contour which will be the contour/outline of
 	# the stitched image
@@ -240,8 +240,8 @@ def cropImageHack(stitched):
 	# rectangular bounding box of the stitched image region
 	mask = np.zeros(thresh.shape, dtype="uint8")
 	(x, y, w, h) = cv2.boundingRect(c)
-	cv2.rectangle(mask, (x, y), (x + w, y + h), 255, -1)		
-	
+	cv2.rectangle(mask, (x, y), (x + w, y + h), 255, -1)
+
 	# create two copies of the mask: one to serve as our actual
 	# minimum rectangular region and another to serve as a counter
 	# for how many pixels need to be removed to form the minimum
@@ -255,7 +255,7 @@ def cropImageHack(stitched):
 		# the thresholded image from the minimum rectangular mask
 		# so we can count if there are any non-zero pixels left
 		minRect = cv2.erode(minRect, None)
-		sub = cv2.subtract(minRect, thresh)		
+		sub = cv2.subtract(minRect, thresh)
 
 	# find contours in the minimum rectangular mask and then
 	# extract the bounding box (x, y)-coordinates
@@ -269,34 +269,34 @@ def cropImageHack(stitched):
 	# use the bounding box coordinates to extract our final
 	# stitched image
 	return stitched[y:y + h, x:x + w]
-	
-	
+
+
 
 def stitchImages(imagesDirectory = None, imageFilenamesArray = None, doCrop = False, outputFile = None):
 	'''
 	Stitches a collection of input images,
 	returning a single cv2 image.
-	
+
 	Inputs:
-	imagesDirectory - A string containing the full path to a directory 
-				containing the images you wish to stitch.  
+	imagesDirectory - A string containing the full path to a directory
+				containing the images you wish to stitch.
 				All image files in this directory will be included.
 				Default: None
-	imageFilenamsArray - A Python array of strings, where each 
+	imageFilenamsArray - A Python array of strings, where each
 				string is a full-path filename of an image file.
 				Default: None
 	doCrop - A boolean flag indicating whether the resulting stitched
-			 image should be cropped.  See the pyimagesearch link 
+			 image should be cropped.  See the pyimagesearch link
 			 for details.
 			 Default: False
-	outputFile - A string containing the full path (and filename) for 
+	outputFile - A string containing the full path (and filename) for
 			 the resulting stitched image.
 			 Provide this if you want to save the image.
 			 Default:  None (no file saved)
-			
-	You need to provide `imagesDirectory` or `imageFilenamesArray` 
-	(or both, if you wish) 
-	
+
+	You need to provide `imagesDirectory` or `imageFilenamesArray`
+	(or both, if you wish)
+
 	Returns status (0 if no errors) and the stitched image
 	'''
 
@@ -323,14 +323,14 @@ def stitchImages(imagesDirectory = None, imageFilenamesArray = None, doCrop = Fa
 	print("Stitching images ...")
 	stitcher = cv2.Stitcher_create()
 	(status, stitched) = stitcher.stitch(images)
-	
+
 	# if the status is '0', then OpenCV successfully performed image stitching
 	if status == 0:
 		# check to see if we supposed to crop out the largest rectangular
 		# region from the stitched image
 		if (doCrop):
 			stiched = cropImageHack(stitched)
-		
+
 		if (outputFile is not None):
 			# write the output stitched image to disk
 			cv2.imwrite(outputFile, stitched)
@@ -340,12 +340,12 @@ def stitchImages(imagesDirectory = None, imageFilenamesArray = None, doCrop = Fa
 		cv2.waitKey(0)
 
 	else:
-		# otherwise the stitching failed, 
+		# otherwise the stitching failed,
 		# likely due to not enough keypoints being detected
-		print("Image stitching failed ({})".format(status))		
-	
+		print("Image stitching failed ({})".format(status))
+
 	return(status, stitched)
-	
+
 
 def arucoDrawDetections(img, corners, ids, centers=[], rotations=[], config=ARUCO_DRAWING_DEFAULTS):
 	'''
@@ -426,25 +426,25 @@ def arucoDetectMarkers(img, arucoDict, arucoParams, img_x_y=None, orig_x_y=None,
 			ids = ids.flatten()
 			if (img_x_y != orig_x_y):
 				# We changed image size.  Change corners to display properly when overlayed on original image
-				xscale = orig_x_y[0] / img_x_y[0] 
+				xscale = orig_x_y[0] / img_x_y[0]
 				yscale = orig_x_y[1] / img_x_y[1]
-				
+
 				corners[:,:,:,0] *= xscale
 				corners[:,:,:,1] *= yscale
-			
+
 
 
 			# Find midpoint, using corner points 1 (NE) and 3 (SW)
 			'''
 			for i in range(0, len(corners)):
-				mp = ((corners[i][0][3][0] + corners[i][0][1][0])/2, 
-					  (corners[i][0][3][1] + corners[i][0][1][1])/2) 
+				mp = ((corners[i][0][3][0] + corners[i][0][1][0])/2,
+					  (corners[i][0][3][1] + corners[i][0][1][1])/2)
 			'''
 			centers = ((corners[:,0,3,:]+corners[:,0,1,:])/2).astype(int)
 
 			'''
 			for i in range(0, len(corners)):
-				if (self.calcRotations):					
+				if (self.calcRotations):
 					# point 0 is top left, 3 is bottom left.  x increases to right, y increases down
 					x = corners[i][0][0][0] - corners[i][0][3][0]
 					y = corners[i][0][0][1] - corners[i][0][3][1]
@@ -453,7 +453,7 @@ def arucoDetectMarkers(img, arucoDict, arucoParams, img_x_y=None, orig_x_y=None,
 			rotations = np.arctan2( (corners[:,0,3,0]-corners[:,0,0,0]), -(corners[:,0,3,1]-corners[:,0,0,1]) )
 
 			# corners = corners.astype(int)
-			
+
 	except Exception as e:
 		print('ArUco Tracking failed: {}.'.format(str(e)))
 		# (corners, ids, rejected, centers, rotations) = (np.array([], dtype='int'), None, None, np.array([], dtype='int'), np.array([]))
@@ -796,25 +796,25 @@ def generateQR(payload, tag_size_inches, dpi=300, ecc='H', border=0,
 
 def decorateCalibrate(img, checkerboard, corners, count, img_x_y, orig_x_y, addText=True):
 	try:
-		if ((checkerboard is not None) and (corners is not None)):			
+		if ((checkerboard is not None) and (corners is not None)):
 			# corners comes from a deque.  Below, we modify the values.  So, let's make a copy.
 			cnrs = corners.copy()
-			
+
 			if (img_x_y != orig_x_y):
 				# We changed image size.  Change corners to display properly when overlayed on original image
-				xscale = orig_x_y[0] / img_x_y[0] 
+				xscale = orig_x_y[0] / img_x_y[0]
 				yscale = orig_x_y[1] / img_x_y[1]
 
 				cnrs[:,:,0] *= xscale
 				cnrs[:,:,1] *= yscale
 
-			cv2.drawChessboardCorners(img, checkerboard, cnrs, True)	
+			cv2.drawChessboardCorners(img, checkerboard, cnrs, True)
 
 		if (addText):
 			cv2.putText(img, str(count),
 				(15, 65),
 				cv2.FONT_HERSHEY_SIMPLEX,
-				0.5, (200, 20, 10), 1, cv2.LINE_AA)		
+				0.5, (200, 20, 10), 1, cv2.LINE_AA)
 
 	except Exception as e:
 		print(f'Error in decorateCalibrate: {e}')
@@ -951,14 +951,13 @@ def decorateOptFlow(img, shift):
 	[center_x, center_y] = [int(shp[1]/2), int(shp[0]/2)]
 	drawCircle(img, (center_x, center_y), int(5*math.sqrt(shift[0]*shift[0] + shift[1]*shift[1])))
 	# drawCircle(img, (center_x, center_y), 20)
-	
+
 	drawLine(img, (center_x, center_y), (int(center_x+5*shift[0]), int(center_y+5*shift[1])))
-	
-def decorateUltralytics(img, w, h, idName, results, drawBox, drawLabel, maskOutline):
+
+def decorateUltralytics(img, w, h, idName, results, drawBox, drawLabel, maskOutline, color=(0, 255, 55)):
 	try:
-		# FIXME -- assign color based on class
-		color=(0, 255, 55)
-		
+		# The owning feature supplies OpenCV BGR drawing color.
+
 		if (drawBox or drawLabel):
 			for i in range(0, len(results['class'])):
 				# 'class': [], 'class_conf': [],
@@ -969,11 +968,11 @@ def decorateUltralytics(img, w, h, idName, results, drawBox, drawLabel, maskOutl
 
 					if (drawBox):
 						cv2.rectangle(img, pt1, pt2, color, 2, cv2.LINE_AA)
-					
+
 					if (drawLabel):
 						txt = f"{results['class'][i]} {results['class_conf'][i]:.2f}"
 						if (results['id']):
-							txt = f"ID:{int(results['id'][i])} {txt}" 	
+							txt = f"ID:{int(results['id'][i])} {txt}"
 						txtsize = cv2.getTextSize(txt, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 1)[0]  # scale=0.7, thickness=1
 						shp = img.shape  # [rows, cols, depth]
 						if (pt1[0] > shp[1]/2):
@@ -992,35 +991,35 @@ def decorateUltralytics(img, w, h, idName, results, drawBox, drawLabel, maskOutl
 						cv2.putText(img, txt,
 							(txt_x, label_pt2[1]-3),
 							cv2.FONT_HERSHEY_SIMPLEX,
-							0.7, (0, 0, 0), 1, cv2.LINE_AA)		
+							0.7, (0, 0, 0), 1, cv2.LINE_AA)
 				elif (results['xyxyxyxy']):
 					# print(np.array(results['xyxyxyxy'][i]).reshape((4,2)))
 					cv2.polylines(img, [np.array(results['xyxyxyxy'][i]).reshape((4,2))], isClosed=True, color=(0, 255, 0), thickness=1)
-		
-		
+
+
 		# min_conf = 0.75
 		radius = 5 # px
 		color = (100, 100, 100)
 		thickness = 1
-		skeleton = {'face':  [5, 3, 1, 0, 2, 4, 6], # [[0, 1], [0, 2], [1, 3], [2, 4], [3, 5], [4, 6]], 
-		            'arms':  [9, 7, 5, 6, 8, 10], 
+		skeleton = {'face':  [5, 3, 1, 0, 2, 4, 6], # [[0, 1], [0, 2], [1, 3], [2, 4], [3, 5], [4, 6]],
+		            'arms':  [9, 7, 5, 6, 8, 10],
 					'leg_left':  [11, 13, 15],
 					'leg_right': [12, 14, 16],
 					'torso': [5, 11, 12, 6]}
-		sk_poly_colors = {'face': (50, 168, 82), 
-					 'arms': (0, 154, 196), 
-					 'leg_left': (250, 187, 0), 
-					 'leg_right': (250, 187, 0), 
+		sk_poly_colors = {'face': (50, 168, 82),
+					 'arms': (0, 154, 196),
+					 'leg_left': (250, 187, 0),
+					 'leg_right': (250, 187, 0),
 					 'torso': (240, 129, 231)}
-		sk_points = {'face': [0, 1, 2, 3, 4], 
+		sk_points = {'face': [0, 1, 2, 3, 4],
 					 'arms': [5, 6, 7, 8, 9, 10],
 					 'legs': [11, 12, 13, 14, 15, 16]}
-		sk_points_colors = {'face': sk_poly_colors['face'], 
-							'arms': sk_poly_colors['arms'], 
+		sk_points_colors = {'face': sk_poly_colors['face'],
+							'arms': sk_poly_colors['arms'],
 							'legs': sk_poly_colors['leg_left']}
-					 
-		
-		
+
+
+
 		# FIXME -- Need to scale the keypoints to image size?  Done?
 		for body in range(0, len(results['keypoints'])):
 			#print('sk')
@@ -1036,25 +1035,25 @@ def decorateUltralytics(img, w, h, idName, results, drawBox, drawLabel, maskOutl
 						if (len(tmp) > 1):
 							keep.extend(tmp)
 						tmp = []
-						
+
 				if (len(tmp) > 1):
 					keep.extend(tmp)
 				if (len(keep) > 1):
 					cv2.polylines(img, [np.int32(keep)], isClosed=False, color=sk_poly_colors[part], thickness=2)
-												
+
 			#print('kp')
 			for part in sk_points:
 				for i in sk_points[part]:
 					# print(results['keypoints'][body][i], results['keypoints'][body][i] > [0, 0])
 					if ((results['keypoints'][body][i] > [0, 0]).all()):
 						cv2.circle(img, results['keypoints'][body][i], radius, sk_points_colors[part], -1)
-		
+
 		# Segmentation
 		# mask outline
 		if (maskOutline):
 			for i in range(0, len(results['masks_xy'])):
 				cv2.polylines(img, [np.int32(results['masks_xy'][i])], isClosed=True, color=(100, 100, 100), thickness=2)
-		
+
 		# channel = 1
 		# value = 40
 		clr = np.array([100, 100, 100])
@@ -1062,8 +1061,8 @@ def decorateUltralytics(img, w, h, idName, results, drawBox, drawLabel, maskOutl
 		# t = results[0].orig_img
 		# t[:,:,channel] = t[:,:,channel]  + mask_stretch*value # mask_stretch*value # t[:,:,channel]#  + mask_stretch*value
 		# t[:,:,:] = t[:,:,:]  + np.expand_dims(mask_stretch, axis=-1)*clr # mask_stretch*value # t[:,:,channel]#  + mask_stretch*value
-		# success = cv2.imwrite('test00a.jpg', t)	
-		try:	
+		# success = cv2.imwrite('test00a.jpg', t)
+		try:
 			for i in range(0, len(results['masks_data'])):
 				# print(results['masks_data'][i].shape)
 				# print(type(results['masks_data'][i]))
@@ -1073,18 +1072,43 @@ def decorateUltralytics(img, w, h, idName, results, drawBox, drawLabel, maskOutl
 				img[:,:,:] = img[:,:,:] + np.expand_dims(results['masks_data'][i], axis=-1)*clr
 		except Exception as e:
 			print(f'ERRROR: {e}')
-			
-			
+
+
 		'''
 		if (addText):
 			cv2.putText(img, str(idName),
 				(15, 65),
 				cv2.FONT_HERSHEY_SIMPLEX,
-				0.5, (200, 20, 10), 1, cv2.LINE_AA)		
+				0.5, (200, 20, 10), 1, cv2.LINE_AA)
 		'''
 	except Exception as e:
 		print(f'Error in decorateUltralytics: {e}')
-		
+
+def decorateRFDETR(img, result, drawBox=True, drawLabel=True, maskOutline=False, color=(0, 255, 255)):
+	"""Draw a normalized RF-DETR result without depending on RF-DETR itself."""
+	try:
+		for mask in result.get('masks', []):
+			mask = np.asarray(mask, dtype=bool)
+			if mask.shape != img.shape[:2]:
+				mask = cv2.resize(mask.astype(np.uint8), (img.shape[1], img.shape[0]), interpolation=cv2.INTER_NEAREST).astype(bool)
+			if maskOutline:
+				contours, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+				cv2.drawContours(img, contours, -1, color, 2)
+			else:
+				img[mask] = (0.6 * img[mask] + 0.4 * np.asarray(color)).astype(img.dtype)
+		for index, box in enumerate(result.get('xyxy', [])):
+			pt1, pt2 = tuple(map(int, box[:2])), tuple(map(int, box[2:]))
+			if drawBox:
+				cv2.rectangle(img, pt1, pt2, color, 2, cv2.LINE_AA)
+			if drawLabel:
+				name = result.get('class', ['?'])[index]
+				confidence = result.get('class_conf', [0.0])[index]
+				track_ids = result.get('track_id', [])
+				prefix = f'ID:{track_ids[index]} ' if index < len(track_ids) and track_ids[index] >= 0 else ''
+				cv2.putText(img, f'{prefix}{name} {confidence:.2f}', (pt1[0], max(15, pt1[1] - 5)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
+	except Exception as e:
+		print(f'Error in decorateRFDETR: {e}')
+
 def degCtoF(degC):
 	# Convert degrees Celsius to Fahrenheit
 	return (degC*9/5) + 32
@@ -1092,13 +1116,13 @@ def degCtoF(degC):
 def degFtoC(degF):
 	# Convert degrees Fahrenheit to Celsius
 	return (degF - 32) * 5/9
-	
+
 def drawArrow(img, pt1, pt2, color=(255,0,0), thickness=1, tipLength=0.1):
 	try:
-		cv2.arrowedLine(img, pt1, pt2, color, thickness, cv2.LINE_AA, 0, tipLength) 
+		cv2.arrowedLine(img, pt1, pt2, color, thickness, cv2.LINE_AA, 0, tipLength)
 	except Exception as e:
 		print(f'ERROR in drawArrow: {e}')
-		
+
 def drawCircle(img, center, radius, thickness=3, color=(150, 25, 25)):
 	'''
 	cv2.circle(img, center, radius, color, thickness=1, lineType=8, shift=0)
@@ -1107,16 +1131,16 @@ def drawCircle(img, center, radius, thickness=3, color=(150, 25, 25)):
 	center (CvPoint) – Center of the circle
 	radius (int) – Radius of the circle
 	color (CvScalar) – Circle color
-	thickness (int) – Thickness of the circle outline if positive, 
+	thickness (int) – Thickness of the circle outline if positive,
 		otherwise this indicates that a filled circle is to be drawn
 	lineType (int) – Type of the circle boundary, see Line description
 		8 (or omitted) - 8-connected line.
 		4 - 4-connected line.
 		CV_AA - antialiased line.
-	shift (int) – Number of fractional bits in the center coordinates and radius value	
+	shift (int) – Number of fractional bits in the center coordinates and radius value
 	'''
 	cv2.circle(img, center, radius, color, thickness, cv2.LINE_AA, 0)
-	
+
 def drawLine(img, p1, p2, thickness=3, color=(255,0,0)):
 	cv2.line(img, p1, p2, color, thickness, cv2.LINE_AA)
 
@@ -1137,13 +1161,13 @@ def drawText(img, text, position, fontScale=0.7, thickness=2, color=(255, 255, 2
 
 def res2rowscols(res):
 	'''
-	Split a screen resolution of form `widthxheight` into a list of 
+	Split a screen resolution of form `widthxheight` into a list of
 	2 integers: [rows, cols]
 	'''
 	[cols, rows] = res.split('x')
 	return [int(rows.strip()), int(cols.strip())]
-	
-	
+
+
 def roiDrawBox(img, box, color=(255,255,255)):
 	# check to see if the tracking was a success
 	(x, y, w, h) = [int(v) for v in box]
@@ -1156,19 +1180,19 @@ def roiDrawBox(img, box, color=(255,255,255)):
 	'''
 	cv2.putText(output['RPi'].myNumpyArray, 'tracking', (10, 25),
 		cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2, cv2.LINE_AA)
-	'''		
+	'''
 
 def roiTrack(roiTracker, img):
 	'''
 	Identify ROI
-	
+
 	This should only be called if ROI is actually active
 	(i.e., if the bounding box has been defined, self.roiBB is not None)
 	'''
 	try:
 		# grab the new bounding box coordinates of the object
 		# (success, box) = self.roiTracker[camType].update(output[camType].myNumpyArray)
-		(success, box) = roiTracker.update(img)			
+		(success, box) = roiTracker.update(img)
 
 	except Exception as e:
 		print('ROI Tracking failed: {}.'.format(str(e)))
@@ -1176,22 +1200,22 @@ def roiTrack(roiTracker, img):
 		# output[camType].setCamFunction(None)    # FIXME -- Need to update status to indicate we're no longer tracking ROI
 		success = False
 		box = None
-		
+
 	return (success, box)
 
 
 def countArucoInImage(img, arucoDict, arucoParams, drawDetections=False, labelDetections=False):
 	'''
 	Count how many ArUco markers are in an image, grouped by marker ID.
-	Returns a dictionary, where the keys are detected marker IDs, and the values are 
+	Returns a dictionary, where the keys are detected marker IDs, and the values are
 	the number of observations of the key ID.
 	'''
-	
+
 	(corners, ids, rejected, centers, rotations) = arucoDetectMarkers(img, arucoDict, arucoParams)
-	
+
 	print(ids)
 	IDcount = {}
-	
+
 	for i in range(0, len(corners)):
 		markerID = ids[i]
 		if (markerID in IDcount):
@@ -1201,14 +1225,14 @@ def countArucoInImage(img, arucoDict, arucoParams, drawDetections=False, labelDe
 
 	if (drawDetections):
 		arucoDrawDetections(img, corners, ids, centers=centers, rotations=rotations)
-			
+
 	return IDcount
-	
+
 
 
 def map_range(x, X_min, X_max, Y_min, Y_max):
-	''' 
-	Linear mapping between two ranges of values 
+	'''
+	Linear mapping between two ranges of values
 	'''
 
 	X_range = X_max - X_min
@@ -1219,7 +1243,7 @@ def map_range(x, X_min, X_max, Y_min, Y_max):
 	y = ((x-X_min) / XY_ratio + Y_min)
 
 	return y
-	
+
 def setEndingChar(string, endingChar):
 	'''
 	Make sure `string` ends in `endingChar`, without allowing duplicates.
@@ -1228,7 +1252,7 @@ def setEndingChar(string, endingChar):
 	if (string[-1] != endingChar):
 		string += endingChar
 	return string
-	
+
 def _passFunction(*args, **kwargs):
 	'''
 	a dummy function that does nothing
@@ -1244,63 +1268,63 @@ def ptAndAngleToNewPt(pt, angleRad, length):
 	return (pt[0] + length*math.sin(angleRad), pt[1] - length*math.cos(angleRad))
 
 
-		
-		
+
+
 def arucoFindTagIndices(idArray, targetID):
 	'''
-	Given a 1-D np array of IDs and a specific reference ID, 
+	Given a 1-D np array of IDs and a specific reference ID,
 	find the indices of the array that match the reference.
 	If no matches are found, return an empty tuple.
 	'''
 	try:
 		if (idArray is None):
 			return ()
-		
+
 		ids, = np.where(idArray.flatten() == targetID)
 		return ids  # This will be a tuple
-		
+
 	except Exception as e:
 		# raise Exception(e)
 		return ()
 
 def arucoFindTagIndicesList(idArray, targetIDlist):
 	'''
-	Given a 1-D np array of IDs and a python list of reference IDs, 
+	Given a 1-D np array of IDs and a python list of reference IDs,
 	find the indices of the array that match the reference.
 	If no matches are found, return an empty tuple.
 	'''
 	try:
 		if (idArray is None):
 			return ()
-		
+
 		ids, = np.where(np.isin(idArray.flatten(), targetIDlist))
 		return ids  # This will be a tuple
-		
+
 	except Exception as e:
 		# raise Exception(e)
 		return ()
-	
 
-"""	
+
+"""
 NO!  arucoDetectMarkers already returns `centers`
 def arucoFindTagCenterPixels(corners):
 	'''
-	Given the corners **for a single tag**, 
+	Given the corners **for a single tag**,
 	return the (x, y) pixel coordinates of the tag's center.
 	x is pixels from left of image; y is pixels from top of image.
-	
+
 	NOTE:  I'm pretty sure the x,y values are floats
 	'''
-	
+
 	try:
 		# Find midpoint, using corner points 1 (NE) and 3 (SW)
-		mp = ((corners[0][3][0] + corners[0][1][0])/2, 
-			  (corners[0][3][1] + corners[0][1][1])/2) 		
-		return mp	  
+		mp = ((corners[0][3][0] + corners[0][1][0])/2,
+			  (corners[0][3][1] + corners[0][1][1])/2)
+		return mp
 	except Exception as e:
 		# raise exception(e)?
 		return ()
-"""	
+"""
 
 def findTagPose(objPoints, corners, cameraMatrix, dist, flags=cv2.SOLVEPNP_IPPE_SQUARE):
 	'''
@@ -1624,7 +1648,7 @@ def checkPort(port):
             print(e)
         s.close()
         return False
-        
+
 def getIP():
 	"""Return the machine's primary outbound IP address.
 
@@ -1663,19 +1687,19 @@ def findOpenPort(port, options=range(8000,8011)):
 		for p in options:
 			if (checkPort(p)):
 				return p
-				
-	return None	
-		
+
+	return None
+
 def pics2video(sourcePath=None, filename=None, fps=30):
 	try:
-		
+
 		if sourcePath is None:
 			print('Error in pic2video - no sourcePath defined')
 			return
-			
+
 		sourcePath = setEndingChar(sourcePath, "/")
-				
-				
+
+
 		if filename is None:
 			myTimestamp = datetime.today()
 			filename = f"{myTimestamp.strftime('%Y-%m-%d-%H%M%S')}.mp4"
@@ -1688,7 +1712,7 @@ def pics2video(sourcePath=None, filename=None, fps=30):
 
 		# Create video:
 		# ffmpeg -r 1/5 -f concat -i list.txt -c:v libx264 -r 25 -pix_fmt yuv420p -t 15 out.mp4
-		# ffmpeg -r 1/5 -f concat -safe 0 -i list.txt -c:v libx264 -r 30 -pix_fmt yuv420p -vf scale=540:-2 -t 15 out.mp4 
+		# ffmpeg -r 1/5 -f concat -safe 0 -i list.txt -c:v libx264 -r 30 -pix_fmt yuv420p -vf scale=540:-2 -t 15 out.mp4
 		os.system(f"ffmpeg -r {fps} -f concat -safe 0 -i {sourcePath}list.txt -c:v libx264 -pix_fmt yuv420p -y {sourcePath}{filename}")
 
 		# Twitter doesn't like the format created above.

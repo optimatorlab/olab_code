@@ -17,7 +17,8 @@ import numpy as np
 
 import olab_utils				# A bunch of (somewhat) helpful functions and variables
 
-from .cv_features import _Aruco, _Calibrate, _Barcode, _QRCode, _FaceDetect, _Timelapse, _ROI, _Ultralytics
+from .cv_features import _Aruco, _Calibrate, _Barcode, _QRCode, _FaceDetect, _Timelapse, _ROI, _Ultralytics, _RFDETR
+from .tracking import _TrackerFeature, _normalise_payload
 from .streaming import (
 	StreamingHandler, StreamingServer, WebSocketStreamingServer, WebRTCStreamingServer,
 	_make_fps_dict, STREAM_MAX_WAIT_TIME_SEC, _HAS_WEBSOCKETS, _HAS_WEBRTC,
@@ -162,7 +163,7 @@ class Camera():
 		else:
 			self.reachback_pubCamStatus = olab_utils._passFunction
 
-		
+
 		# Turn keys in a dictionary into class attributes
 		# https://stackoverflow.com/questions/1639174/creating-class-instance-properties-from-a-dictionary
 		for k, v in paramDict.items():
@@ -181,14 +182,14 @@ class Camera():
 		# FIXME -- Do some validation on inputs (paramDict keys/values)
 		# `res_rows` and `res_cols` must be int values
 		# `fps_target` must be positive numeric (realistically, within some limits)
-				
+
 		# Info for calculating framerates.
 		# NOTE: aruco and roi (and barcode, etc) will be defined separately.
-		self.fps = {'capture': _make_fps_dict(recheckInterval=3), 
+		self.fps = {'capture': _make_fps_dict(recheckInterval=3),
 					'stream':  _make_fps_dict(recheckInterval=3),
 					'publish': _make_fps_dict(recheckInterval=5)}
 		self.showFPS = showFPS
-		
+
 		self.ipAllowlist = list(ipAllowlist)
 		self.ipBlocklist = list(ipBlocklist)
 
@@ -202,7 +203,7 @@ class Camera():
 		self._lastFrameTime = None
 
 		self.camOn = False		# FIXME -- Group the flags together
-		
+
 		self.numStreams      = 0
 		self.keepStreaming   = False
 		self.activeProtocol = None   # 'mjpeg' | 'websocket' | 'webrtc'
@@ -218,13 +219,13 @@ class Camera():
 		self._mjpegGeneration   = 0
 
 		self.keepPublishing = False   # _thread_ros
-		self.hasROSnode = False	
-			
+		self.hasROSnode = False
+
 		self.keepCalibrating = False  # _thread_calibrate
-			
+
 		self.zoomLevel    = 1.0
 		self.zoomFunction = self._zoomFunction_pass
-				
+
 		self.camTopicSubscriber = None    # Used by CameraROS (compressed image callback)
 
 		# self.pose: the vehicle body's own world-frame pose (set via setPose()),
@@ -245,9 +246,12 @@ class Camera():
 		self.timelapse   = {}
 		self.facedetect  = {}
 		self.ultralytics = {}
+		self.rfdetr      = {}
+		self.trackers    = {}
+		self._trackersLock = threading.Lock()
 		# self.decorations = {'aruco': [], 'roi': [], 'barcode': [], 'calibrate': []}
 		self.dec = {'active': [], 'dequeAdd': deque(), 'dequeRemove': deque(), 'dequeEdit': deque()}
- 
+
 		if (initROSnode):
 			self._init_ros_node()
 
@@ -292,8 +296,8 @@ class Camera():
 		'''
 		Clean up self.intrinsics, which is populated from the input parameters dictionary.
 		We might have something that looks like:
-			self.intrinsics = {'640x480': {'cx': 323.09833463, 'cy': 235.34434675, 'fx': 664.11131483, 'fy': 666.96448353, 
-										   'dist': [0.0541, -1.545, 0.003, -0.002, 5.536]}}		
+			self.intrinsics = {'640x480': {'cx': 323.09833463, 'cy': 235.34434675, 'fx': 664.11131483, 'fy': 666.96448353,
+										   'dist': [0.0541, -1.545, 0.003, -0.002, 5.536]}}
 		We'll clean this up (remove cx, cy, fx, fy) and add the camera matrix.
 		FIXME -- Should we delete cx, cy, fx, and fy?
 		If there are no intrinsics, we'll return an empty dictionary
@@ -305,7 +309,7 @@ class Camera():
 				if ('dist' in self.intrinsics[res]):
 					tmp['dist'] = np.array(self.intrinsics[res]['dist'])
 				if (all(k in self.intrinsics[res] for k in ('fx', 'fy', 'cx', 'cy'))):
-					tmp['matrix'] = np.array( [[ self.intrinsics[res]['fx'], 0.0,  self.intrinsics[res]['cx']], 
+					tmp['matrix'] = np.array( [[ self.intrinsics[res]['fx'], 0.0,  self.intrinsics[res]['cx']],
 											   [0.0,  self.intrinsics[res]['fy'],  self.intrinsics[res]['cy']], [0.0, 0.0, 1.0]] )
 				if (all(k in tmp for k in ('dist', 'matrix'))):
 					intr[res] = tmp
@@ -349,10 +353,10 @@ class Camera():
 		try:
 			rospy.init_node('olab_camera', anonymous=True)
 		except Exception as e:
-			self.logger.log(f'Error in _init_ros_node: {e}.', severity=olab_utils.SEVERITY_ERROR)			
+			self.logger.log(f'Error in _init_ros_node: {e}.', severity=olab_utils.SEVERITY_ERROR)
 		else:
 			self.hasROSnode = True
-			
+
 	def defaultFromNone(self, val, default, test=None):
 		"""Return a default value if val is None, optionally applying type conversion.
 
@@ -374,22 +378,22 @@ class Camera():
 		try:
 			if (val is None):
 				val = default
-				
+
 			if test in (int, float, str):
 				return test(val)
-			else: 
-				return val				
+			else:
+				return val
 		except Exception as e:
 			# raise Exception(f'Error in defaultFromNone: {e}')
 			self.logger.log(f'Error in defaultFromNone: {e}.', severity=olab_utils.SEVERITY_ERROR)
 
-		
+
 	def announceCondition(self):
 		# Let our web server (and ros video publisher, and camAuto) know we have a new frame:
 		with self.condition:
 			self.condition.notify_all()
 
-	def addAruco(self, idName=None, res_rows=None, res_cols=None, fps_target=5, calcRotations=True, postFunction=None, postFunctionArgs={}, configOverrides={}, ids_of_interest=None, decorate=True):
+	def addAruco(self, idName=None, res_rows=None, res_cols=None, fps_target=5, calcRotations=True, postFunction=None, postFunctionArgs=None, configOverrides=None, ids_of_interest=None, decorate=True):
 		"""Start ArUco marker detection in a separate thread.
 
 		Creates and starts an _Aruco instance that continuously detects ArUco markers in
@@ -440,8 +444,10 @@ class Camera():
 					self.logger.log(f'An aruco thread for {idName} is already running.', severity=olab_utils.SEVERITY_ERROR)
 					return
 
-			configDict = configDefaults
-			for k,v in configOverrides:
+			# Each detector owns its drawing settings.  Do not let a caller's
+			# overrides mutate the module defaults used by future detectors.
+			configDict = configDefaults.copy()
+			for k, v in (configOverrides or {}).items():
 				configDict[k] = v
 				if ('Color' in k):
 					configDict[k] = self.defaultFromNone(v, olab_utils.ARUCO_DICT[idName]['color'], None)
@@ -449,7 +455,7 @@ class Camera():
 			res_rows  = self.defaultFromNone(res_rows,  self.res_rows,   int)
 			res_cols  = self.defaultFromNone(res_cols,  self.res_cols,   int)
 
-			self.aruco[idName] = _Aruco(self, idName, res_rows, res_cols, int(fps_target), calcRotations, postFunction, postFunctionArgs, configDict, ids_of_interest, decorate)
+			self.aruco[idName] = _Aruco(self, idName, res_rows, res_cols, int(fps_target), calcRotations, postFunction, dict(postFunctionArgs or {}), configDict, ids_of_interest, decorate)
 
 			self.aruco[idName].start()
 
@@ -596,7 +602,7 @@ class Camera():
 			res_cols  = self.defaultFromNone(res_cols,  self.res_cols,   int)
 
 			self.barcode[idName] = _Barcode(self, idName, res_rows, res_cols, int(fps_target), postFunction, postFunctionArgs, color, decorate)
-			self.barcode[idName].start() 
+			self.barcode[idName].start()
 
 		except Exception as e:
 			self.logger.log(f'Error in addBarcode: {e}.', severity=olab_utils.SEVERITY_ERROR)
@@ -629,12 +635,12 @@ class Camera():
 		try:
 			# self.calibrate is a dictionary.  We'll limit ourselves to just 1 calibration thread, though.
 			idName = 'default'
-			
+
 			res_rows  = self.defaultFromNone(res_rows,  self.res_rows,   int)
 			res_cols  = self.defaultFromNone(res_cols,  self.res_cols,   int)
-			
+
 			self.calibrate[idName] = _Calibrate(self, idName, res_rows, res_cols, secBetweenImages, numImages, timeoutSec, pattern_size, square_size, postFunction)
-			self.calibrate[idName].start() 
+			self.calibrate[idName].start()
 
 		except Exception as e:
 			self.logger.log(f'Error in addCalibrate: {e}.', severity=olab_utils.SEVERITY_ERROR)
@@ -694,8 +700,8 @@ class Camera():
 
 		except Exception as e:
 			self.logger.log(f'Error in addFaceDetect: {e}.', severity=olab_utils.SEVERITY_ERROR)
-		
-	
+
+
 	def addROI(self, roiTrackerName=None, roiBB=None, fps_target=5, postFunction=None, color=(255,255,255), decorate=True):
 		"""Start region-of-interest (ROI) tracking using OpenCV object trackers.
 
@@ -735,7 +741,7 @@ class Camera():
 			# self.roi is a dictionary.  We'll limit ourselves to just 1 ROI thread. though.
 			idName = 'default'
 			self.roi[idName] = _ROI(self, idName, roiTrackerName, roiBB, int(fps_target), postFunction, color, decorate)
-			self.roi[idName].start() 
+			self.roi[idName].start()
 
 		except Exception as e:
 			self.logger.log(f'Error in addROI: {e}.', severity=olab_utils.SEVERITY_ERROR)
@@ -767,7 +773,7 @@ class Camera():
 			if (outputDir is None):
 				self.logger.log('Error in addTimelapse: outputDir is None', severity=olab_utils.SEVERITY_ERROR)
 				return
-			
+
 			if (timeLimitSec is not None):
 				if (timeLimitSec <= 0):
 					self.logger.log('Error in addTimelapse: timeLimitSec must be None or a positive number.', severity=olab_utils.SEVERITY_ERROR)
@@ -775,18 +781,18 @@ class Camera():
 
 			# self.timelapse is a dictionary.  We'll limit ourselves to just 1 timelapse thread, though.
 			idName = 'default'
-			
+
 			res_rows  = self.defaultFromNone(res_rows,  self.res_rows,   int)
 			res_cols  = self.defaultFromNone(res_cols,  self.res_cols,   int)
-			
+
 			self.timelapse[idName] = _Timelapse(self, idName, outputDir, secBetwPhotos, timeLimitSec, delayStartSec, res_rows, res_cols, postPostFunction)
-			self.timelapse[idName].start() 
+			self.timelapse[idName].start()
 
 		except Exception as e:
 			self.logger.log(f'Error in addTimelapse: {e}.', severity=olab_utils.SEVERITY_ERROR)
-		
 
-	def addUltralytics(self, idName=None, res_rows=None, res_cols=None, fps_target=None, postFunction=None, postFunctionArgs={}, color=(0,255,255), conf_threshold=0.25, model_name=None, verbose=False, drawBox=None, drawLabel=None, maskOutline=False, decorate=True):
+
+	def addUltralytics(self, idName=None, res_rows=None, res_cols=None, fps_target=None, postFunction=None, postFunctionArgs={}, color=(0,255,255), conf_threshold=0.25, model_name=None, verbose=False, drawBox=None, drawLabel=None, maskOutline=False, decorate=True, device='cpu'):
 		"""Start Ultralytics YOLO model inference for object detection, segmentation, or pose estimation.
 
 		Creates and starts an _Ultralytics instance that runs YOLO models on camera frames
@@ -814,6 +820,7 @@ class Camera():
 				inference without drawing on the stream. Cannot be changed dynamically --
 				it's only read once, at start(); to change it, stop() this feature and
 				call addUltralytics() again.
+			device (str): Local inference device, such as 'cpu' or 'cuda:0'.
 
 		Notes:
 			- Requires Ultralytics library installation.
@@ -831,31 +838,161 @@ class Camera():
 				# model_name should be something like "YOLO11n.pt" or "YOLO11n-cls.pt"
 				self.logger.log('Error in addUltralytics: model_name must be specified', severity=olab_utils.SEVERITY_ERROR)
 				return
-				
+
 			res_rows   = self.defaultFromNone(res_rows,   self.res_rows,   int)
 			res_cols   = self.defaultFromNone(res_cols,   self.res_cols,   int)
 			fps_target = self.defaultFromNone(fps_target, self.fps_target, int)
-			
-			self.ultralytics[idName] = _Ultralytics(self, idName, res_rows, res_cols, int(fps_target), postFunction, postFunctionArgs, color, conf_threshold, model_name, verbose, drawBox, drawLabel, maskOutline, decorate)
-			self.ultralytics[idName].start() 
-			
+
+			self.ultralytics[idName] = _Ultralytics(self, idName, res_rows, res_cols, int(fps_target), postFunction, postFunctionArgs, color, conf_threshold, model_name, verbose, drawBox, drawLabel, maskOutline, decorate, device)
+			self.ultralytics[idName].start()
+
 		except Exception as e:
 			self.logger.log(f'Error in addUltralytics: {e}.', severity=olab_utils.SEVERITY_ERROR)
-				
+
+	def addRFDETR(self, idName=None, task='detect', model_variant='small', weights_path=None,
+					 res_rows=None, res_cols=None, fps_target=None, postFunction=None, postFunctionArgs=None,
+					 color=(0,255,255), conf_threshold=0.25, tracker=None,
+					 drawBox=True, drawLabel=True, maskOutline=False, decorate=True, device='cpu'):
+		"""Start local RF-DETR detection or segmentation on camera frames.
+
+		`weights_path` must name an existing local checkpoint.  This method never
+		downloads model weights or uses hosted Roboflow inference.  Install the
+		optional dependency with ``olab-camera[rfdetr]`` first.
+		"""
+		try:
+			if not isinstance(idName, str) or not idName:
+				self.logger.log('Error in addRFDETR: idName must be a non-empty string', severity=olab_utils.SEVERITY_ERROR)
+				return
+			if task not in ('detect', 'segment'):
+				self.logger.log('Error in addRFDETR: task must be "detect" or "segment"', severity=olab_utils.SEVERITY_ERROR)
+				return
+			if model_variant not in ('nano', 'small', 'medium', 'large'):
+				self.logger.log('Error in addRFDETR: model_variant must be nano, small, medium, or large', severity=olab_utils.SEVERITY_ERROR)
+				return
+			if tracker not in (None, 'bytetrack'):
+				self.logger.log('Error in addRFDETR: tracker must be None or "bytetrack"', severity=olab_utils.SEVERITY_ERROR)
+				return
+			if not isinstance(device, str) or not device:
+				self.logger.log('Error in addRFDETR: device must be a non-empty string', severity=olab_utils.SEVERITY_ERROR)
+				return
+			if not isinstance(weights_path, (str, os.PathLike)):
+				self.logger.log('Error in addRFDETR: weights_path must name a local file', severity=olab_utils.SEVERITY_ERROR)
+				return
+			weights_path = os.fspath(weights_path)
+			if not os.path.isabs(weights_path):
+				weights_path = os.path.join(os.path.expanduser('~/Projects/olab_models'), weights_path)
+			if not os.path.isfile(weights_path):
+				self.logger.log(f'Error in addRFDETR: checkpoint not found: {weights_path}', severity=olab_utils.SEVERITY_ERROR)
+				return
+			if idName in self.rfdetr and self.rfdetr[idName].isThreadActive:
+				self.rfdetr[idName].stop()
+			res_rows = self.defaultFromNone(res_rows, self.res_rows, int)
+			res_cols = self.defaultFromNone(res_cols, self.res_cols, int)
+			fps_target = self.defaultFromNone(fps_target, self.fps_target, int)
+			self.rfdetr[idName] = _RFDETR(self, idName, task, model_variant, os.path.abspath(weights_path),
+				res_rows, res_cols, int(fps_target), postFunction, postFunctionArgs, color,
+				conf_threshold, tracker, drawBox, drawLabel, maskOutline, decorate, device)
+			if hasattr(self.rfdetr[idName], 'model'):
+				self.rfdetr[idName].start()
+		except Exception as e:
+			self.logger.log(f'Error in addRFDETR: {e}', severity=olab_utils.SEVERITY_ERROR)
+
+	def addTracker(self, idName=None, algorithm='bytetrack', *, fps_target=None,
+				   postFunction=None, postFunctionArgs=None, color=(0,255,255),
+				   drawBox=True, drawLabel=True, maskOutline=False, decorate=True):
+		"""Register one synchronous local multi-object tracker.
+
+		Use :meth:`updateTrackers` to submit detector-normalized results.  This
+		method never starts inference or frame-capture work of its own.
+		"""
+		try:
+			if not isinstance(idName, str) or not idName:
+				raise ValueError('idName must be a non-empty string')
+			if algorithm not in ('sort', 'bytetrack', 'ocsort', 'botsort'):
+				raise ValueError('algorithm must be sort, bytetrack, ocsort, or botsort')
+			fps_target = self.defaultFromNone(fps_target, self.fps_target, int)
+			if fps_target <= 0:
+				raise ValueError('fps_target must be positive')
+			new_feature = _TrackerFeature(self, idName, algorithm, int(fps_target),
+				postFunction, postFunctionArgs, color, drawBox, drawLabel, maskOutline, decorate)
+			with self._trackersLock:
+				old_feature = self.trackers.get(idName)
+				if old_feature is not None:
+					old_feature.stop()
+				new_feature.start()
+				self.trackers[idName] = new_feature
+		except Exception as e:
+			self.logger.log(f'Error in addTracker: {e}', severity=olab_utils.SEVERITY_ERROR)
+
+	def updateTrackers(self, detections, tracker_names, *, frame=None, timestamp=None):
+		"""Fan one detector-neutral payload out to explicitly named trackers."""
+		if isinstance(tracker_names, str):
+			names = [tracker_names]
+			selection_error = ValueError('tracker_names must be a sequence of strings, not a string')
+		else:
+			try:
+				names = list(tracker_names)
+				selection_error = None
+			except Exception as e:
+				names = []
+				selection_error = e
+		result_map = {name: None for name in names if isinstance(name, str)}
+		try:
+			if selection_error is not None:
+				raise selection_error
+			if not names or any(not isinstance(name, str) for name in names) or len(set(names)) != len(names):
+				raise ValueError('tracker_names must be a non-empty duplicate-free sequence of strings')
+		except Exception as e:
+			self.logger.log(f'Error in updateTrackers: {e}', severity=olab_utils.SEVERITY_ERROR)
+			return result_map
+		try:
+			payload = _normalise_payload(detections)
+			if frame is not None:
+				frame = np.array(frame, copy=True)
+				frame.setflags(write=False)
+			if timestamp is not None and (not np.isfinite(timestamp) or timestamp < 0):
+				raise ValueError('timestamp must be finite and non-negative')
+			with self._trackersLock:
+				features = [self.trackers.get(name) for name in names]
+			if any(feature is None or not feature.isThreadActive for feature in features):
+				raise ValueError('every requested tracker must be registered and active')
+			if timestamp is not None and any(feature._last_timestamp is not None and timestamp < feature._last_timestamp for feature in features):
+				raise ValueError('timestamp is earlier than a requested tracker\'s previous update')
+		except Exception as e:
+			self.logger.log(f'Error in updateTrackers: {e}', severity=olab_utils.SEVERITY_ERROR)
+			return result_map
+		for name, feature in zip(names, features):
+			try:
+				result_map[name] = feature.update(payload, frame=frame, timestamp=timestamp)
+			except Exception as e:
+				self.logger.log(f'Error updating tracker {name}: {e}', severity=olab_utils.SEVERITY_ERROR)
+		return result_map
+
+	def _stopTrackers(self):
+		"""Idempotently disarm synchronous tracker features during camera stop."""
+		with self._trackersLock:
+			features = list(self.trackers.values())
+			self.trackers.clear()
+		for feature in features:
+			try:
+				feature.stop()
+			except Exception as e:
+				self.logger.log(f'Error stopping tracker {feature.idName}: {e}', severity=olab_utils.SEVERITY_ERROR)
+
 
 	# FIXME -- Remove this function
 	def setCamFunction(self, functionType, framerate):
 		# FIXME -- Allow multiple simultaneous cam modes
-		#          Each runs in its own thread			
+		#          Each runs in its own thread
 		if (functionType == 'PRECISION_LAND_ARUCO'):
 			'''
 			self.camMode     = 'P-LAND'
 			'''
 			# self.arucoDict and self.arucoParams are set in ????() function?
-				
 
-						
-	def startStream(self, port, protocol='mjpeg', force=False, signalingMode='html'):
+
+
+	def startStream(self, port, protocol='mjpeg', force=False, signalingMode='html', bindHost='', advertisedHost=None):
 		"""Start a video streaming server on the specified port.
 
 		Launches a threaded server that streams camera frames to connected clients.
@@ -871,6 +1008,10 @@ class Camera():
 			signalingMode (str): WebRTC only. 'html' (default) serves a built-in
 				HTML+JS page at GET /webrtc. 'json' returns a JSON descriptor
 				instead, for integration into custom UIs.
+			bindHost (str): Interface address on which to listen. The default empty
+				string preserves the historical all-interface listener behavior.
+			advertisedHost (str or None): Host placed in the direct stream URL.
+				When None, preserves the historical `olab_utils.getIP()` behavior.
 
 		Notes:
 			- Server runs in a daemon thread and stops when the main program exits.
@@ -895,7 +1036,7 @@ class Camera():
 			self.activeProtocol = protocol
 			self.streamPort     = port
 
-			_ip = olab_utils.getIP()
+			_ip = olab_utils.getIP() if advertisedHost is None else advertisedHost
 			if protocol == 'mjpeg':
 				self.streamURL = f'https://{_ip}:{port}/stream.mjpg'
 			elif protocol == 'websocket':
@@ -907,11 +1048,11 @@ class Camera():
 				with self._mjpegLock:
 					self._mjpegGeneration += 1
 					generation = self._mjpegGeneration
-				strThread = threading.Thread(target=self._thread_stream_mjpeg, args=(port, generation))
+				strThread = threading.Thread(target=self._thread_stream_mjpeg, args=(port, generation, bindHost))
 			elif protocol == 'websocket':
-				strThread = threading.Thread(target=self._thread_stream_websocket, args=(port,))
+				strThread = threading.Thread(target=self._thread_stream_websocket, args=(port, bindHost))
 			elif protocol == 'webrtc':
-				strThread = threading.Thread(target=self._thread_stream_webrtc, args=(port, signalingMode))
+				strThread = threading.Thread(target=self._thread_stream_webrtc, args=(port, signalingMode, bindHost))
 
 			strThread.daemon = True
 			strThread.start()
@@ -962,10 +1103,10 @@ class Camera():
 			self.numStreams += incr
 			self.numStreams = max(0, self.numStreams)
 
-			self.reachback_pubCamStatus() 	
+			self.reachback_pubCamStatus()
 		except Exception as e:
 			self.logger.log(f'Error in streamIncr: {e}.', severity=olab_utils.SEVERITY_ERROR)
-			
+
 	def startROStopic(self, imgTopic='/camera/image/raw', compImgTopic='/camera/image/compressed'):
 		"""Start publishing camera frames to ROS image topics.
 
@@ -1007,7 +1148,7 @@ class Camera():
 		Sets the keepPublishing flag to False, causing the ROS publishing thread to terminate.
 		"""
 		self.keepPublishing = False
-									
+
 
 	def getFrame(self):
 		"""Return the most recent camera frame without copying.
@@ -1047,12 +1188,12 @@ class Camera():
 
 	def _frameCopy(self, frame):
 		return frame.copy()
-		
+
 
 	def _frameCopyGray(self, frame):
 		# FIXME -- cv2.COLOR_BGR2GRAY?  Do we have RGB or BGR?
 		return cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY);
-	
+
 
 	def getFrameCopyNext(self, colorOption=None, resOption=None, timeout=1):
 		"""Wait for the next camera frame and return a copy with optional transformations.
@@ -1072,9 +1213,9 @@ class Camera():
 		with self.condition:
 			self.condition.wait(timeout)
 
-		return self.getFrameCopy(colorOption=colorOption, resOption=resOption)	
-		 
-				
+		return self.getFrameCopy(colorOption=colorOption, resOption=resOption)
+
+
 	def getFrameCopy(self, colorOption=None, resOption=None):
 		"""Return a copy of the most recent camera frame with optional transformations.
 
@@ -1094,7 +1235,7 @@ class Camera():
 			- Resizing uses cv2.resize with default interpolation.
 		"""
 		# FIXME Need to do some error checking (can't copy `None`) and apply options.
-		
+
 		if colorOption == resOption == None:
 			# Just return a copy of the current frame
 			return self._frameCopy(self.frameDeque[0])
@@ -1102,17 +1243,17 @@ class Camera():
 		img = None
 		if (colorOption == 'gray'):
 			img = self._frameCopyGray(self.frameDeque[0])
-				
+
 		if (resOption is not None):
 			# resize creates a copy
 			if (img is None):
 				img = cv2.resize(self.frameDeque[0], resOption)
 			else:
 				img = cv2.resize(img, resOption)
-				
-		return img	       	
-	
-	
+
+		return img
+
+
 	def lastFrameAge(self):
 		"""Seconds since the most recent real frame was captured, or None if
 		no frame has ever arrived (or this subclass's capture loop doesn't
@@ -1132,7 +1273,7 @@ class Camera():
 	def calcFramerate(self, fpsDict, threadType=None):
 		'''
 		Find the effective framerate for 'capture', 'stream', or 'publish'.
-		Also, works for aruco dictionaries, roi, etc, as long as  
+		Also, works for aruco dictionaries, roi, etc, as long as
 		fpsDict is defined by the _make_fps_dict class.
 		Ex:  fpsDict = self.fps['capture']
 		threadType is a string:  'capture', 'stream', 'aruco', 'roi', 'barcode', 'publish'
@@ -1140,24 +1281,24 @@ class Camera():
 		try:
 			if (fpsDict.numFrames == 0):
 				fpsDict.startTime = datetime.datetime.now()
-				
+
 			fpsDict.numFrames += 1
 			t_elapsed = (datetime.datetime.now() - fpsDict.startTime).total_seconds()
 			if (t_elapsed >= fpsDict.recheckInterval):
 				if (threadType == 'stream'):
 					# Streams are inflating our FPS counts.  Divide by number of streams.
 					numStreams = max(self.numStreams, 1)
-					fpsDict.actual = int((fpsDict.numFrames / numStreams) / t_elapsed)				
-				else:	
+					fpsDict.actual = int((fpsDict.numFrames / numStreams) / t_elapsed)
+				else:
 					fpsDict.actual = int(fpsDict.numFrames / t_elapsed)
 				fpsDict.numFrames = 0
-				
+
 				self.reachback_pubCamStatus()
 		except Exception as e:
 			self.logger.log(f'Error in {threadType} calcFramerate: {e}.', severity=olab_utils.SEVERITY_ERROR)
-		
-	
-	
+
+
+
 	def addCircle(self, center, radius, thickness=3, color=(150, 25, 25)):
 		'''
 		Add a circle overlay to the video stream.
@@ -1198,28 +1339,28 @@ class Camera():
 		'''
 		self.dec['dequeRemove'].append(decorationID)
 
-	def manageDecorationsDeque(self):			
+	def manageDecorationsDeque(self):
 		# Add from decorations request add deque
 		while self.dec['dequeAdd']:
 			self.dec['active'].append(self.dec['dequeAdd'].popleft())
-			
+
 		# Remove from decorations request remove deque
 		while self.dec['dequeRemove']:
 			decorationID = self.dec['dequeRemove'][0]
-			
+
 			for q in self.dec['active']:
 				if q['decorationID'] == decorationID:
 					self.dec['active'].remove(q)
 					break
-			
+
 			self.dec['dequeRemove'].popleft()
-								
+
 		# Remove from decorations request edit deque
 		# This should involve a delete and an add.
 		while self.dec['dequeEdit']:
 			# First remove, then add.
 			idRemove = self.dec['dequeEdit'][0]['decorationID']
-			
+
 			for q in self.dec['active']:
 				if q['decorationID'] == idRemove:
 					self.dec['active'].remove(q)
@@ -1227,7 +1368,7 @@ class Camera():
 
 			self.dec['active'].append(self.dec['dequeEdit'].popleft())
 
-		
+
 	def decorateFrame(self, img):
 		'''
 		FIXME
@@ -1238,14 +1379,14 @@ class Camera():
 		for name in self.activeDecorators:
 			self._decorateProtoFunc[name](img)
 		'''
-			
+
 		try:
 			'''
 			if (len(self.decorations['aruco']) > 0):
 				for idName in self.decorations['aruco']:
 					olab_utils.arucoDrawDetections(img, self.aruco[idName].deque[0]['corners'],
-												   self.aruco[idName].deque[0]['ids'], 
-												   self.aruco[idName].deque[0]['centers'], 
+												   self.aruco[idName].deque[0]['ids'],
+												   self.aruco[idName].deque[0]['centers'],
 												   self.aruco[idName].deque[0]['rotations'], self.aruco[idName].config)
 			if (len(self.decorations['roi']) > 0):
 				for idName in self.decorations['roi']:
@@ -1257,40 +1398,40 @@ class Camera():
 				for idName in self.decorations['barcode']:
 					# print('idName:', idName, 'barcode[idName]:', self.barcode[idName].deque[0])
 					# print(self.barcode[idName].deque[0])
-					olab_utils.decorateBarcode(img, 
-											   self.barcode[idName].deque[0]['corners'], 
-											   self.barcode[idName].deque[0]['data'], 
+					olab_utils.decorateBarcode(img,
+											   self.barcode[idName].deque[0]['corners'],
+											   self.barcode[idName].deque[0]['data'],
 											   self.barcode[idName].deque[0]['color'], addText=True)
 
 			if (len(self.decorations['calibrate']) > 0):
 				for idName in self.decorations['calibrate']:
-					olab_utils.decorateCalibrate(img, 
-												 self.calibrate[idName].deque[0]['checkerboard'], 
-												 self.calibrate[idName].deque[0]['corners'], 
-												 self.calibrate[idName].deque[0]['count'], 
-												 self.calibrate[idName].deque[0]['img_x_y'], 
+					olab_utils.decorateCalibrate(img,
+												 self.calibrate[idName].deque[0]['checkerboard'],
+												 self.calibrate[idName].deque[0]['corners'],
+												 self.calibrate[idName].deque[0]['count'],
+												 self.calibrate[idName].deque[0]['img_x_y'],
 												 self.calibrate[idName].deque[0]['orig_x_y'], addText=True)
 			'''
 
 			'''
 			self.dec helps us manage decorations
 			self.dec['dequeAdd'] - A deque of decorations to be added.
-				This will be a list of dictionaries.  
+				This will be a list of dictionaries.
 				Each dictionary should have a the following keys:
 				- `decorationID`, whose value should be unique across the deque.
 				- `decorationFunction` - A convenience function that will later call the appropriate decorator
 					self.aruco[idName]._decorate(img, options)
 					olab_utils.decorateText(img, options)
 				- `idName`
-				
-			Allow decorating with text, shapes, etc.	
+
+			Allow decorating with text, shapes, etc.
 			'''
 
-			# Add to self.dec['active'] from self.dec['dequeAdd'], 
+			# Add to self.dec['active'] from self.dec['dequeAdd'],
 			# Remove from self.dec['active'] from self.dec['dequeRemove']
 			# Edit self.dec['active'] from self.dec['dequeEdit']
 			self.manageDecorationsDeque()
-			
+
 			for d in self.dec['active']:
 				d['function'](img = img, function = d['idName'])
 
@@ -1304,17 +1445,17 @@ class Camera():
 						cv2.FONT_HERSHEY_SIMPLEX,
 						0.5, (255, 255, 255), 1, cv2.LINE_AA)
 
-		
+
 		# FIXME -- Add some other text:
-		# stream/capture fps    ArUco     ROI	
-						
+		# stream/capture fps    ArUco     ROI
+
 	def _thread_ros(self, imgTopic, compImgTopic):
-		''' 
+		'''
 		See
 		* https://wiki.ros.org/cv_bridge/Tutorials/ConvertingBetweenROSImagesAndOpenCVImagesPython
-		* https://wiki.ros.org/rospy_tutorials/Tutorials/WritingImagePublisherSubscriber		
+		* https://wiki.ros.org/rospy_tutorials/Tutorials/WritingImagePublisherSubscriber
 		'''
-		
+
 		try:
 			if (imgTopic):
 				# /camera/image/raw
@@ -1323,44 +1464,44 @@ class Camera():
 			if (compImgTopic):
 				# /camera/image/compressed
 				comp_image_pub = rospy.Publisher(compImgTopic, CompressedImage, queue_size=2)
-				
+
 			while self.keepPublishing:
 				with self.condition:
 					success = self.condition.wait(ROSPUB_MAX_WAIT_TIME_SEC)
 
-				# We don't get here until the wait condition has finished 
+				# We don't get here until the wait condition has finished
 				if (success):
 					'''
 					FIXME -- Do we want to allow option to stream decorated frames?
 					# Must use a copy if we decorate the frame.
 					# Otherwise, our vision processing functions get messed up.
 					myNumpyArray = np.frombuffer(self.getFrameCopy(), dtype=np.uint8).reshape(self.res_rows, self.res_cols, 3)
-					# FIXME -- Do we really need to do all of this conversion?  Isn't getFrameCopy() sufficient?	
-						
+					# FIXME -- Do we really need to do all of this conversion?  Isn't getFrameCopy() sufficient?
+
 					# Add annotions/decorations
 					# updates myNumpyArray in-place
 					self.decorateFrame(myNumpyArray)
 					'''
 					myNumpyArray = np.frombuffer(self.getFrame(), dtype=np.uint8).reshape(self.res_rows, self.res_cols, 3)
-					# FIXME -- Do we really need to do all of this conversion?  Isn't getFrameCopy() sufficient?					
-					
+					# FIXME -- Do we really need to do all of this conversion?  Isn't getFrameCopy() sufficient?
+
 					if (imgTopic):
-						image_pub.publish(bridge.cv2_to_imgmsg(myNumpyArray, "bgr8"))	
+						image_pub.publish(bridge.cv2_to_imgmsg(myNumpyArray, "bgr8"))
 					if (compImgTopic):
 						msg = CompressedImage()
 						msg.header.stamp = rospy.Time.now()
 						msg.format = "jpeg"
 						msg.data = np.array(cv2.imencode('.jpg', myNumpyArray)[1]).tostring()
 						# Publish new image
-						comp_image_pub.publish(msg)	
-						
+						comp_image_pub.publish(msg)
+
 			self.logger.log('_thread_ros stopping', severity=olab_utils.SEVERITY_DEBUG)
-					
+
 		except Exception as e:
 			# raise Exception(f'_thread_ros error: {e}')
 			self.logger.log(f'_thread_ros error: {e}.', severity=olab_utils.SEVERITY_ERROR)
-				
-	def _thread_stream_mjpeg(self, portNumber, generation):
+
+	def _thread_stream_mjpeg(self, portNumber, generation, bindHost=''):
 		'''
 		THIS IS A THREAD
 		It starts/runs the MJPEG streaming server
@@ -1370,7 +1511,7 @@ class Camera():
 			try:
 				self._ensureSslPath()		# Generate a local cert now, if one doesn't exist yet.
 
-				address = ('', portNumber)
+				address = (bindHost, portNumber)
 				handler = partial(StreamingHandler, self)				# self --> This CamUSB instance
 
 				# --- make this server secure (ssl/https) ---
@@ -1436,7 +1577,7 @@ class Camera():
 		except Exception as e:
 			self.logger.log(f'_thread_stream_mjpeg error: {e}.', severity=olab_utils.SEVERITY_ERROR)
 
-	def _thread_stream_websocket(self, portNumber):
+	def _thread_stream_websocket(self, portNumber, bindHost=''):
 		'''
 		THIS IS A THREAD
 		It starts/runs the WebSocket streaming server.
@@ -1460,7 +1601,7 @@ class Camera():
 					certfile = f'{self.sslPath}/ca.crt')
 
 				ws_server = WebSocketStreamingServer(self)
-				asyncio.run(ws_server.serve(portNumber, ssl_context))
+				asyncio.run(ws_server.serve(portNumber, ssl_context, bindHost))
 
 			finally:
 				self.logger.log('stopping _thread_stream_websocket thread', severity=olab_utils.SEVERITY_INFO)
@@ -1468,7 +1609,7 @@ class Camera():
 		except Exception as e:
 			self.logger.log(f'_thread_stream_websocket error: {e}.', severity=olab_utils.SEVERITY_ERROR)
 
-	def _thread_stream_webrtc(self, portNumber, signalingMode):
+	def _thread_stream_webrtc(self, portNumber, signalingMode, bindHost=''):
 		'''
 		THIS IS A THREAD
 		It starts/runs the WebRTC signaling server and manages peer connections.
@@ -1492,17 +1633,17 @@ class Camera():
 					certfile = f'{self.sslPath}/ca.crt')
 
 				webrtc_server = WebRTCStreamingServer(self, signalingMode)
-				asyncio.run(webrtc_server.serve(portNumber, ssl_context))
+				asyncio.run(webrtc_server.serve(portNumber, ssl_context, bindHost))
 
 			finally:
 				self.logger.log('stopping _thread_stream_webrtc thread', severity=olab_utils.SEVERITY_INFO)
 
 		except Exception as e:
-			self.logger.log(f'_thread_stream_webrtc error: {e}.', severity=olab_utils.SEVERITY_ERROR)	
-			
-			
+			self.logger.log(f'_thread_stream_webrtc error: {e}.', severity=olab_utils.SEVERITY_ERROR)
+
+
 	def _zoomFunction_cv2(self, frame):
-		''' 
+		'''
 		Apply digital zoom to input frame
 		See `cropAndZoom(self, img)` from aaa_camclasses.py
 		'''
@@ -1516,44 +1657,44 @@ class Camera():
 			# This was *close*, but was a couple of pixels off
 			# self.frame = cv2.resize( img, (0, 0), fx=self.zoomLevel, fy=self.zoomLevel)
 			frame = cv2.resize( img, (self.res_cols, self.res_rows), interpolation = cv2.INTER_LINEAR)
-			
-			return frame			
+
+			return frame
 		except Exception as e:
 			# raise Exception(f'_zoomFunction_cv2 error: {e}')
-			self.logger.log(f'_zoomFunction_cv2 error: {e}.', severity=olab_utils.SEVERITY_ERROR)	
+			self.logger.log(f'_zoomFunction_cv2 error: {e}.', severity=olab_utils.SEVERITY_ERROR)
 			return frame		# Just return the input?
 
 	def _zoomFunction_pass(self, frame):
 		return frame
-		
-			
+
+
 	def _changeZoom(self, zoomLevel):
 		'''
 		This is shared between ROS (sim/clover), USB, and Voxl.  Pi has its own zoom.
-		
+
 		We need to set the `zoomCrop...` parameters each time the zoom level changes.
 		Then, we crop/resize the image before writing/publishing (in the appropriate thread camClass thread).
 		'''
 		try:
 			w = self.res_cols
 			h = self.res_rows
-			
+
 			cx = w / 2
 			cy = h / 2
-			
+
 			self.zoomCropXmin = int(round(cx - w/zoomLevel * 0.5))
 			self.zoomCropXmax = int(round(cx + w/zoomLevel * 0.5))
 			self.zoomCropYmin = int(round(cy - h/zoomLevel * 0.5))
 			self.zoomCropYmax = int(round(cy + h/zoomLevel * 0.5))
-						
+
 			self.updateZoom(zoomLevel)
-			
+
 		except Exception as e:
 			# raise Exception(f'Could not _changeZoom to {zoomLevel}x: {e}.')
-			self.logger.log(f'Could not _changeZoom to {zoomLevel}x: {e}.', severity=olab_utils.SEVERITY_ERROR)							
-			
-			
-	
+			self.logger.log(f'Could not _changeZoom to {zoomLevel}x: {e}.', severity=olab_utils.SEVERITY_ERROR)
+
+
+
 	def updateResolution(self, rows, cols):
 		"""Update internal resolution attributes after resolution change.
 
@@ -1629,20 +1770,20 @@ class Camera():
 			- Automatically creates output directory if it doesn't exist.
 		"""
 		try:
-			if (timeout > 0):			
+			if (timeout > 0):
 				myNumpyArray = self.getFrameCopyNext(colorOption=colorOption, resOption=resOption, timeout=timeout)
 			else:
 				myNumpyArray = self.getFrameCopy(colorOption=colorOption, resOption=resOption)
-			
+
 			if (filename is None):
 				myTimestamp = datetime.datetime.today()
 				# myDate = '{}'.format(myTimestamp.strftime('%Y-%m-%d'))
 				# myTime = '{}'.format(myTimestamp.strftime('%H:%M:%S'))
-					
+
 				filename = "{}.jpg".format(myTimestamp.strftime('%Y-%m-%d_%H-%M-%S'))
 			else:
 				filename = filename.strip()
-								
+
 			if (path is None):
 				path = ''
 				pathAndFile = f'{filename}'
@@ -1650,24 +1791,24 @@ class Camera():
 				# Make sure path ends in `/`
 				path = olab_utils.setEndingChar(path, '/')
 				pathAndFile = f'{path}{filename}'
-			
+
 			# Create directory (if it does not already exist)
 			if (not os.path.exists(path)):
-				print(f'Directory {path} does not exist.  Making it now.')            
+				print(f'Directory {path} does not exist.  Making it now.')
 				os.makedirs(path, exist_ok=True)
-										
+
 			cv2.imwrite(f'{pathAndFile}', myNumpyArray)
 
 			# print(myNumpyArray)
 			print(f'Saved image: {pathAndFile}')
-			
+
 			return (path, filename)
-			
+
 		except Exception as e:
-			self.logger.log(f'Error taking photo: {e}', severity=olab_utils.SEVERITY_ERROR)							
+			self.logger.log(f'Error taking photo: {e}', severity=olab_utils.SEVERITY_ERROR)
 			return (None, None)
-		
-			
+
+
 
 
 
@@ -1768,5 +1909,3 @@ class Camera():
 			thread.join(timeout=timeout)
 		self._videoRecordStopEvent = None
 		self._videoRecordThread = None
-
-

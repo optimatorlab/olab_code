@@ -83,6 +83,43 @@ def test_stopStream_releases_the_mjpeg_port_for_immediate_reuse(tmp_path):
     _assert_port_bindable(port)
 
 
+def test_loopback_bound_mjpeg_advertises_override_and_releases_port(tmp_path):
+    """A private playground stream must bind only to loopback, advertise the
+    requested hostname, and leave no listener after stop."""
+    cam = _make_camera(tmp_path)
+    cam.startStream(0, protocol='mjpeg', bindHost='127.0.0.1', advertisedHost='localhost')
+
+    server = _wait_for_mjpeg_server(cam)
+    assert server is not None
+    port = server.server_address[1]
+    assert server.server_address[0] == '127.0.0.1'
+    # `startStream(0, ...)` records the literal caller-supplied port before
+    # the worker receives the OS-assigned ephemeral port. Verify the new
+    # advertised-host behavior without asserting an impossible URL port.
+    assert cam.streamURL.startswith('https://localhost:')
+    assert cam.streamURL.endswith('/stream.mjpg')
+
+    cam.stopStream()
+
+    _assert_port_bindable(port)
+
+
+def test_stopStream_closes_all_interface_listener_after_public_bind(tmp_path):
+    """The explicit LAN-visible binding is gone after stop, not just hidden
+    from playground state."""
+    cam = _make_camera(tmp_path)
+    cam.startStream(0, protocol='mjpeg', bindHost='0.0.0.0', advertisedHost='192.0.2.10')
+
+    server = _wait_for_mjpeg_server(cam)
+    assert server is not None
+    port = server.server_address[1]
+    assert server.server_address[0] == '0.0.0.0'
+
+    cam.stopStream()
+
+    _assert_port_bindable(port)
+
+
 def test_mjpegServer_is_none_after_stopStream(tmp_path):
     cam = _make_camera(tmp_path)
     cam.startStream(0, protocol='mjpeg')

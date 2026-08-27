@@ -60,8 +60,8 @@ class _make_fps_dict():
 		self.actual          = 0
 		self.recheckInterval = recheckInterval  # [seconds]
 
-		
-		
+
+
 class StreamingHandler(server.BaseHTTPRequestHandler):
 	"""HTTP request handler for MJPEG video streaming.
 
@@ -96,11 +96,11 @@ class StreamingHandler(server.BaseHTTPRequestHandler):
 		# BaseHTTPRequestHandler calls do_GET **inside** __init__ !!!
 		# So we have to call super().__init__ after setting attributes.
 		super().__init__(*args, **kwargs)
-			
+
 	def _error(self):
 		self.send_error(404)
 		self.end_headers()
-					 
+
 	def do_GET(self):
 		# print(f'DEBUG: path? {self.path}')
 		# print(f'DEBUG: clientIP: {self.client_address}')
@@ -128,8 +128,8 @@ class StreamingHandler(server.BaseHTTPRequestHandler):
 						break
 					with self.camObject.condition:
 						success = self.camObject.condition.wait(STREAM_MAX_WAIT_TIME_SEC)
-					
-					# We don't get here until the wait condition has finished 
+
+					# We don't get here until the wait condition has finished
 					if success:
 						# A wake-up can occur before the first capture frame is
 						# published. Treat that as normal startup and wait again rather
@@ -141,20 +141,20 @@ class StreamingHandler(server.BaseHTTPRequestHandler):
 						# Otherwise, our vision processing functions get messed up.
 						# myNumpyArray = np.frombuffer(self.camObject.frame, dtype=np.uint8).reshape(self.camObject.res_rows, self.camObject.res_cols, 3)
 						myNumpyArray = np.frombuffer(self.camObject.getFrameCopy(), dtype=np.uint8).reshape(self.camObject.res_rows, self.camObject.res_cols, 3)
-							
+
 						# Add annotions/decorations
 						# updates myNumpyArray in-place
 						self.camObject.decorateFrame(myNumpyArray)
-															
+
 						frame = cv2.imencode('.jpg',myNumpyArray)[1]
-							
+
 						self.wfile.write(b'--FRAME\r\n')
 						self.send_header('Content-Type', 'image/jpeg')
 						self.send_header('Content-Length', len(frame))
 						self.end_headers()
 						self.wfile.write(frame)
 						self.wfile.write(b'\r\n')
-						
+
 						self.camObject.calcFramerate(self.camObject.fps['stream'], 'stream')
 			except (BrokenPipeError, ConnectionResetError, ssl.SSLEOFError):
 				self.camObject.streamIncr(-1)
@@ -381,14 +381,15 @@ class WebSocketStreamingServer:
 			websockets.broadcast(self.clients, jpeg.tobytes())
 			self.camObject.calcFramerate(self.camObject.fps['stream'], 'stream')
 
-	async def serve(self, port, ssl_context):
+	async def serve(self, port, ssl_context, bindHost=''):
 		"""Start the WebSocket server and run the broadcaster until stopped.
 
 		Args:
 			port (int): TCP port to listen on.
 			ssl_context (ssl.SSLContext): TLS context for wss:// connections.
+			bindHost (str): Interface address on which to listen.
 		"""
-		async with websockets.serve(self._handler, '', port, ssl=ssl_context):
+		async with websockets.serve(self._handler, bindHost, port, ssl=ssl_context):
 			await self._broadcaster()
 
 
@@ -571,12 +572,13 @@ class WebRTCStreamingServer:
 			'type': pc.localDescription.type,
 		})
 
-	async def serve(self, port, ssl_context):
+	async def serve(self, port, ssl_context, bindHost=''):
 		"""Start the signaling server and run until keepStreaming goes False.
 
 		Args:
 			port (int): TCP port to listen on.
 			ssl_context (ssl.SSLContext): TLS context for https:// connections.
+			bindHost (str): Interface address on which to listen.
 		"""
 		app = aiohttp.web.Application()
 		app.router.add_get( '/webrtc', self._handle_webrtc_page)
@@ -584,7 +586,7 @@ class WebRTCStreamingServer:
 
 		runner = aiohttp.web.AppRunner(app)
 		await runner.setup()
-		site = aiohttp.web.TCPSite(runner, '', port, ssl_context=ssl_context)
+		site = aiohttp.web.TCPSite(runner, bindHost, port, ssl_context=ssl_context)
 		await site.start()
 
 		try:
@@ -595,4 +597,3 @@ class WebRTCStreamingServer:
 				await pc.close()
 			self.pcs.clear()
 			await runner.cleanup()
-

@@ -954,6 +954,117 @@ camera.facedetect['default'].stop()
 
 ---
 
+### Generic local multi-object tracking
+
+Install the local-only tracking extra in this checkout's virtual environment:
+
+```bash
+./venv/bin/pip install -e "packages/olab_camera[tracking]"
+```
+
+`addTracker()` owns tracker state, callbacks, the latest-result deque, and an
+optional stream overlay; it does not own a detector or a worker thread. Submit
+one normalized detector result to explicitly named trackers to compare the
+same sequence under SORT, ByteTrack, OC-SORT, or BoT-SORT. `xyxy` is the only
+required field; `class_id`, `class`, `class_conf`, and `masks` may be omitted.
+
+```python
+from olab_camera import Camera
+
+camera = Camera({'res_rows': 480, 'res_cols': 640, 'fps_target': 30})
+for name, algorithm in [('sort', 'sort'), ('byte', 'bytetrack'),
+                        ('oc', 'ocsort'), ('bot', 'botsort')]:
+    camera.addTracker(name, algorithm, decorate=False)
+
+results = camera.updateTrackers(
+    {'xyxy': [[20, 30, 120, 190]], 'class_id': [0],
+     'class': ['person'], 'class_conf': [0.95]},
+    ('sort', 'byte', 'oc', 'bot'), timestamp=12.5,
+)
+```
+
+Each successful mapping entry is that tracker's normalized latest result;
+`None` means that named backend/callback failed. A malformed payload, or an
+invalid selection containing one or more string names, returns each supplied
+string name as `None` without advancing any backend.
+Track IDs are local to one tracker instance and reset when it is stopped or
+re-added. The same stream must have only one tracking owner: prefer
+Ultralytics' native tracking when it meets the need, and do not feed already
+native-tracked results into this API. RF-DETR's existing
+`tracker='bytetrack'` remains independent.
+
+All four initial algorithms run locally and this API downloads neither models
+nor tracker assets. McByte is intentionally deferred; its mask mode will need
+explicit pre-provisioned local assets. The `trackers` dependency may install
+plain OpenCV; if that displaces this package's required contrib runtime, use
+the README's existing OpenCV recovery command.
+
+### RF-DETR (local detection and segmentation)
+
+RF-DETR is optional: install `olab-camera[rfdetr]` and provision model
+checkpoints in `~/Projects/olab_models/` before starting the program. Relative
+`weights_path` names resolve in that shared user directory; absolute paths are
+also accepted. Keep the project's
+`opencv-contrib-python` runtime active. `addRFDETR()` never downloads weights
+and never uses a hosted Roboflow service.
+
+#### One-time model provisioning
+
+The published starter checkpoints are hosted by Roboflow.  If that external
+download is permitted, make it an explicit setup action (not a runtime side
+effect) and save the model in the shared local root:
+
+```bash
+mkdir -p "$HOME/Projects/olab_models"
+python -c "from pathlib import Path; from rfdetr.assets.model_weights import download_pretrain_weights; download_pretrain_weights(str(Path.home() / 'Projects' / 'olab_models' / 'rf-detr-small.pth'))"
+```
+
+For the segmentation-plus-ByteTrack example, provision its separate checkpoint:
+
+```bash
+python -c "from pathlib import Path; from rfdetr.assets.model_weights import download_pretrain_weights; download_pretrain_weights(str(Path.home() / 'Projects' / 'olab_models' / 'rf-detr-seg-small.pt'))"
+```
+
+For a strict air-gapped workflow, obtain and approve the same checkpoint by
+your normal artifact-transfer process, then place it at
+`~/Projects/olab_models/rf-detr-small.pth`.  The camera API and the runnable
+examples make no network request in either case.
+
+RF-DETR runs on `device='cpu'` by default, avoiding an accidental CUDA setup
+dependency. Pass an explicit device such as `device='cuda'` only after your
+PyTorch/CUDA/cuDNN installation is known to work. The runnable USB examples
+also start an MJPEG stream on port 8000 by default and print its URL; pass
+`--stream-port 0` to disable it.
+
+```python
+# Detection: local checkpoint only.  The callback gets both a small normalized
+# snapshot and the native supervision.Detections object for advanced use.
+def rfdetr_detected(args):
+    for label, box in zip(args['result']['class'], args['result']['xyxy']):
+        print(label, box)
+
+camera.addRFDETR(
+    idName='warehouse-detect', task='detect', model_variant='small',
+    weights_path='rf-detr-small.pth', fps_target=5, device='cpu',
+    postFunction=rfdetr_detected,
+)
+```
+
+```python
+# Segmentation + local ByteTrack.  Each retained mask corresponds to the same
+# row in class/xyxy/track_id; -1 means the tracker has not confirmed a track.
+camera.addRFDETR(
+    idName='warehouse-segment', task='segment', model_variant='small',
+    weights_path='rf-detr-seg-small.pt', tracker='bytetrack',
+    fps_target=5, maskOutline=True,
+)
+
+latest = camera.rfdetr['warehouse-segment'].deque[0]
+for track_id, mask in zip(latest['track_id'], latest['masks']):
+    if track_id >= 0:
+        print(track_id, mask.sum())
+```
+
 ### Ultralytics
 The following options are documented:
 - Detect
@@ -1263,4 +1374,3 @@ camera.removeDecoration(tid)
 ### Region of Interest (ROI)
 - Deprecated.  This functionality would (poorly) track a selected object.  The Ultralytics tracking is better (although it's limited to trained objects).
 - `addROI()` also accepts `decorate=True` (default; set `False` to track without drawing the tracking box on the stream), same as the other detection methods above.
-

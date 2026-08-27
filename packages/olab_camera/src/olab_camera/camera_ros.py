@@ -88,12 +88,7 @@ class CameraROS(Camera):
 		# In make_asset class we replace {} with the assetID (where applicable)
 		# self.topic = "/soar_rover/{}/sim_cam/image_raw/compressed"
 		# self.topic = "/main_camera/image_raw/compressed"
-		# self.topic = "/optical_flow/debug/compressed"			
-		
-		# from gazebo_msgs.msg import LinkState
-		# from gazebo_msgs.srv import SetLinkState	
-		from gazebo_msgs.msg import ODEJointProperties
-		from gazebo_msgs.srv import SetJointProperties	
+		# self.topic = "/optical_flow/debug/compressed"
 
 		self.camTopicSubscriber = None
 		
@@ -279,6 +274,7 @@ class CameraROS(Camera):
 
 	def stop(self):
 		try:
+			self._stopTrackers()
 			self.stopStream()
 			if (self.camTopicSubscriber is not None):
 				self.camTopicSubscriber.unregister()

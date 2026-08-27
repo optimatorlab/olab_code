@@ -115,7 +115,7 @@ class CameraUSB(Camera):
 			frameProcessor(frame) after zoomFunction. Return a frame to stream it,
 			or return None to drop the frame (not streamed, not published to ROS).
 	"""
-	
+
 	def __init__(self, paramDict={'res_rows':480, 'res_cols':640, 'fps_target':30, 'outputPort': 8000}, device='/dev/video0',
 		apiPref=cv2.CAP_ANY, fourcc=None, logger=None, sslPath=None, pubCamStatusFunction=None, imgTopic=None, compImgTopic=None,
 		initROSnode=False, showFPS=True, ipAllowlist=[], ipBlocklist=[]):
@@ -155,16 +155,16 @@ class CameraUSB(Camera):
 		"""
 
 		super().__init__(paramDict, logger, sslPath, pubCamStatusFunction, initROSnode, showFPS, ipAllowlist, ipBlocklist)
-		
+
 		# FIXME -- Do some validation on inputs (in addition to what is in Camera)
 		# `device` must be present (but it could be a key in paramDict??)
 		# `apiPref` must be present
 		# `fourcc` could be a key in paramDict
-		
+
 		if (not hasattr(self, 'device')):
-			self.device  = device   
+			self.device  = device
 		if (not hasattr(self, 'fourcc')):
-			self.fourcc  = fourcc   
+			self.fourcc  = fourcc
 
 		if apiPref is None:
 			apiPref = cv2.CAP_ANY
@@ -181,8 +181,8 @@ class CameraUSB(Camera):
 		self._capture_thread  = None
 		self._capture_running = False
 		self.frameProcessor   = None   # optional callable(frame) -> frame | None
-				
-				
+
+
 	def _startCaptureThread(self):
 		"""Start the background frame capture thread."""
 		self._capture_running = True
@@ -234,8 +234,8 @@ class CameraUSB(Camera):
 				self.logger.log(f'Error in CameraUSB capture loop: {e}', severity=olab_utils.SEVERITY_ERROR)
 
 		self.camOn = False
-				
-			
+
+
 	def start(self, assetID=None, res_rows=None, res_cols=None, framerate=None, device=None, apiPref=None, startStream=False, port=None, protocol='mjpeg', imgTopic=None, compImgTopic=None):
 		"""Start camera capture and optionally start streaming/publishing.
 
@@ -318,7 +318,7 @@ class CameraUSB(Camera):
 			self.reachback_pubCamStatus()
 		except Exception as e:
 			self.logger.log(f'Error in camera start: {e}', severity=olab_utils.SEVERITY_ERROR)
-	
+
 	def stop(self, stopStream=True):
 		"""Stop the capture thread and release VideoCapture.
 
@@ -326,6 +326,7 @@ class CameraUSB(Camera):
 			stopStream (bool): Whether to also stop the streaming server.
 				Set False when changing resolution/framerate mid-stream.
 		"""
+		self._stopTrackers()
 		self.camOn = False
 		self._stopCaptureThread()
 		if self.cap is not None:
@@ -335,15 +336,15 @@ class CameraUSB(Camera):
 		# We may choose not to stop the stream if we are changing resolution/framerate.
 		if stopStream:
 			self.stopStream()
-		
+
 	def shutdown(self):
 		'''
 		Might be as simple as calling self.stop()
 		'''
 		self.stop()
 		time.sleep(STREAM_MAX_WAIT_TIME_SEC + 1)
-		
-			
+
+
 	def changeResolutionFramerate(self, res_rows=None, res_cols=None, framerate=None):
 		"""Change camera resolution and/or framerate.
 
@@ -419,7 +420,7 @@ class CameraUSB(Camera):
 		"""
 		# This requires a numpy zoom/crop for each frame?
 		self._changeZoom(zoomLevel)
-					    
+
 
 	def fourcc2text(self):
 		# Find the 4-letter text description of our FOURCC property
@@ -431,4 +432,3 @@ class CameraUSB(Camera):
 # ---------------------------------------------------------------------------
 # WebSocket frame-receiver — sim / virtual camera
 # ---------------------------------------------------------------------------
-

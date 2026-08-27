@@ -1,0 +1,21 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "olab-playground"
+version = "0.1.0"
+description = "Local-first HTTPS playground for olab_code packages."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["olab-camera"]
+
+[project.scripts]
+olab-playground = "olab_playground.camera:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/olab_playground"]
+artifacts = ["src/olab_playground/static/**"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
