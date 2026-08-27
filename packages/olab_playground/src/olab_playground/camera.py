@@ -56,6 +56,59 @@ BACKENDS = {
     "CameraOpenMV": CameraOpenMV,
     "AVWebcam": AVWebcam,
 }
+DISABLED_PLAYGROUND_BACKENDS = {"CameraGazebo", "CameraPi", "CameraPi2"}
+REALSENSE_GUIDE = {
+    "color": {"res_rows": 480, "res_cols": 640, "fps_target": 30},
+    "depth": {"res_rows": None, "res_cols": None, "framerate": None},
+    "streamSources": ("color", "depth"),
+    "depthColorSchemes": tuple(range(10)),
+}
+OPENMV_GUIDE = {
+    "genx_histogram_preview": {
+        "label": "Histogram preview",
+        "capabilities": ("frame preview",),
+        "resolution": (320, 320),
+        "rateKey": "histogram_rate_hz",
+        "rateLabel": "Histogram rate (Hz)",
+        "settings": {
+            "histogram_rate_hz": {"default": 50, "minimum": 20, "maximum": 350},
+            "baseline_brightness": {"default": 128, "minimum": 0, "maximum": 255},
+            "contrast": {"default": 16, "minimum": 1},
+            "bias_preset": {"default": "default", "choices": ("default", "low_light", "active_marker", "low_noise", "high_speed")},
+            "anti_flicker": {"default": "off", "choices": ("off", "50hz", "60hz")},
+            "hot_pixel_calibration": {"default": "off", "choices": ("off", "auto")},
+            "display_palette": {"default": "grayscale", "choices": ("grayscale", "turbo")},
+        },
+    },
+    "genx_histogram_regions": {
+        "label": "Histogram movement regions",
+        "capabilities": ("frame preview", "movement regions"),
+        "resolution": (320, 320),
+        "rateKey": "histogram_rate_hz",
+        "rateLabel": "Histogram rate (Hz)",
+        "settings": {
+            "histogram_rate_hz": {"default": 100, "minimum": 20, "maximum": 350},
+            "report_rate_hz": {"default": 25, "minimum": 1, "maximum": 100},
+            "pixels_threshold": {"default": 20, "minimum": 1},
+            "area_threshold": {"default": 9, "minimum": 1},
+            "max_regions": {"default": 3, "minimum": 1},
+            "display_palette": {"default": "grayscale", "choices": ("grayscale", "turbo")},
+        },
+    },
+    "genx_raw_events": {
+        "label": "Raw events",
+        "capabilities": ("raw events", "preview frames"),
+        "resolution": (320, 320),
+        "rateKey": "preview_rate_hz",
+        "rateLabel": "Preview rate (Hz)",
+        "settings": {
+            "preview_rate_hz": {"default": 30, "minimum": 1, "maximum": 120},
+            "preview_enabled": {"default": True, "type": "boolean"},
+            "event_buffer_size": {"default": 8192, "choices": (1024, 2048, 4096, 8192, 16384, 32768, 65536)},
+            "callback_queue_size": {"default": 8, "minimum": 1},
+        },
+    },
+}
 FEATURES = (
     "addAruco", "addQR", "addBarcode", "addCalibrate", "addFaceDetect",
     "addROI", "addTimelapse", "addUltralytics", "addRFDETR", "addTracker",
@@ -288,8 +341,10 @@ class PlaygroundSession:
         payload: dict[str, Any] = {"backends": {}, "features": {}, "primaryIP": olab_utils.getIP(), "streamPort": self._ports[0] if self._ports else None, "streamPortRange": f"{self._ports[0]}–{self._ports[-1]}" if self._ports else "unavailable"}
         for name, cls in BACKENDS.items():
             dependency = OPTIONAL_HINTS.get(name)
-            available = dependency is None or importlib.util.find_spec(dependency[0]) is not None
-            payload["backends"][name] = {"constructor": _schema(cls), "start": _schema(getattr(cls, "start", lambda: None)), "available": available, "hint": None if available else f'pip install "olab-camera[{dependency[1]}]"'}
+            disabled = name in DISABLED_PLAYGROUND_BACKENDS
+            available = not disabled and (dependency is None or importlib.util.find_spec(dependency[0]) is not None)
+            hint = "disabled in this playground" if disabled else (None if available else f'pip install "olab-camera[{dependency[1]}]"')
+            payload["backends"][name] = {"constructor": _schema(cls), "start": _schema(getattr(cls, "start", lambda: None)), "available": available, "hint": hint}
         for name in FEATURES:
             payload["features"][name] = _schema(getattr(CameraUSB, name))
         payload["aruco"] = {
@@ -316,6 +371,7 @@ class PlaygroundSession:
             "rfdetr": rfdetr_models,
             "face": ["face_detection_yunet_2023mar.onnx", "face_detection_yunet_2023mar_int8.onnx"],
         }
+        payload["guidedBackends"] = {"realsense": REALSENSE_GUIDE, "openmv": OPENMV_GUIDE}
         payload["callbacks"] = {"detector": sorted(GUIDED_CALLBACKS)}
         payload["stream"] = _schema(CameraUSB.startStream)
         payload["protocols"] = {name: {"available": importlib.util.find_spec(module) is not None, "hint": f'pip install "olab-camera[{extra}]"'} for name, (module, extra) in OPTIONAL_HINTS.items() if name in {"websocket", "webrtc"}}
@@ -334,6 +390,101 @@ class PlaygroundSession:
         if self.model_root not in path.parents or not path.is_file() or path.suffix.lower() not in suffixes:
             raise ValueError("model must be an existing file under the configured local model root")
         return str(path)
+
+    @staticmethod
+    def _positive_int(value: Any, name: str, *, required: bool = False) -> int | None:
+        if value is None and not required:
+            return None
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(f"{name} must be a positive integer")
+        return value
+
+    def _prepare_realsense(self, init: dict[str, Any], start: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+        allowed_init = {"paramDict", "serial_number", "enableDepth", "enableIMU", "streamSource",
+                        "depth_res_rows", "depth_res_cols", "depth_framerate", "alignDepthToColor",
+                        "enableDepthFilters", "depth_color_scheme", "imu_accel_rate", "imu_gyro_rate"}
+        allowed_start = {"res_rows", "res_cols", "framerate", "depth_res_rows", "depth_res_cols", "depth_framerate"}
+        if not set(init).issubset(allowed_init) or not set(start).issubset(allowed_start):
+            raise ValueError("unsupported RealSense playground setting")
+        init, start = dict(init), dict(start)
+        param_dict = init.get("paramDict", {})
+        if not isinstance(param_dict, dict) or set(param_dict) - {"res_rows", "res_cols", "fps_target", "outputPort"}:
+            raise ValueError("RealSense color settings are invalid")
+        color = {**REALSENSE_GUIDE["color"], **param_dict}
+        for name in ("res_rows", "res_cols", "fps_target"):
+            self._positive_int(color[name], f"color {name}", required=True)
+        init["paramDict"] = color
+        serial = init.get("serial_number")
+        if serial is not None and (not isinstance(serial, str) or not serial.strip()):
+            raise ValueError("RealSense serial number must be blank or a nonempty string")
+        if serial is not None:
+            init["serial_number"] = serial.strip()
+        for name in ("enableDepth", "enableIMU", "alignDepthToColor", "enableDepthFilters"):
+            if name in init and not isinstance(init[name], bool):
+                raise ValueError(f"RealSense {name} must be true or false")
+        source = init.get("streamSource", "color")
+        if source not in REALSENSE_GUIDE["streamSources"]:
+            raise ValueError("choose color or depth preview")
+        if source == "depth" and not init.get("enableDepth", False):
+            raise ValueError("depth preview requires depth to be enabled")
+        scheme = init.get("depth_color_scheme")
+        if scheme is not None:
+            if source != "depth" or scheme not in REALSENSE_GUIDE["depthColorSchemes"]:
+                raise ValueError("depth color scheme requires depth preview")
+        for name in ("depth_res_rows", "depth_res_cols", "depth_framerate"):
+            if name in init:
+                self._positive_int(init[name], name)
+            if name in start:
+                self._positive_int(start[name], name)
+        for name in ("imu_accel_rate", "imu_gyro_rate"):
+            if name in init:
+                self._positive_int(init[name], name)
+                if not init.get("enableIMU", False):
+                    raise ValueError(f"{name} requires IMU to be enabled")
+        return init, start
+
+    def _prepare_openmv(self, init: dict[str, Any], start: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+        if set(init) - {"devicePort", "profile", "profile_kwargs"} or set(start) - {"res_rows", "res_cols", "framerate"}:
+            raise ValueError("unsupported OpenMV playground setting")
+        init, start = dict(init), dict(start)
+        port = init.get("devicePort")
+        if not isinstance(port, str) or not port.strip():
+            raise ValueError("OpenMV device path must be a nonempty string")
+        port = port.strip()
+        if not port.startswith("/dev/") or "\x00" in port:
+            raise ValueError("OpenMV device path must be a local /dev/ serial path")
+        init["devicePort"] = port
+        profile_name = init.get("profile")
+        profile = OPENMV_GUIDE.get(profile_name)
+        if profile is None:
+            raise ValueError("choose a supported OpenMV profile")
+        kwargs = init.get("profile_kwargs", {})
+        if not isinstance(kwargs, dict) or set(kwargs) - set(profile["settings"]):
+            raise ValueError("OpenMV profile settings are invalid")
+        cleaned = {}
+        for name, value in kwargs.items():
+            spec = profile["settings"][name]
+            if spec.get("type") == "boolean":
+                if not isinstance(value, bool):
+                    raise ValueError(f"{name} must be true or false")
+            elif "choices" in spec:
+                if value not in spec["choices"]:
+                    raise ValueError(f"{name} is not supported by the selected profile")
+            else:
+                self._positive_int(value, name, required=True)
+                if value < spec.get("minimum", 1) or value > spec.get("maximum", value):
+                    raise ValueError(f"{name} is outside the supported range")
+            cleaned[name] = value
+        if profile_name == "genx_histogram_regions" and cleaned.get("report_rate_hz", profile["settings"]["report_rate_hz"]["default"]) > cleaned.get("histogram_rate_hz", profile["settings"]["histogram_rate_hz"]["default"]):
+            raise ValueError("report rate cannot exceed histogram rate")
+        for name, value in start.items():
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValueError(f"OpenMV {name} must be an integer")
+            expected = profile["resolution"][0 if name == "res_rows" else 1] if name in {"res_rows", "res_cols"} else None
+            if expected is None or value != expected:
+                raise ValueError(f"OpenMV {name} is owned by the selected profile")
+        init["profile_kwargs"] = cleaned
+        return init, start
 
     @staticmethod
     def _color(kwargs: dict[str, Any]) -> None:
@@ -561,12 +712,19 @@ class PlaygroundSession:
     def start(self, backend: str, init: dict[str, Any], start: dict[str, Any], stream: dict[str, Any]) -> None:
         if backend not in BACKENDS:
             raise ValueError(f"unknown backend: {backend}")
+        if backend in DISABLED_PLAYGROUND_BACKENDS:
+            raise ValueError(f"backend is disabled in this playground: {backend}")
         with self._lock:
             self._stop_locked()
             self._last_error = None
             try:
                 cls = BACKENDS[backend]
                 init = dict(init)
+                start = dict(start)
+                if backend == "CameraRealSense":
+                    init, start = self._prepare_realsense(init, start)
+                elif backend == "CameraOpenMV":
+                    init, start = self._prepare_openmv(init, start)
                 if backend != "AVWebcam" and "sslPath" not in init:
                     init["sslPath"] = self.camera_ssl_path
                 if backend == "CameraUSB" and stream.get("enabled"):

@@ -310,3 +310,57 @@ def test_browser_feature_output_compacts_report_callback_and_preserves_no_mask_s
     assert session._feature_outputs["addRFDETR:segment"] == {"class": ["person"], "maskCount": 1, "masksOmitted": True, "detectionsOmitted": True}
     assert _browser_feature_output({"xyxy": [[1, 2, 3, 4]], "masks_data": [], "masks_xy": []}) == {"xyxy": [[1, 2, 3, 4]], "masks_data": [], "masks_xy": []}
     assert _browser_feature_output({"xyxy": [[1, 2, 3, 4]], "masks": []}) == {"xyxy": [[1, 2, 3, 4]], "masks": []}
+
+
+def test_playground_catalog_disables_pi_and_gazebo_backends(tmp_path: Path):
+    session = _session(tmp_path)
+    backends = session.schema()["backends"]
+    for backend in ("CameraGazebo", "CameraPi", "CameraPi2"):
+        assert backends[backend]["available"] is False
+        assert backends[backend]["hint"] == "disabled in this playground"
+        with pytest.raises(ValueError, match="disabled in this playground"):
+            session.start(backend, {}, {}, {"enabled": False})
+
+
+def test_realsense_guide_defaults_and_cross_field_preflight(tmp_path: Path):
+    session = _session(tmp_path)
+    guide = session.schema()["guidedBackends"]["realsense"]
+    assert guide["color"] == {"res_rows": 480, "res_cols": 640, "fps_target": 30}
+    init, start = session._prepare_realsense({"enableDepth": True, "streamSource": "depth", "depth_color_scheme": 2}, {})
+    assert init["paramDict"]["res_cols"] == 640
+    assert start == {}
+    with pytest.raises(ValueError, match="requires depth"):
+        session._prepare_realsense({"streamSource": "depth"}, {})
+    with pytest.raises(ValueError, match="color scheme requires depth preview"):
+        session._prepare_realsense({"enableDepth": True, "streamSource": "color", "depth_color_scheme": 2}, {})
+
+
+def test_openmv_guide_only_accepts_matching_profile_configuration(tmp_path: Path):
+    session = _session(tmp_path)
+    guide = session.schema()["guidedBackends"]["openmv"]
+    assert set(guide) == {"genx_histogram_preview", "genx_histogram_regions", "genx_raw_events"}
+    init, start = session._prepare_openmv({"devicePort": " /dev/ttyACM0 ", "profile": "genx_histogram_regions", "profile_kwargs": {"histogram_rate_hz": 100, "report_rate_hz": 25}}, {"res_rows": 320, "res_cols": 320})
+    assert init["devicePort"] == "/dev/ttyACM0"
+    assert init["profile_kwargs"] == {"histogram_rate_hz": 100, "report_rate_hz": 25}
+    assert start == {"res_rows": 320, "res_cols": 320}
+    with pytest.raises(ValueError, match="supported OpenMV profile"):
+        session._prepare_openmv({"devicePort": "/dev/ttyACM0", "profile": "other", "profile_kwargs": {}}, {})
+    with pytest.raises(ValueError, match="profile settings are invalid"):
+        session._prepare_openmv({"devicePort": "/dev/ttyACM0", "profile": "genx_raw_events", "profile_kwargs": {"contrast": 1}}, {})
+    with pytest.raises(ValueError, match="local /dev/ serial path"):
+        session._prepare_openmv({"devicePort": "tcp://openmv.local", "profile": "genx_raw_events", "profile_kwargs": {}}, {})
+    with pytest.raises(ValueError, match="owned by the selected profile"):
+        session._prepare_openmv({"devicePort": "/dev/ttyACM0", "profile": "genx_histogram_preview", "profile_kwargs": {}}, {"res_rows": 640})
+
+
+def test_backend_renderer_dispatches_to_guided_realsense_and_openmv_cards():
+    source = (Path(__file__).parents[1] / "src" / "olab_playground" / "static" / "app.js").read_text()
+    styles = (Path(__file__).parents[1] / "src" / "olab_playground" / "static" / "styles.css").read_text()
+    assert "function realSenseForm()" in source
+    assert "function openMVForm()" in source
+    assert "name === 'CameraRealSense'" in source
+    assert "name === 'CameraOpenMV'" in source
+    assert "<option ${spec.available ? '' : 'disabled'}>" in source
+    assert 'id="rs-imu" type="checkbox" disabled' in source
+    assert "$('rs-imu-options').hidden = !$('rs-imu').checked" in source
+    assert "[hidden] { display: none !important; }" in styles
