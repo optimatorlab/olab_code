@@ -392,8 +392,35 @@ The iterator exposes the same capture and segmentation controls as
 - `min_segment_ms=400`: discard shorter completed transmissions.
 - `max_segment_sec=20.0`: force-close longer transmissions so one stuck signal
   does not produce an unbounded payload.
-- `rtl_fm_squelch_db=None`: optional decoder-side `rtl_fm -l` squelch. Leave it
-  unset for the default Python-side gating.
+- Squelch is handled by the Python carrier gate, not by `rtl_fm`. There is no
+  `rtl_fm_squelch_db` parameter: the gate detects FM *quieting* -- the drop in
+  hiss when a signal appears -- so `rtl_fm -l` would remove the very signal the
+  gate measures against. Gate-side squelch is also live-tunable, which an
+  exec-time flag cannot be. `rtl_fm_command()` still accepts `squelch_db` for
+  scan-mode callers, since `rtl_fm`'s multi-`-f` scanning requires `-l`.
+- `detector_mode="rms_quieting"`: carrier detector. `rms_quieting` compares frame
+  level against a learned floor; `hf_ratio` uses 2-6 kHz over 300-2000 Hz band
+  energy, which separates hiss from voice where level alone does not; `hybrid`
+  requires both. Note `rms_quieting` cannot open on a transmission *louder* than
+  the learned floor -- that is what quieting means -- which is why the mode is
+  selectable rather than fixed.
+- `max_floor_drift_db_per_sec=6.0`: how fast the learned floor may move, in **dB
+  per second**. It bounds speed, not destination, so a floor learned in the wrong
+  conditions can still recover to a correct value.
+- `silence_floor_db=-60.0`: frames quieter than this are never treated as a
+  carrier. Band-energy ratio alone is a "not hissy" test rather than a "signal
+  present" one, and digital silence scores 0.0.
+- `dc_block=True`, `deemphasis_us=75.0`, `normalize=False`: audio conditioning,
+  applied in Python to emitted audio only. The detector always measures raw PCM,
+  so changing conditioning cannot move a detector threshold.
+- `fir_size=None`, `atan_math=None`, `extra_args=None`: startup-only `rtl_fm`
+  settings (`-F`, `-A`, and a validated passthrough). Values configured under
+  `decoders.rtl_fm` in `olab_rf.yaml` supply the defaults; explicit arguments win.
+
+Wideband FM is refused below 32 kHz: `-M wbfm` is an `rtl_fm` preset carrying an
+implied `-r 32k`, and a lower `-s` makes its resampler divide by zero and abort
+the process with SIGFPE. `rtl_fm_command()` raises rather than emitting a command
+that kills the receiver.
 
 For an initial live test, use the defaults and save debug WAVs. If a weak
 carrier is missed, lower `threshold_db` in 2–3 dB steps. If static alone opens
@@ -424,9 +451,16 @@ manager.reset_voice_segment_calibration()
 ```
 
 `threshold_db`, `min_active_ms`, `hang_time_ms`, `min_segment_ms`,
-`max_segment_sec`, and `pre_roll_ms` are live-adjustable. Frequency,
-modulation, gain, sample rate, and backend changes require a new SDR session.
-Live speaker tee playback is future work.
+`max_segment_sec`, `pre_roll_ms`, `detector_mode`, `hf_ratio_threshold`,
+`max_floor_drift_db_per_sec`, `silence_floor_db`, `dc_block`, `deemphasis_us`,
+`normalize`, and `normalize_target_dbfs` are live-adjustable.
+
+Gain, ppm, frequency and sample rate are fixed when `rtl_fm` execs. Change them
+with `manager.restart_voice_capture(**overrides)`, which refuses during an active
+segment, preserves completed-but-unpopped segments and events, and carries run
+counters across the respawn. A `sample_rate_hz` change additionally rebuilds the
+segmenter and so discards the learned noise floor. Backend changes still require
+a new session. Live speaker tee playback is future work.
 
 ### Automated Capture And Status
 

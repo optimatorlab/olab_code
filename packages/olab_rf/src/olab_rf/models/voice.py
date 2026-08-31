@@ -36,6 +36,14 @@ class RadioVoiceSegment:
     noise_floor_db: float
     threshold_db: float
     channels: int = 1
+    # Conditioned-domain measurements. Separate fields rather than redefining
+    # rms_db/peak_db, so `rms_db - noise_floor_db` stays arithmetically valid for
+    # existing consumers of the rf.voice.segment payload. The raw fields are
+    # measured pre-conditioning and correctly do not move when conditioning
+    # changes -- that is the chain-order rule, not a bug to fix.
+    conditioned_rms_db: float | None = None
+    conditioned_peak_db: float | None = None
+    conditioned_band_ratio: float | None = None
     wav_path: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -73,6 +81,9 @@ class RadioVoiceSegment:
             "peak_db": self.peak_db,
             "noise_floor_db": self.noise_floor_db,
             "threshold_db": self.threshold_db,
+            "conditioned_rms_db": self.conditioned_rms_db,
+            "conditioned_peak_db": self.conditioned_peak_db,
+            "conditioned_band_ratio": self.conditioned_band_ratio,
             "wav_path": self.wav_path,
             "metadata": self.metadata,
         }
@@ -111,6 +122,10 @@ class VoiceSegmentStatus:
     completed_segments: int = 0
     dropped_segments: int = 0
     error: str | None = None
+    detector_mode: str = "rms_quieting"
+    last_frame_band_ratio: float | None = None
+    recalibrating: bool = False
+    capped_closes: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -128,6 +143,10 @@ class VoiceSegmentStatus:
             "completed_segments": self.completed_segments,
             "dropped_segments": self.dropped_segments,
             "error": self.error,
+            "detector_mode": self.detector_mode,
+            "last_frame_band_ratio": self.last_frame_band_ratio,
+            "recalibrating": self.recalibrating,
+            "capped_closes": self.capped_closes,
         }
 
 

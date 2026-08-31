@@ -43,7 +43,7 @@ from olab_rf.services.iq_candidates import candidate_from_iq_peak
 from olab_rf.services.range_scanner import build_frequency_range_scan_plan
 from olab_rf.services.track_store import TrackStore
 from olab_rf.services.frequency_catalog import FrequencyCatalog
-from olab_rf.services.voice_segments import PcmAudioBackend, RadioVoiceSegmenter, RtlFmAudioBackend
+from olab_rf.services.voice_segments import AudioConditioner, PcmAudioBackend, RadioVoiceSegmenter, RtlFmAudioBackend
 from olab_rf.models.tracks import utc_now
 
 
@@ -95,6 +95,7 @@ class SessionManager:
     _voice_events: list[VoiceCaptureEvent] = field(default_factory=list)
     _voice_event_callback: Callable[[VoiceCaptureEvent], None] | None = None
     _voice_segment_callback: Callable[[RadioVoiceSegment], None] | None = None
+    _voice_params: dict[str, object] = field(default_factory=dict)
     spectrum_history_limit: int = 60
     spectrum_event_limit: int = 100
 
@@ -693,7 +694,6 @@ class SessionManager:
         path: str | None = None,
         gain_db: float | None = None,
         sample_rate_hz: int = 16_000,
-        rtl_fm_squelch_db: int | None = None,
         frame_ms: int = 40,
         threshold_db: float = 10.0,
         min_active_ms: int = 120,
@@ -701,6 +701,18 @@ class SessionManager:
         min_segment_ms: int = 400,
         max_segment_sec: float = 20.0,
         pre_roll_ms: int = 200,
+        detector_mode: str = "rms_quieting",
+        hf_ratio_threshold: float = 1.2,
+        max_floor_drift_db_per_sec: float = 6.0,
+        recalibration_ms: int = 1_000,
+        silence_floor_db: float = -60.0,
+        dc_block: bool = True,
+        deemphasis_us: float | None = 75.0,
+        normalize: bool = False,
+        normalize_target_dbfs: float = -20.0,
+        fir_size: int | None = None,
+        atan_math: str | None = None,
+        extra_args: list[str] | None = None,
         auto_poll: bool = False,
         poll_interval_sec: float = 0.05,
         on_event: Callable[[VoiceCaptureEvent], None] | None = None,
@@ -723,6 +735,11 @@ class SessionManager:
         )
         if backend == "rtl_fm":
             path = path or self._decoder_path("rtl_fm", "rtl_fm")
+            config_fir, config_atan, config_args = self._decoder_settings("rtl_fm")
+            # Explicit call arguments win; config supplies the default.
+            fir_size = fir_size if fir_size is not None else config_fir
+            atan_math = atan_math if atan_math is not None else config_atan
+            extra_args = extra_args if extra_args is not None else config_args
             voice_backend: PcmAudioBackend = RtlFmAudioBackend(
                 path=path,
                 frequency_hz=frequency_hz,
@@ -731,7 +748,9 @@ class SessionManager:
                 frame_ms=frame_ms,
                 ppm=self.receiver.ppm,
                 gain_db=gain_db,
-                squelch_db=rtl_fm_squelch_db,
+                fir_size=fir_size,
+                atan_math=atan_math,
+                extra_args=extra_args,
             )
             session.command = voice_backend.command
         elif isinstance(backend, str):
@@ -754,7 +773,50 @@ class SessionManager:
             min_segment_ms=min_segment_ms,
             max_segment_sec=max_segment_sec,
             pre_roll_ms=pre_roll_ms,
+            detector_mode=detector_mode,
+            hf_ratio_threshold=hf_ratio_threshold,
+            max_floor_drift_db_per_sec=max_floor_drift_db_per_sec,
+            recalibration_ms=recalibration_ms,
+            silence_floor_db=silence_floor_db,
+            conditioner=AudioConditioner(
+                sample_rate_hz=sample_rate_hz,
+                dc_block=dc_block,
+                deemphasis_us=deemphasis_us,
+                normalize=normalize,
+                normalize_target_dbfs=normalize_target_dbfs,
+            ),
         )
+        self._voice_params = {
+            "frequency_hz": frequency_hz,
+            "modulation": modulation,
+            "backend": backend,
+            "path": path,
+            "gain_db": gain_db,
+            "sample_rate_hz": sample_rate_hz,
+            "frame_ms": frame_ms,
+            "threshold_db": threshold_db,
+            "min_active_ms": min_active_ms,
+            "hang_time_ms": hang_time_ms,
+            "min_segment_ms": min_segment_ms,
+            "max_segment_sec": max_segment_sec,
+            "pre_roll_ms": pre_roll_ms,
+            "detector_mode": detector_mode,
+            "hf_ratio_threshold": hf_ratio_threshold,
+            "max_floor_drift_db_per_sec": max_floor_drift_db_per_sec,
+            "recalibration_ms": recalibration_ms,
+            "silence_floor_db": silence_floor_db,
+            "dc_block": dc_block,
+            "deemphasis_us": deemphasis_us,
+            "normalize": normalize,
+            "normalize_target_dbfs": normalize_target_dbfs,
+            "fir_size": fir_size,
+            "atan_math": atan_math,
+            "extra_args": extra_args,
+            "auto_poll": auto_poll,
+            "poll_interval_sec": poll_interval_sec,
+            "on_event": on_event,
+            "on_segment": on_segment,
+        }
         self._voice_segments.clear()
         self._voice_events.clear()
         self._voice_event_callback = on_event
@@ -864,11 +926,21 @@ class SessionManager:
         min_segment_ms: int | None = None,
         max_segment_sec: float | None = None,
         pre_roll_ms: int | None = None,
+        detector_mode: str | None = None,
+        hf_ratio_threshold: float | None = None,
+        max_floor_drift_db_per_sec: float | None = None,
+        silence_floor_db: float | None = None,
+        dc_block: bool | None = None,
+        deemphasis_us: float | None = None,
+        disable_deemphasis: bool = False,
+        normalize: bool | None = None,
+        normalize_target_dbfs: float | None = None,
     ) -> VoiceSegmentStatus:
-        """Update carrier-gate settings without interrupting active PCM capture.
+        """Update gate and audio-conditioning settings without interrupting capture.
 
-        Frequency, modulation, gain, sample rate, and backend changes still
-        require a new voice session because they change the SDR process.
+        Conditioning is live because it runs in Python on the PCM stream rather
+        than inside ``rtl_fm``. Frequency, gain, ppm, sample rate, and backend
+        still require a respawn -- see ``restart_voice_capture``.
         """
         if (
             self.session is None
@@ -884,8 +956,97 @@ class SessionManager:
                 min_segment_ms=min_segment_ms,
                 max_segment_sec=max_segment_sec,
                 pre_roll_ms=pre_roll_ms,
+                detector_mode=detector_mode,
+                hf_ratio_threshold=hf_ratio_threshold,
+                max_floor_drift_db_per_sec=max_floor_drift_db_per_sec,
+                silence_floor_db=silence_floor_db,
+                dc_block=dc_block,
+                deemphasis_us=deemphasis_us,
+                disable_deemphasis=disable_deemphasis,
+                normalize=normalize,
+                normalize_target_dbfs=normalize_target_dbfs,
             )
             return self._voice_segmenter.status(error=self.status.error)
+
+    def restart_voice_capture(self, **overrides: object) -> RadioSession:
+        """Respawn the receiver for a startup-only parameter change.
+
+        Gain, ppm, frequency and sample rate are fixed when ``rtl_fm`` execs, so
+        changing them means a new process. These guarantees live here rather than
+        in a UI, because every ``SessionManager`` consumer needs them:
+
+        * **Refuses during an active segment.** ``reset_calibration()`` raises
+          there anyway, and force-closing would truncate a live transmission.
+        * **Preserves completed-but-unpopped segments and events.**
+          ``start_voice_segments()`` clears both, which during a capture run would
+          be silent data loss rather than a cosmetic reset.
+        * **Carries run counters**, so totals stay monotonic across a respawn.
+
+        A ``sample_rate_hz`` change additionally rebuilds the segmenter and so
+        discards the learned noise floor -- unavoidable, since the byte caps and
+        frame sizing derive from the rate at construction.
+
+        Callers who injected a backend object must pass a fresh one in
+        ``overrides``: the existing instance has already been stopped, and reusing
+        it would restart a dead process.
+        """
+        if (
+            self.session is None
+            or self.session.mode != "voice_segments"
+            or self._voice_segmenter is None
+        ):
+            raise RuntimeError("voice segment capture is not active")
+
+        # Ordering matters twice over. Stop the poller first so the active-segment
+        # check cannot race a transmission starting between check and stop; then,
+        # if we must refuse, restart it before raising -- an earlier version
+        # refused *after* stopping and never restarted, so frame consumption died,
+        # the segment could never end, and the remedy the error recommends became
+        # unreachable. The session wedged on its own guard.
+        was_auto_polling = self._voice_poll_thread is not None
+        poll_interval = float(self._voice_params.get("poll_interval_sec", 0.05) or 0.05)
+        self._stop_voice_auto_poll()
+        with self._poll_lock:
+            status = self._voice_segmenter.status()
+        if status.active:
+            if was_auto_polling and self._voice_backend is not None:
+                self._start_voice_auto_poll(poll_interval)
+            raise RuntimeError(
+                "cannot respawn the receiver during an active segment; "
+                "apply startup parameters between transmissions"
+            )
+
+        with self._poll_lock:
+            pending_segments = list(self._voice_segments)
+            pending_events = list(self._voice_events)
+            carried = (
+                status.completed_segments,
+                status.dropped_segments,
+                status.capped_closes,
+            )
+            params = dict(self._voice_params)
+        params.update(overrides)
+
+        try:
+            session = self.start_voice_segments(**params)  # type: ignore[arg-type]
+        except Exception:
+            # Do not leave the caller with a dead poller and a dropped backlog
+            # because the respawn failed.
+            with self._poll_lock:
+                self._voice_segments[:0] = pending_segments
+                self._voice_events[:0] = pending_events
+            if was_auto_polling and self._voice_backend is not None:
+                self._start_voice_auto_poll(poll_interval)
+            raise
+
+        with self._poll_lock:
+            self._voice_segments[:0] = pending_segments
+            self._voice_events[:0] = pending_events
+            if self._voice_segmenter is not None:
+                self._voice_segmenter.carry_counters(
+                    completed=carried[0], dropped=carried[1], capped_closes=carried[2]
+                )
+        return session
 
     def reset_voice_segment_calibration(self) -> VoiceSegmentStatus:
         """Reset the idle FM-noise estimate without restarting PCM capture."""
@@ -908,7 +1069,6 @@ class SessionManager:
         path: str | None = None,
         gain_db: float | None = None,
         sample_rate_hz: int = 16_000,
-        rtl_fm_squelch_db: int | None = None,
         frame_ms: int = 40,
         threshold_db: float = 10.0,
         min_active_ms: int = 120,
@@ -932,7 +1092,6 @@ class SessionManager:
             path=path,
             gain_db=gain_db,
             sample_rate_hz=sample_rate_hz,
-            rtl_fm_squelch_db=rtl_fm_squelch_db,
             frame_ms=frame_ms,
             threshold_db=threshold_db,
             min_active_ms=min_active_ms,
@@ -1268,6 +1427,18 @@ class SessionManager:
         self._clear_spectrum()
         if clear_previous:
             self._previous_request = None
+
+    def _decoder_settings(self, name: str) -> tuple[int | None, str | None, list[str]]:
+        """Return configured ``(fir_size, atan_math, args)`` for a decoder.
+
+        Config that parses and validates but never reaches the command line is
+        the same silent-drop trap the validation was added to remove, just moved
+        one layer down.
+        """
+        if self.config and name in self.config.decoders:
+            decoder = self.config.decoders[name]
+            return decoder.fir_size, decoder.atan_math, list(decoder.args)
+        return None, None, []
 
     def _decoder_path(self, name: str, default: str) -> str:
         if self.config and name in self.config.decoders:

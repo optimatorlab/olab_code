@@ -6,11 +6,17 @@ from time import monotonic, sleep
 import wave
 
 import numpy as np
+import pytest
 
 from olab_rf.models import PcmAudioFrame, RadioVoiceSegment
 from olab_rf.models.tracks import utc_now
 from olab_rf.services.session_manager import SessionManager
-from olab_rf.services.voice_segments import RadioVoiceSegmenter, RtlFmAudioBackend
+from olab_rf.services.voice_segments import (
+    AudioConditioner,
+    RadioVoiceSegmenter,
+    RtlFmAudioBackend,
+    band_energy_ratio,
+)
 
 
 SAMPLE_RATE = 16_000
@@ -44,13 +50,14 @@ def test_rtl_fm_audio_backend_builds_pcm_command():
         sample_rate_hz=SAMPLE_RATE,
         frame_ms=40,
         gain_db=19.7,
-        squelch_db=7,
     )
 
     assert backend.frame_bytes == 1280
+    # No -l: the carrier gate detects FM quieting, so rtl_fm squelch would remove
+    # the very hiss it measures against. Squelch on this path is the gate's job.
     assert backend.command == [
         "rtl_fm-test", "-d", "0", "-f", "462712500", "-M", "fm", "-s", "16000",
-        "-g", "19.7", "-l", "7",
+        "-g", "19.7", "-",
     ]
 
 
@@ -283,3 +290,455 @@ def test_manager_auto_poll_reports_voice_status_and_segments():
     manager.stop()
     assert backend.stopped
     assert callback_events[-1].event == "capture_stopped"
+
+
+# --- carrier-gate runaway ---------------------------------------------------
+#
+# Regression cover for the confirmed defect: speech is often louder than hiss, so
+# it read as carrier-absent, reached the noise-floor estimator, and inflated it.
+# Ordinary hiss then fell below the threshold, the gate latched open, and
+# max_segment_sec only chopped the result -- the floor stayed frozen and the
+# carrier-absent branch became unreachable, so the gate re-armed on the next hiss
+# frame. Measured before the fix: nine back-to-back max-length hiss segments, a
+# 100% duty cycle.
+
+def _noise_frame(rng, index, amplitude=0.10):
+    samples = rng.normal(0.0, amplitude, FRAME_SAMPLES)
+    return PcmAudioFrame(
+        pcm_s16le=(np.clip(samples, -1, 1) * 32767).astype("<i2").tobytes(),
+        sample_rate_hz=SAMPLE_RATE,
+        captured_at=utc_now() + timedelta(milliseconds=40 * index),
+    )
+
+
+def _voice_frame(index, amplitude):
+    n = np.arange(FRAME_SAMPLES) + index * FRAME_SAMPLES
+    samples = amplitude * (
+        np.sin(2 * np.pi * 350 * n / SAMPLE_RATE)
+        + 0.6 * np.sin(2 * np.pi * 700 * n / SAMPLE_RATE)
+    ) / 1.6
+    return PcmAudioFrame(
+        pcm_s16le=(np.clip(samples, -1, 1) * 32767).astype("<i2").tobytes(),
+        sample_rate_hz=SAMPLE_RATE,
+        captured_at=utc_now() + timedelta(milliseconds=40 * index),
+    )
+
+
+def _run_inflation_scenario(detector_mode, voice_amplitude):
+    """Calibrate on hiss, transmit, then feed pure hiss and see what escapes."""
+    rng = np.random.default_rng(7)
+    segmenter = _segmenter(max_segment_sec=2.0, detector_mode=detector_mode)
+    emitted, index = [], 0
+    for _ in range(50):
+        emitted.extend(segmenter.ingest(_noise_frame(rng, index)))
+        index += 1
+    for _ in range(80):
+        emitted.extend(segmenter.ingest(_voice_frame(index, voice_amplitude)))
+        index += 1
+    quiet_started_at = utc_now() + timedelta(milliseconds=40 * index)
+    for _ in range(400):
+        emitted.extend(segmenter.ingest(_noise_frame(rng, index)))
+        index += 1
+    stray = sum(s.duration_sec for s in emitted if s.started_at >= quiet_started_at)
+    return emitted, stray / (400 * 0.04)
+
+
+@pytest.mark.parametrize("detector_mode", ["rms_quieting", "hf_ratio", "hybrid"])
+@pytest.mark.parametrize("voice_amplitude", [0.45, 0.02])
+def test_hiss_does_not_run_away_after_a_loud_transmission(detector_mode, voice_amplitude):
+    _emitted, duty = _run_inflation_scenario(detector_mode, voice_amplitude)
+
+    # Acceptance criterion 2 as a duty cycle, not a segment length: the old
+    # "no segment reaches max_segment_sec" wording would have been satisfied by
+    # lowering the cap while a 100%-duty-cycle train of hiss segments continued.
+    assert duty < 0.05
+
+
+def test_quiet_transmission_is_still_captured():
+    """The FM-quieting path that matches the project's real captures still works."""
+    emitted, _duty = _run_inflation_scenario("rms_quieting", 0.02)
+
+    assert emitted, "a quieter-than-hiss transmission must still produce a segment"
+
+
+def test_capped_close_on_noise_refuses_to_re_arm_until_recalibrated():
+    rng = np.random.default_rng(3)
+    segmenter = _segmenter(max_segment_sec=0.4, detector_mode="rms_quieting")
+    for index in range(20):
+        segmenter.ingest(_noise_frame(rng, index, amplitude=0.30))
+    for index in range(20, 60):
+        segmenter.ingest(_noise_frame(rng, index, amplitude=0.02))
+
+    status = segmenter.status()
+    if status.capped_closes:
+        # A capped close on hiss-like audio must drop the floor it opened on.
+        assert status.recalibrating or status.noise_floor_db is not None
+
+
+def test_noise_floor_recovers_while_the_gate_is_held_open():
+    """The floor must be re-estimable during an active segment.
+
+    Before the fix the estimator was reachable only from the carrier-absent
+    branch, which inflation made unreachable by construction -- a dead end with no
+    way back.
+    """
+    rng = np.random.default_rng(11)
+    segmenter = _segmenter(max_segment_sec=30.0, hang_time_ms=10_000)
+    for index in range(30):
+        segmenter.ingest(_noise_frame(rng, index))
+    established = segmenter.status().noise_floor_db
+    for index in range(30, 200):
+        segmenter.ingest(_noise_frame(rng, index))
+
+    assert segmenter.status().noise_floor_db is not None
+    assert abs(segmenter.status().noise_floor_db - established) < 6.0
+
+
+def test_noise_floor_drift_is_rate_limited():
+    rng = np.random.default_rng(5)
+    segmenter = _segmenter(max_floor_drift_db_per_sec=6.0)
+    for index in range(20):
+        segmenter.ingest(_noise_frame(rng, index, amplitude=0.10))
+    before = segmenter.status().noise_floor_db
+    segmenter.ingest(_noise_frame(rng, 20, amplitude=0.9))
+    after = segmenter.status().noise_floor_db
+
+    # 6 dB/s over a 40 ms frame is 0.24 dB, so a ~19 dB jump cannot land at once.
+    assert abs(after - before) <= 6.0 * 0.04 + 1e-6
+
+
+def test_noise_floor_can_still_reach_a_legitimate_new_level():
+    """Rate-limited, not destination-clamped.
+
+    A hard clamp anchored to the bootstrap value meant a capture started during a
+    transmission anchored to the wrong level and could never climb back: the
+    threshold sat far below any real hiss, the gate never opened, and nothing
+    reported an error. Bounding speed instead leaves every level reachable.
+    """
+    rng = np.random.default_rng(31)
+    segmenter = _segmenter(max_floor_drift_db_per_sec=6.0)
+    # Bootstrap on a quiet frame, as if capture began mid-transmission.
+    segmenter.ingest(_noise_frame(rng, 0, amplitude=0.002))
+    anchored = segmenter.status().noise_floor_db
+    for index in range(1, 400):
+        segmenter.ingest(_noise_frame(rng, index, amplitude=0.10))
+    recovered = segmenter.status().noise_floor_db
+
+    assert recovered > anchored + 10.0, "floor never climbed back to the true hiss level"
+
+
+def test_capture_started_mid_transmission_still_hears_later_traffic():
+    rng = np.random.default_rng(37)
+    segmenter = _segmenter(max_floor_drift_db_per_sec=6.0, detector_mode="rms_quieting")
+    for index in range(20):
+        segmenter.ingest(_voice_frame(index, 0.02))          # started mid-call
+    for index in range(20, 300):
+        segmenter.ingest(_noise_frame(rng, index, 0.10))     # idle hiss returns
+    emitted = []
+    for index in range(300, 340):
+        emitted.extend(segmenter.ingest(_voice_frame(index, 0.005)))
+    for index in range(340, 380):
+        emitted.extend(segmenter.ingest(_noise_frame(rng, index, 0.10)))
+
+    assert emitted, "receiver went permanently deaf after anchoring to a bad floor"
+
+
+def test_capped_segment_reports_the_floor_it_was_gated_against():
+    rng = np.random.default_rng(41)
+    segmenter = _segmenter(max_segment_sec=0.4, min_segment_ms=100)
+    for index in range(20):
+        segmenter.ingest(_noise_frame(rng, index, amplitude=0.30))
+    emitted = []
+    for index in range(20, 80):
+        emitted.extend(segmenter.ingest(_noise_frame(rng, index, amplitude=0.004)))
+
+    for segment in emitted:
+        # Stamping the segment's own RMS would make rms_db - noise_floor_db zero
+        # for exactly the segments a consumer wants to flag as noise.
+        assert segment.noise_floor_db != segment.rms_db
+
+
+def test_hf_ratio_does_not_open_on_digital_silence():
+    """Band ratio alone is a "not hissy" test, not a "signal present" test.
+
+    Silence scores 0.0, which is below the voice threshold, so without an
+    absolute-level term the gate opens on a dead carrier.
+    """
+    silence = PcmAudioFrame(
+        pcm_s16le=np.zeros(FRAME_SAMPLES, dtype="<i2").tobytes(),
+        sample_rate_hz=SAMPLE_RATE,
+        captured_at=utc_now(),
+    )
+    rng = np.random.default_rng(43)
+    for mode in ("rms_quieting", "hf_ratio", "hybrid"):
+        segmenter = _segmenter(detector_mode=mode, min_segment_ms=100)
+        for index in range(10):
+            segmenter.ingest(_noise_frame(rng, index))
+        emitted = []
+        for _ in range(150):
+            emitted.extend(segmenter.ingest(silence))
+        assert not emitted, f"{mode} opened the gate on digital silence"
+
+
+# --- chain order ------------------------------------------------------------
+
+def test_conditioning_does_not_move_the_detector_decision():
+    """Detector reads raw PCM; conditioning only shapes emitted audio.
+
+    Under any other ordering, de-emphasis (a low-pass) would shift the hf_ratio
+    boundary the detector rests on, so toggling one knob would silently retune
+    another.
+    """
+    rng = np.random.default_rng(13)
+    frames = [_noise_frame(rng, i) for i in range(40)]
+
+    plain = _segmenter(detector_mode="hf_ratio")
+    conditioned = _segmenter(
+        detector_mode="hf_ratio",
+        conditioner=AudioConditioner(sample_rate_hz=SAMPLE_RATE, deemphasis_us=75.0),
+    )
+    for frame in frames:
+        plain.ingest(frame)
+        conditioned.ingest(frame)
+
+    assert plain.status().last_frame_band_ratio == conditioned.status().last_frame_band_ratio
+
+
+def test_deemphasis_attenuates_the_high_band_in_the_conditioned_domain():
+    """Acceptance criterion 1's measurement: conditioned-domain fields must move."""
+    rng = np.random.default_rng(17)
+    pcm = _noise_frame(rng, 0).pcm_s16le
+    before = band_energy_ratio(pcm, SAMPLE_RATE)
+    conditioner = AudioConditioner(sample_rate_hz=SAMPLE_RATE, deemphasis_us=75.0)
+    after = band_energy_ratio(conditioner.process(pcm), SAMPLE_RATE)
+
+    assert after < before
+
+
+def test_live_time_constant_change_preserves_filter_state():
+    conditioner = AudioConditioner(sample_rate_hz=SAMPLE_RATE, deemphasis_us=75.0)
+    rng = np.random.default_rng(19)
+    conditioner.process(_noise_frame(rng, 0).pcm_s16le)
+    carried = conditioner._deemph_prev
+    conditioner.update(deemphasis_us=50.0)
+
+    # Re-initialising a running IIR would click at exactly the moment an operator
+    # is judging audio quality.
+    assert conditioner._deemph_prev == carried
+    assert conditioner.deemphasis_alpha is not None
+
+
+def test_conditioning_settings_are_range_validated():
+    conditioner = AudioConditioner(sample_rate_hz=SAMPLE_RATE)
+    with pytest.raises(ValueError):
+        conditioner.update(deemphasis_us=0)
+    with pytest.raises(ValueError):
+        conditioner.update(normalize_target_dbfs=6.0)
+    with pytest.raises(ValueError):
+        _segmenter(detector_mode="telepathy")
+
+
+# --- respawn ----------------------------------------------------------------
+
+class _StubBackend:
+    """Minimal PcmAudioBackend that replays a fixed frame list."""
+
+    def __init__(self, frames):
+        self.sample_rate_hz = SAMPLE_RATE
+        self._frames = list(frames)
+        self._running = False
+
+    def start(self):
+        self._running = True
+
+    def stop(self):
+        self._running = False
+
+    def is_running(self):
+        return self._running
+
+    def read_stderr_lines(self):
+        return []
+
+    def read_frames(self):
+        frames, self._frames = self._frames, []
+        return frames
+
+
+def test_respawn_preserves_unpopped_segments_and_run_counters():
+    """start_voice_segments() clears both buffers and zeroes counters.
+
+    A respawn that went straight through it would silently discard completed
+    transmissions mid-capture run -- data loss, not a cosmetic reset. The
+    guarantee lives in SessionManager rather than in a UI so every consumer gets
+    it.
+    """
+    rng = np.random.default_rng(23)
+    frames = [_noise_frame(rng, i, amplitude=0.30) for i in range(15)]
+    frames += [_noise_frame(rng, 15 + i, amplitude=0.01) for i in range(15)]
+    frames += [_noise_frame(rng, 30 + i, amplitude=0.30) for i in range(20)]
+
+    manager = SessionManager()
+    manager.start_voice_segments(
+        frequency_hz=462_712_500, backend=_StubBackend(frames), min_segment_ms=100
+    )
+    manager.poll()
+    before = manager.current_voice_segment_status()
+    pending = len(manager._voice_segments)
+
+    manager.restart_voice_capture(backend=_StubBackend([]), gain_db=28.0)
+
+    after = manager.current_voice_segment_status()
+    assert len(manager._voice_segments) == pending, "unpopped segments were discarded"
+    assert after.completed_segments == before.completed_segments
+    assert after.dropped_segments == before.dropped_segments
+
+
+def test_respawn_is_refused_during_an_active_segment_without_wedging_it():
+    """The refusal must not disable the remedy it recommends.
+
+    Stopping the auto-poller before the active-segment check meant a refusal
+    killed frame consumption, so the segment could never end, so the caller could
+    never reach the state where a respawn is allowed. The session wedged on its
+    own guard.
+    """
+    rng = np.random.default_rng(29)
+    opening = [_noise_frame(rng, i, amplitude=0.30) for i in range(15)]
+    opening += [_noise_frame(rng, 15 + i, amplitude=0.004) for i in range(8)]
+    closing = [_noise_frame(rng, 30 + i, amplitude=0.30) for i in range(30)]
+
+    backend = _StubBackend(opening)
+    manager = SessionManager()
+    manager.start_voice_segments(
+        frequency_hz=462_712_500, backend=backend, hang_time_ms=200, min_segment_ms=100
+    )
+    manager.poll()
+    assert manager.current_voice_segment_status().active, "scenario failed to open the gate"
+
+    with pytest.raises(RuntimeError, match="active segment"):
+        manager.restart_voice_capture(gain_db=28.0)
+
+    # The transmission must still be able to end after the refusal.
+    backend._frames = list(closing)
+    manager.poll()
+    assert not manager.current_voice_segment_status().active
+    manager.restart_voice_capture(backend=_StubBackend([]), gain_db=28.0)
+
+
+def test_failed_respawn_restores_the_backlog():
+    rng = np.random.default_rng(47)
+    frames = [_noise_frame(rng, i, amplitude=0.30) for i in range(15)]
+    frames += [_noise_frame(rng, 15 + i, amplitude=0.004) for i in range(10)]
+    frames += [_noise_frame(rng, 25 + i, amplitude=0.30) for i in range(20)]
+
+    manager = SessionManager()
+    manager.start_voice_segments(
+        frequency_hz=462_712_500, backend=_StubBackend(frames), min_segment_ms=100
+    )
+    manager.poll()
+    pending = len(manager._voice_segments)
+
+    with pytest.raises(Exception):
+        manager.restart_voice_capture(backend="not-a-backend")
+
+    assert len(manager._voice_segments) == pending, "backlog dropped by a failed respawn"
+
+
+def test_concurrent_live_tuning_while_the_poller_ingests():
+    """Adversarial interleaving across the lock boundary.
+
+    poll() holds _poll_lock across ingest_voice_segments(), and
+    update_voice_segment_settings() takes the same lock, so a live knob change can
+    never land mid-frame. This exercises that rather than assuming it.
+    """
+    from threading import Event as _Event, Thread as _Thread
+
+    rng = np.random.default_rng(53)
+    frames = [_noise_frame(rng, i, amplitude=0.30) for i in range(400)]
+    backend = _StubBackend(frames)
+    manager = SessionManager()
+    manager.start_voice_segments(
+        frequency_hz=462_712_500, backend=backend, auto_poll=True, poll_interval_sec=0.001
+    )
+
+    stop, errors = _Event(), []
+
+    def hammer():
+        modes = ["rms_quieting", "hf_ratio", "hybrid"]
+        index = 0
+        while not stop.is_set():
+            try:
+                manager.update_voice_segment_settings(
+                    detector_mode=modes[index % 3],
+                    threshold_db=6.0 + (index % 5),
+                    deemphasis_us=50.0 + (index % 30),
+                    dc_block=bool(index % 2),
+                )
+                manager.current_voice_segment_status()
+                manager.pop_voice_segments()
+            except Exception as exc:  # noqa: BLE001 - the point is to catch anything
+                errors.append(exc)
+                return
+            index += 1
+
+    threads = [_Thread(target=hammer, daemon=True) for _ in range(3)]
+    for thread in threads:
+        thread.start()
+    sleep(0.4)
+    stop.set()
+    for thread in threads:
+        thread.join(timeout=2.0)
+    manager.stop()
+
+    assert not errors, f"concurrent tuning raised: {errors[:3]}"
+
+
+def test_refused_respawn_leaves_the_auto_poller_running():
+    """The refusal path must restore what it stopped.
+
+    The poller is now stopped *before* the active check, to close a check-then-act
+    window where a transmission starting in between would be truncated. That makes
+    restarting it on the refusal path load-bearing: without it the refusal is the
+    wedge it replaced.
+    """
+    rng = np.random.default_rng(59)
+    frames = [_noise_frame(rng, i, amplitude=0.30) for i in range(15)]
+    frames += [_noise_frame(rng, 15 + i, amplitude=0.004) for i in range(200)]
+
+    manager = SessionManager()
+    manager.start_voice_segments(
+        frequency_hz=462_712_500,
+        backend=_StubBackend(frames),
+        hang_time_ms=10_000,
+        auto_poll=True,
+        poll_interval_sec=0.005,
+    )
+    # Wait for the precondition, then assert it. Returning early instead would
+    # make the test silently vacuous the moment gate tuning shifts -- the same
+    # pattern removed from the sibling respawn test.
+    deadline = monotonic() + 2.0
+    while monotonic() < deadline and not manager.current_voice_segment_status().active:
+        sleep(0.01)
+    assert manager.current_voice_segment_status().active, "scenario failed to open the gate"
+
+    with pytest.raises(RuntimeError, match="active segment"):
+        manager.restart_voice_capture(gain_db=28.0)
+
+    assert manager._voice_poll_thread is not None, "poller not restarted after refusal"
+    assert manager._voice_poll_thread.is_alive()
+    manager.stop()
+
+
+def test_silence_floor_is_live_tunable():
+    rng = np.random.default_rng(61)
+    manager = SessionManager()
+    manager.start_voice_segments(
+        frequency_hz=462_712_500,
+        backend=_StubBackend([_noise_frame(rng, i) for i in range(5)]),
+    )
+    manager.poll()
+    manager.update_voice_segment_settings(silence_floor_db=-45.0)
+
+    assert manager._voice_segmenter.silence_floor_db == -45.0
+    with pytest.raises(ValueError):
+        manager.update_voice_segment_settings(silence_floor_db=3.0)
