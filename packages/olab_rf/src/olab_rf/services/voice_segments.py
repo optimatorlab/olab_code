@@ -250,7 +250,7 @@ class RadioVoiceSegmenter:
         min_segment_ms: int = 400,
         max_segment_sec: float = 20.0,
         pre_roll_ms: int = 200,
-        detector_mode: str = "rms_quieting",
+        detector_mode: str = "hf_ratio",
         hf_ratio_threshold: float = 1.2,
         max_floor_drift_db_per_sec: float = 6.0,
         recalibration_ms: int = 1_000,
@@ -373,7 +373,12 @@ class RadioVoiceSegmenter:
             return quiet
         if self.detector_mode == "hf_ratio":
             return voice_like
-        return quiet and voice_like
+        # `hybrid` is OR, not AND. AND is only useful when both detectors work
+        # independently, and rms_quieting cannot fire at all on a radio whose
+        # voice audio is louder than the idle hiss -- measured on live hardware,
+        # where AND inherited that failure and captured nothing. OR is the
+        # union: either detector may open the gate.
+        return quiet or voice_like
 
     @property
     def _active_byte_count(self) -> int:

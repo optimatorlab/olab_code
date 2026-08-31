@@ -701,7 +701,7 @@ class SessionManager:
         min_segment_ms: int = 400,
         max_segment_sec: float = 20.0,
         pre_roll_ms: int = 200,
-        detector_mode: str = "rms_quieting",
+        detector_mode: str = "hf_ratio",
         hf_ratio_threshold: float = 1.2,
         max_floor_drift_db_per_sec: float = 6.0,
         recalibration_ms: int = 1_000,
@@ -1076,6 +1076,10 @@ class SessionManager:
         min_segment_ms: int = 400,
         max_segment_sec: float = 20.0,
         pre_roll_ms: int = 200,
+        detector_mode: str = "hf_ratio",
+        hf_ratio_threshold: float = 1.2,
+        dc_block: bool = True,
+        deemphasis_us: float | None = 75.0,
         duration_sec: float | None = None,
         max_segments: int | None = None,
         debug_wav_dir: str | Path | None = None,
@@ -1099,6 +1103,10 @@ class SessionManager:
             min_segment_ms=min_segment_ms,
             max_segment_sec=max_segment_sec,
             pre_roll_ms=pre_roll_ms,
+            detector_mode=detector_mode,
+            hf_ratio_threshold=hf_ratio_threshold,
+            dc_block=dc_block,
+            deemphasis_us=deemphasis_us,
         )
         started = time.monotonic()
         yielded = 0

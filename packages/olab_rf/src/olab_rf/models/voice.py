@@ -122,7 +122,7 @@ class VoiceSegmentStatus:
     completed_segments: int = 0
     dropped_segments: int = 0
     error: str | None = None
-    detector_mode: str = "rms_quieting"
+    detector_mode: str = "hf_ratio"
     last_frame_band_ratio: float | None = None
     recalibrating: bool = False
     capped_closes: int = 0

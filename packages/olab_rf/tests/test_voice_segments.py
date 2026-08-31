@@ -33,6 +33,14 @@ def _frame(level: int, index: int) -> PcmAudioFrame:
 
 
 def _segmenter(**kwargs: object) -> RadioVoiceSegmenter:
+    """Build a segmenter pinned to rms_quieting unless a test says otherwise.
+
+    These tests drive DC-constant frames, whose band-energy ratio is ~0 and so
+    read as voice-like under the hf_ratio detector that is now the library
+    default. Pinning keeps them testing level-based gating, which is what they
+    were written for, instead of silently becoming a different test.
+    """
+    kwargs.setdefault("detector_mode", "rms_quieting")
     return RadioVoiceSegmenter(
         session_id="session-test",
         frequency_hz=462_712_500,
@@ -186,6 +194,7 @@ def test_manager_voice_iterator_cleans_up_at_max_segments():
     manager = SessionManager()
     segments = list(
         manager.iter_voice_segments(
+            detector_mode="rms_quieting",
             frequency_hz=462_712_500,
             backend=backend,
             min_segment_ms=100,
@@ -255,6 +264,7 @@ def test_manager_auto_poll_reports_voice_status_and_segments():
     callback_events = []
     callback_segments = []
     manager.start_voice_segments(
+        detector_mode="rms_quieting",
         frequency_hz=462_712_500,
         backend=backend,
         min_segment_ms=100,
@@ -580,6 +590,7 @@ def test_respawn_preserves_unpopped_segments_and_run_counters():
 
     manager = SessionManager()
     manager.start_voice_segments(
+        detector_mode="rms_quieting",
         frequency_hz=462_712_500, backend=_StubBackend(frames), min_segment_ms=100
     )
     manager.poll()
@@ -610,6 +621,7 @@ def test_respawn_is_refused_during_an_active_segment_without_wedging_it():
     backend = _StubBackend(opening)
     manager = SessionManager()
     manager.start_voice_segments(
+        detector_mode="rms_quieting",
         frequency_hz=462_712_500, backend=backend, hang_time_ms=200, min_segment_ms=100
     )
     manager.poll()
@@ -633,6 +645,7 @@ def test_failed_respawn_restores_the_backlog():
 
     manager = SessionManager()
     manager.start_voice_segments(
+        detector_mode="rms_quieting",
         frequency_hz=462_712_500, backend=_StubBackend(frames), min_segment_ms=100
     )
     manager.poll()
@@ -658,6 +671,7 @@ def test_concurrent_live_tuning_while_the_poller_ingests():
     backend = _StubBackend(frames)
     manager = SessionManager()
     manager.start_voice_segments(
+        detector_mode="rms_quieting",
         frequency_hz=462_712_500, backend=backend, auto_poll=True, poll_interval_sec=0.001
     )
 
@@ -707,6 +721,7 @@ def test_refused_respawn_leaves_the_auto_poller_running():
 
     manager = SessionManager()
     manager.start_voice_segments(
+        detector_mode="rms_quieting",
         frequency_hz=462_712_500,
         backend=_StubBackend(frames),
         hang_time_ms=10_000,
@@ -733,6 +748,7 @@ def test_silence_floor_is_live_tunable():
     rng = np.random.default_rng(61)
     manager = SessionManager()
     manager.start_voice_segments(
+        detector_mode="rms_quieting",
         frequency_hz=462_712_500,
         backend=_StubBackend([_noise_frame(rng, i) for i in range(5)]),
     )
@@ -742,3 +758,29 @@ def test_silence_floor_is_live_tunable():
     assert manager._voice_segmenter.silence_floor_db == -45.0
     with pytest.raises(ValueError):
         manager.update_voice_segment_settings(silence_floor_db=3.0)
+
+
+def test_hybrid_is_a_union_not_an_intersection():
+    """Either detector may open the gate.
+
+    As an intersection, hybrid inherited rms_quieting's blind spot: on hardware
+    whose voice audio is louder than the idle hiss, that detector never fires, so
+    AND captured nothing at all. The union catches a transmission that either
+    detector recognises, which is the only behaviour that makes the mode more
+    useful than its parts rather than less.
+    """
+    loud, _duty = _run_inflation_scenario("hybrid", 0.45)
+    quiet, _duty = _run_inflation_scenario("hybrid", 0.02)
+
+    # Under AND, `loud` was empty: hf_ratio saw the voice, rms_quieting did not,
+    # and the intersection lost it.
+    assert loud, "hybrid missed a transmission that hf_ratio alone would catch"
+    assert quiet, "hybrid missed a transmission that rms_quieting alone would catch"
+
+
+def test_hf_ratio_is_the_default_detector():
+    # Changed after live testing: rms_quieting captured nothing on real hardware.
+    segmenter = RadioVoiceSegmenter(
+        session_id="s", frequency_hz=1, modulation="NFM", sample_rate_hz=SAMPLE_RATE
+    )
+    assert segmenter.detector_mode == "hf_ratio"

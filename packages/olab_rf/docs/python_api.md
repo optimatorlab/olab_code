@@ -398,12 +398,15 @@ The iterator exposes the same capture and segmentation controls as
   gate measures against. Gate-side squelch is also live-tunable, which an
   exec-time flag cannot be. `rtl_fm_command()` still accepts `squelch_db` for
   scan-mode callers, since `rtl_fm`'s multi-`-f` scanning requires `-l`.
-- `detector_mode="rms_quieting"`: carrier detector. `rms_quieting` compares frame
-  level against a learned floor; `hf_ratio` uses 2-6 kHz over 300-2000 Hz band
-  energy, which separates hiss from voice where level alone does not; `hybrid`
-  requires both. Note `rms_quieting` cannot open on a transmission *louder* than
-  the learned floor -- that is what quieting means -- which is why the mode is
-  selectable rather than fixed.
+- `detector_mode="hf_ratio"`: carrier detector. `hf_ratio` (the default) uses
+  2-6 kHz over 300-2000 Hz band energy, which separates hiss from voice where
+  level alone does not, plus an absolute-level term so silence is not mistaken
+  for voice. `rms_quieting` compares frame level against a learned floor;
+  it cannot open on a transmission *louder* than that floor -- that is what
+  quieting means -- and on hardware where the radio's voice audio exceeds the
+  idle hiss it captures nothing at all, which is why the mode is selectable and
+  why it is no longer the default. `hybrid` is the **union**: either detector may
+  open the gate.
 - `max_floor_drift_db_per_sec=6.0`: how fast the learned floor may move, in **dB
   per second**. It bounds speed, not destination, so a floor learned in the wrong
   conditions can still recover to a correct value.
