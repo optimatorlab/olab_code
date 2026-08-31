@@ -598,6 +598,64 @@ and stdout, not profile-level channels or frame/event semantics. This is
 explicitly an experimental, low-level path; the helper contract above is
 what interoperates with `olab_camera`'s own tooling.
 
+### 7.  CameraBosonDual (RHP-BOS-DS-IF thermal + visible board)
+
+`CameraBosonDual` is a thin `CameraUSB` subclass for the RHP-BOS-DS-IF, a
+board that pairs a FLIR Boson thermal core with a 1080p visible camera and
+outputs a single, board-composited HD stream over mini-HDMI. The host never
+talks to the board directly -- an HDMI-to-USB capture dongle (a plain UVC
+device on Linux, e.g. `/dev/video4`) is what `device=` actually points at.
+Hardware-validated end-to-end (both resolution presets, streaming); full
+investigation and findings in `.pairwork/camera-boson-dual.md`.
+
+**Video-only in this release.** The board's only control channel is a
+Windows-only GUI app talking an undocumented USB protocol -- there is no
+SDK and no way to drive it from Python today. Whatever "HD Window Mode"
+(Full-Thermal, Full-Visible, Split, or either Picture-in-Picture variant),
+palette, zoom, or FFC setting is currently configured on the board (via
+that GUI, or SBUS/PWM/button control) is simply what this class captures.
+`CameraBosonDual` has no `setWindowMode()`/`setPalette()`/zoom/FFC methods,
+not even stubs -- see issue #60 for the current state of non-Windows
+options for changing those settings.
+
+```python
+import olab_camera
+
+# Board's HD Window Mode etc. already set (Windows GUI / SBUS / PWM).
+camera = olab_camera.CameraBosonDual(resolution='720p60', device='/dev/video4')
+camera.start(startStream=True, port=8004)
+# Visit https://localhost:8004/stream.mjpg
+
+# Confirm the requested preset actually took (see the notes below):
+assert (camera.res_rows, camera.res_cols, camera.fps_target) == (720, 1280, 60)
+
+camera.shutdown()
+```
+
+Notes:
+- `resolution` is `'720p60'` (default) or `'1080p60'` -- the *only* two
+  valid modes the board supports. It does **not** configure the board --
+  it only tells the capture dongle what to request of the already-arriving
+  HDMI signal, and must match what the board is actually outputting. A
+  mismatch typically shows up as dongle-side scaling or a garbage capture,
+  not an exception.
+- **No device auto-discovery.** `device` must be set explicitly, same as
+  `CameraUSB`. A cheap HDMI capture dongle commonly exposes *two* V4L2
+  nodes side by side (e.g. `/dev/video4`/`/dev/video5`) -- one is the real
+  capture node, the other metadata-only and unusable for video. Check with
+  `v4l2-ctl -d <path> --info` (`Video Capture` in `Device Caps` is the one
+  you want) if it's not obvious which is which.
+- `fourcc` defaults to `('M','J','P','G')` and `apiPref` to `cv2.CAP_V4L2`
+  (both overridable) -- most HDMI capture dongles need MJPEG to sustain
+  these resolutions/framerates over USB2. Expect a handful of transient
+  decode-error log lines right after `start()` while the dongle's encoder
+  locks onto a clean keyframe; this is self-healing (`CameraUSB`'s capture
+  loop already logs-and-continues on a per-frame decode failure) and not a
+  sign anything is actually broken.
+- Thermal video is the board's on-board AGC-processed 8-bit display
+  output -- there is no radiometric (per-pixel temperature) data available
+  over this interface.
+
 ---
 
 # Additional Tools

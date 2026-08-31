@@ -45,6 +45,21 @@ def test_schema_exposes_known_feature_choices(tmp_path: Path):
     assert choices["algorithm"] == ("sort", "bytetrack", "ocsort", "botsort")
 
 
+def test_camera_backend_device_param_is_not_a_cpu_gpu_dropdown(tmp_path: Path):
+    # CHOICES["device"] means CPU/GPU for addUltralytics/addRFDETR, but a camera
+    # backend's own "device" parameter is a video source path -- regression
+    # test for the collision this surfaced when CameraBosonDual (the first
+    # generic-form backend with a "device" parameter) hit it in practice.
+    backends = _session(tmp_path).schema()["backends"]
+    for name in ("CameraUSB", "CameraBosonDual"):
+        constructor_device = next(p for p in backends[name]["constructor"] if p["name"] == "device")
+        assert constructor_device["choices"] is None
+        start_device = next(p for p in backends[name]["start"] if p["name"] == "device")
+        assert start_device["choices"] is None
+    ultralytics_device = next(p for p in _session(tmp_path).schema()["features"]["addUltralytics"] if p["name"] == "device")
+    assert ultralytics_device["choices"] == ("cpu", "gpu")
+
+
 def test_schema_exposes_guided_aruco_choices(tmp_path: Path):
     aruco = _session(tmp_path).schema()["aruco"]
     assert "DICT_APRILTAG_36h11" in aruco["dictionaries"]
@@ -173,6 +188,73 @@ def test_discover_returns_recommended_and_secondary_v4l2(monkeypatch, tmp_path: 
     discovered = session.discover()
     assert discovered["v4l2"][0]["path"] == "/dev/video0"
     assert discovered["otherV4L2"][0]["path"] == "/dev/video1"
+
+
+def test_discover_boson_dual_configures_the_scan_default_does_not(monkeypatch, tmp_path: Path):
+    # discover_boson_dual() exists because the default scan's bare,
+    # unconfigured open+read never produces a frame from this capture
+    # dongle at all (confirmed against real hardware) -- it must open the
+    # same way CameraBosonDual itself does (backend/FOURCC/resolution) and
+    # retry, while the default scan (used by every other backend) must open
+    # exactly as it always has.
+    session = _session(tmp_path)
+    calls = []
+
+    def fake_discover_v4l2(active, retry_seconds=0.0, api_pref=None, fourcc=None, probe_res=None):
+        calls.append({"retry_seconds": retry_seconds, "api_pref": api_pref, "fourcc": fourcc, "probe_res": probe_res})
+        return ([], [])
+
+    monkeypatch.setattr(session, "_discover_v4l2", fake_discover_v4l2)
+    session.discover_boson_dual()
+    session.discover()
+    assert calls[0] == {
+        "retry_seconds": 4.0,
+        "api_pref": camera_module.cv2.CAP_V4L2,
+        "fourcc": camera_module._BOSONDUAL_PROBE_FOURCC,
+        "probe_res": camera_module._BOSONDUAL_PROBE_RESOLUTION,
+    }
+    assert calls[1] == {"retry_seconds": 0.0, "api_pref": None, "fourcc": None, "probe_res": None}
+
+
+def test_read_frame_with_retry_gives_a_slow_device_time_to_lock_on(tmp_path: Path):
+    session = _session(tmp_path)
+
+    class SlowCapture:
+        def __init__(self, ready_after: int):
+            self.reads = 0
+            self.ready_after = ready_after
+
+        def read(self):
+            self.reads += 1
+            return (True, "frame") if self.reads >= self.ready_after else (False, None)
+
+    # Default (retry_seconds=0) preserves the original single-shot behavior.
+    assert session._read_frame_with_retry(SlowCapture(ready_after=2), retry_seconds=0.0) == (False, None)
+    # A real retry window gives a slow-to-lock-on device a chance to succeed.
+    assert session._read_frame_with_retry(SlowCapture(ready_after=3), retry_seconds=1.0, poll_interval=0.01) == (True, "frame")
+
+
+def test_read_frame_with_retry_tolerates_a_read_exception(tmp_path: Path):
+    # Confirmed against real hardware: this capture dongle's first ~3 reads
+    # after open throw a real cv2.error (not just ok=False) while its MJPEG
+    # decoder locks onto a clean keyframe. An exception must count as a
+    # failed attempt and be retried, not abort the whole scan.
+    session = _session(tmp_path)
+
+    class FlakyCapture:
+        def __init__(self, raises_first: int):
+            self.reads = 0
+            self.raises_first = raises_first
+
+        def read(self):
+            self.reads += 1
+            if self.reads <= self.raises_first:
+                raise RuntimeError("simulated transient decode error")
+            return True, "frame"
+
+    assert session._read_frame_with_retry(FlakyCapture(raises_first=2), retry_seconds=1.0, poll_interval=0.01) == (True, "frame")
+    # Default (retry_seconds=0) still gives up after the first exception, same as ok=False.
+    assert session._read_frame_with_retry(FlakyCapture(raises_first=2), retry_seconds=0.0) == (False, None)
 
 
 def test_guided_detector_rejects_model_outside_local_root(tmp_path: Path):
@@ -353,6 +435,52 @@ def test_openmv_guide_only_accepts_matching_profile_configuration(tmp_path: Path
         session._prepare_openmv({"devicePort": "/dev/ttyACM0", "profile": "genx_histogram_preview", "profile_kwargs": {}}, {"res_rows": 640})
 
 
+def test_camera_boson_dual_registered_with_resolution_help(tmp_path: Path):
+    assert camera_module.BACKENDS["CameraBosonDual"] is camera_module.CameraBosonDual
+    backend_schema = _session(tmp_path).schema()["backends"]["CameraBosonDual"]
+    assert backend_schema["available"] is True
+    assert backend_schema["hint"] is None
+    resolution_param = next(p for p in backend_schema["constructor"] if p["name"] == "resolution")
+    assert resolution_param["help"] == camera_module.CAMERA_USB_HELP["resolution"]
+
+
+def test_camera_usb_subclass_gets_camon_guard(monkeypatch, tmp_path: Path):
+    class FakeCameraUSB(camera_module.CameraUSB):
+        def start(self, **_kwargs):
+            pass  # leaves self.camOn False (set by Camera.__init__), simulating a failed open
+
+    monkeypatch.setitem(camera_module.BACKENDS, "FakeCameraUSB", FakeCameraUSB)
+    session = _session(tmp_path)
+    with pytest.raises(RuntimeError, match="did not start"):
+        session.start("FakeCameraUSB", {}, {}, {"enabled": False})
+
+
+def test_camera_usb_subclass_gets_selected_certificate(monkeypatch, tmp_path: Path):
+    received = []
+
+    class FakeCameraUSB(camera_module.CameraUSB):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            received.append(self.sslPath)
+
+        def start(self, **_kwargs):
+            pass
+
+    monkeypatch.setitem(camera_module.BACKENDS, "FakeCameraUSB", FakeCameraUSB)
+    cert_dir = tmp_path / "chosen-cert"
+    cert_dir.mkdir()
+    (cert_dir / "ca.crt").write_text("cert")
+    (cert_dir / "ca.key").write_text("key")
+
+    session = _session(tmp_path)
+    with pytest.raises(RuntimeError, match="did not start"):
+        session.start("FakeCameraUSB", {}, {}, {"enabled": True, "certificateMode": "choose", "certificatePath": str(cert_dir)})
+
+    assert len(received) == 1
+    assert Path(received[0]).resolve() == cert_dir.resolve()
+    assert received[0] != session.camera_ssl_path
+
+
 def test_backend_renderer_dispatches_to_guided_realsense_and_openmv_cards():
     source = (Path(__file__).parents[1] / "src" / "olab_playground" / "static" / "app.js").read_text()
     styles = (Path(__file__).parents[1] / "src" / "olab_playground" / "static" / "styles.css").read_text()
@@ -364,3 +492,22 @@ def test_backend_renderer_dispatches_to_guided_realsense_and_openmv_cards():
     assert 'id="rs-imu" type="checkbox" disabled' in source
     assert "$('rs-imu-options').hidden = !$('rs-imu').checked" in source
     assert "[hidden] { display: none !important; }" in styles
+
+
+def test_backend_renderer_dispatches_to_guided_bosondual_card():
+    source = (Path(__file__).parents[1] / "src" / "olab_playground" / "static" / "app.js").read_text()
+    assert "function cameraBosonDualForm()" in source
+    assert "name === 'CameraBosonDual'" in source
+    # The render-dispatch string alone would not catch cameraInit()/cameraStart() silently
+    # falling through to the generic path -- assert the actual serialization calls too.
+    assert "if (name === 'CameraBosonDual') return bosonDualInit(requireSource);" in source
+    assert "name === 'CameraBosonDual' ? bosonDualStart()" in source
+    # Guided-form-specific UI reused from CameraUSB's established pattern.
+    assert "listEditor('bd-allow'" in source
+    assert "listEditor('bd-block'" in source
+    assert 'id="bd-source"' in source
+
+
+def test_bosondual_guide_exposes_resolution_presets(tmp_path: Path):
+    guide = _session(tmp_path).schema()["guidedBackends"]["bosonDual"]
+    assert guide["resolutions"] == ("720p60", "1080p60")
