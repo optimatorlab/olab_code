@@ -20,6 +20,7 @@ import socket
 import ssl
 import subprocess
 import threading
+import time
 from collections import deque
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -33,6 +34,7 @@ import cv2
 
 from olab_camera import (
     AVWebcam,
+    CameraBosonDual,
     CameraGazebo,
     CameraOpenMV,
     CameraPi,
@@ -47,6 +49,7 @@ from olab_camera.tls import ensure_local_cert, generate_self_signed_cert
 
 BACKENDS = {
     "CameraUSB": CameraUSB,
+    "CameraBosonDual": CameraBosonDual,
     "CameraPi": CameraPi,
     "CameraPi2": CameraPi2,
     "CameraGazebo": CameraGazebo,
@@ -57,6 +60,17 @@ BACKENDS = {
     "AVWebcam": AVWebcam,
 }
 DISABLED_PLAYGROUND_BACKENDS = {"CameraGazebo", "CameraPi", "CameraPi2"}
+BOSONDUAL_GUIDE = {
+    "resolutions": ("720p60", "1080p60"),
+}
+# Matches CameraBosonDual's own defaults (resolution='720p60', fourcc=('M','J','P','G'),
+# apiPref=cv2.CAP_V4L2) -- discovery must open/configure the capture dongle the same way
+# CameraBosonDual does, or it never produces a frame at all (confirmed against real
+# hardware; see discover_boson_dual()). Kept as separate literals, not imported from
+# camera_boson_dual.py, matching this file's existing precedent for guided-form-owned
+# domain knowledge (REALSENSE_GUIDE/OPENMV_GUIDE) -- update by hand if those defaults change.
+_BOSONDUAL_PROBE_RESOLUTION = (720, 1280, 60)  # (res_rows, res_cols, fps)
+_BOSONDUAL_PROBE_FOURCC = ("M", "J", "P", "G")
 REALSENSE_GUIDE = {
     "color": {"res_rows": 480, "res_cols": 640, "fps_target": 30},
     "depth": {"res_rows": None, "res_cols": None, "framerate": None},
@@ -133,6 +147,10 @@ CHOICES = {
     "streamSource": ("color", "depth"),
     "decoder": ("cv2", "pyzbar"),
 }
+# CHOICES["device"] means CPU/GPU for addUltralytics/addRFDETR, but camera
+# backends (CameraUSB, CameraBosonDual) have their own "device" parameter
+# meaning a video source path -- never offer the CPU/GPU dropdown for those.
+BACKEND_SCHEMA_EXCLUDED_CHOICES = frozenset({"device"})
 OPTIONAL_HINTS = {
     "CameraRealSense": ("pyrealsense2", "realsense"),
     "CameraOpenMV": ("openmv", "openmv"),
@@ -149,6 +167,7 @@ CAMERA_USB_HELP = {
     "framerate": "Optional start-time FPS override. Leave unset to use the camera setting.",
     "apiPref": "OpenCV capture backend. CAP_ANY is usually right; use CAP_V4L2 for Linux USB cameras only when needed.",
     "sslPath": "Directory containing ca.crt and ca.key for HTTPS/WSS stream serving.",
+    "resolution": "Board output preset -- '720p60' or '1080p60'. Must match what the RHP-BOS-DS-IF board is already configured to output (via its Windows GUI/SBUS); this setting only tells the capture dongle what to request, it does not configure the board.",
     "imgTopic": "ROS raw Image publishing topic; only relevant when ROS initialization is enabled.",
     "compImgTopic": "ROS CompressedImage publishing topic; only relevant when ROS initialization is enabled.",
     "ipAllowlist": "Optional IP addresses allowed to view the stream.",
@@ -284,8 +303,18 @@ def _browser_feature_output(value: Any) -> Any:
     return _jsonable(output)
 
 
-def _schema(callable_object: Any) -> list[dict[str, Any]]:
-    """Describe a callable without ever evaluating untrusted user input."""
+def _schema(callable_object: Any, exclude_choices: frozenset[str] = frozenset()) -> list[dict[str, Any]]:
+    """Describe a callable without ever evaluating untrusted user input.
+
+    `exclude_choices` suppresses `CHOICES` lookups for specific parameter
+    names on this call only. `CHOICES` is keyed by bare parameter name and
+    shared across every schema `_schema()` builds (camera backends and
+    feature methods alike) -- e.g. `CHOICES["device"]` means CPU/GPU for
+    `addUltralytics`/`addRFDETR`, but a camera backend's own `device`
+    parameter (a video source path) must never render that dropdown. Pass
+    the colliding names here for a given call site rather than changing
+    `CHOICES` itself, which other, non-colliding call sites still rely on.
+    """
     rows = []
     for parameter in inspect.signature(callable_object).parameters.values():
         if parameter.name in {"self", "args", "kwargs"} or parameter.kind in {
@@ -299,7 +328,7 @@ def _schema(callable_object: Any) -> list[dict[str, Any]]:
             "default": default,
             "structured": parameter.name in STRUCTURED,
             "pythonOnly": parameter.name in PYTHON_ONLY,
-            "choices": CHOICES.get(parameter.name),
+            "choices": None if parameter.name in exclude_choices else CHOICES.get(parameter.name),
             "annotation": str(parameter.annotation) if parameter.annotation is not inspect.Parameter.empty else "",
             "help": CAMERA_USB_HELP.get(parameter.name, "See the olab_camera API documentation for this argument."),
         })
@@ -344,7 +373,7 @@ class PlaygroundSession:
             disabled = name in DISABLED_PLAYGROUND_BACKENDS
             available = not disabled and (dependency is None or importlib.util.find_spec(dependency[0]) is not None)
             hint = "disabled in this playground" if disabled else (None if available else f'pip install "olab-camera[{dependency[1]}]"')
-            payload["backends"][name] = {"constructor": _schema(cls), "start": _schema(getattr(cls, "start", lambda: None)), "available": available, "hint": hint}
+            payload["backends"][name] = {"constructor": _schema(cls, exclude_choices=BACKEND_SCHEMA_EXCLUDED_CHOICES), "start": _schema(getattr(cls, "start", lambda: None), exclude_choices=BACKEND_SCHEMA_EXCLUDED_CHOICES), "available": available, "hint": hint}
         for name in FEATURES:
             payload["features"][name] = _schema(getattr(CameraUSB, name))
         payload["aruco"] = {
@@ -371,7 +400,7 @@ class PlaygroundSession:
             "rfdetr": rfdetr_models,
             "face": ["face_detection_yunet_2023mar.onnx", "face_detection_yunet_2023mar_int8.onnx"],
         }
-        payload["guidedBackends"] = {"realsense": REALSENSE_GUIDE, "openmv": OPENMV_GUIDE}
+        payload["guidedBackends"] = {"realsense": REALSENSE_GUIDE, "openmv": OPENMV_GUIDE, "bosonDual": BOSONDUAL_GUIDE}
         payload["callbacks"] = {"detector": sorted(GUIDED_CALLBACKS)}
         payload["stream"] = _schema(CameraUSB.startStream)
         payload["protocols"] = {name: {"available": importlib.util.find_spec(module) is not None, "hint": f'pip install "olab-camera[{extra}]"'} for name, (module, extra) in OPTIONAL_HINTS.items() if name in {"websocket", "webrtc"}}
@@ -727,7 +756,7 @@ class PlaygroundSession:
                     init, start = self._prepare_openmv(init, start)
                 if backend != "AVWebcam" and "sslPath" not in init:
                     init["sslPath"] = self.camera_ssl_path
-                if backend == "CameraUSB" and stream.get("enabled"):
+                if issubclass(cls, CameraUSB) and stream.get("enabled"):
                     init["sslPath"] = self._certificate_path(stream, self.camera_ssl_path)
                 camera = cls(**init)
                 self._camera, self._backend = camera, backend
@@ -735,7 +764,7 @@ class PlaygroundSession:
                 if hasattr(camera, "start"):
                     camera.start(**start)
                     self._calls.append(_python_call("camera.start", start))
-                if backend == "CameraUSB" and not camera.camOn:
+                if isinstance(camera, CameraUSB) and not camera.camOn:
                     raise RuntimeError("CameraUSB did not start; check the selected source and the technical camera log")
                 if stream.get("enabled"):
                     port = self._reserve_port_locked(stream.get("port"), bool(stream.get("autoPort", True)))
@@ -1030,6 +1059,32 @@ class PlaygroundSession:
             pass
         return {"v4l2": v4l2, "otherV4L2": other_v4l2, "openmv": serial, "realsense": realsense, "avwebcam": {"cameras": v4l2, "microphones": []}}
 
+    def discover_boson_dual(self) -> dict[str, Any]:
+        """Separate device scan just for CameraBosonDual's guided form.
+
+        The RHP-BOS-DS-IF board's HDMI signal reaches the host through an
+        HDMI-to-USB capture dongle that (confirmed against real hardware)
+        **never** produces a frame via a bare, unconfigured
+        cv2.VideoCapture(path) the way discover()'s scan opens every device
+        -- it only responds once opened the same way CameraBosonDual itself
+        opens it (CAP_V4L2 backend, MJPG FOURCC, an explicit resolution),
+        and even then the first ~3 reads throw a real cv2.error (the same
+        transient decode error self-healed during hardware validation, see
+        .pairwork/camera-boson-dual.md) before one succeeds, typically well
+        under a second. Bare `discover()` would silently drop this device
+        forever, no matter how long it retried. Kept as a separate endpoint
+        (bespoke open/retry config) so the default scan -- used by every
+        other backend's guided form, and known to work with a bare open --
+        stays untouched.
+        """
+        with self._lock:
+            active = self._active_identifiers_locked()
+        v4l2, other_v4l2 = self._discover_v4l2(
+            active, retry_seconds=4.0, api_pref=cv2.CAP_V4L2,
+            fourcc=_BOSONDUAL_PROBE_FOURCC, probe_res=_BOSONDUAL_PROBE_RESOLUTION,
+        )
+        return {"v4l2": v4l2, "otherV4L2": other_v4l2}
+
     @staticmethod
     def _v4l2_is_monochrome(path: Path) -> bool:
         """Return whether V4L2 reports a single-channel capture format."""
@@ -1048,13 +1103,65 @@ class PlaygroundSession:
         except OSError:
             return str(path)
 
-    def _discover_v4l2(self, active: set[str]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    @staticmethod
+    def _read_frame_with_retry(capture: Any, retry_seconds: float = 0.0, poll_interval: float = 0.5) -> tuple[bool, Any]:
+        """Read one frame from an already-opened cv2.VideoCapture, retrying
+        for up to `retry_seconds` if the first read doesn't produce one.
+
+        Tolerates `capture.read()` raising (confirmed against real hardware:
+        a capture dongle mid-lock-on throws a real cv2.error on its first
+        few reads, not just returns ok=False) -- an exception counts as a
+        failed attempt, same as ok=False, and is retried the same way. This
+        matches the tolerance the real camera capture loop (CameraUSB) has
+        always had (see camera_usb.py's _captureLoop, which logs and
+        continues on exactly this kind of per-frame decode error).
+
+        Default `retry_seconds=0` preserves the original single-shot
+        behavior exactly (one attempt, whether it raises or returns
+        ok=False, and no `time.sleep` call).
+        """
+        deadline = time.monotonic() + retry_seconds
+        while True:
+            try:
+                ok, frame = capture.read()
+            except Exception:
+                ok, frame = False, None
+            if ok and frame is not None:
+                return ok, frame
+            if time.monotonic() >= deadline:
+                return ok, frame
+            time.sleep(poll_interval)
+
+    def _discover_v4l2(self, active: set[str], retry_seconds: float = 0.0, api_pref: int | None = None,
+                        fourcc: tuple[str, str, str, str] | None = None,
+                        probe_res: tuple[int, int, int] | None = None) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         """Probe usable color capture nodes and group secondary interfaces.
 
         This is intentionally user-triggered (or performed once during page
         bootstrap), never a status-refresh operation. It follows the proven
         OFM approach: a V4L2 node must open and return a frame, and reported
         monochrome/IR nodes are not suggested as ordinary color cameras.
+
+        `retry_seconds` (default 0 -- today's original single-shot behavior):
+        some sources don't deliver a frame on the very first read right after
+        open (e.g. an HDMI-to-USB capture dongle still syncing to its
+        incoming signal). When > 0, retry the read for up to this many
+        seconds before giving up on a device, instead of failing on the
+        first attempt.
+
+        `api_pref`/`fourcc`/`probe_res` (all default `None` -- today's
+        original bare-open behavior, `cv2.VideoCapture(path)` with no
+        further configuration): some sources (confirmed against real
+        hardware: this HDMI-to-USB capture dongle) never produce a frame via
+        a bare, unconfigured open, no matter how long you retry -- they only
+        respond once opened/configured the same way the real camera class
+        itself would (backend, FOURCC, resolution). Pass these to match
+        that configuration for scans where it's known to matter.
+
+        All four are left at their defaults for the default scan, so
+        ordinary USB webcams keep discovering exactly as before -- see
+        discover_boson_dual() for the one caller that opts into a
+        configured, more patient scan.
         """
         recommended, secondary, seen_groups = [], [], set()
         for device in sorted(Path("/dev").glob("video*")):
@@ -1062,8 +1169,17 @@ class PlaygroundSession:
                 continue
             capture = None
             try:
-                capture = cv2.VideoCapture(str(device))
-                ok, frame = capture.isOpened() and capture.read()
+                capture = cv2.VideoCapture(str(device), api_pref) if api_pref is not None else cv2.VideoCapture(str(device))
+                if not capture.isOpened():
+                    continue
+                if probe_res is not None:
+                    res_rows, res_cols, fps = probe_res
+                    capture.set(cv2.CAP_PROP_FRAME_WIDTH, res_cols)
+                    capture.set(cv2.CAP_PROP_FRAME_HEIGHT, res_rows)
+                    capture.set(cv2.CAP_PROP_FPS, fps)
+                if fourcc is not None:
+                    capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter.fourcc(*fourcc))
+                ok, frame = self._read_frame_with_retry(capture, retry_seconds)
                 if not ok or frame is None or self._v4l2_is_monochrome(device):
                     continue
                 name_file = Path("/sys/class/video4linux") / device.name / "name"
@@ -1137,6 +1253,8 @@ def make_handler(session: PlaygroundSession, csrf_token: str) -> type[BaseHTTPRe
                     return self._json(session.save_calibration(body["name"]))
                 if route == "/api/discover":
                     return self._json(session.discover())
+                if route == "/api/discover-boson-dual":
+                    return self._json(session.discover_boson_dual())
                 if route == "/api/browse":
                     return self._json(session.browse(body["kind"], body.get("path", ".")))
                 if route == "/api/certificates/browse":
