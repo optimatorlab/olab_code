@@ -42,6 +42,19 @@ JSON/override controls. Model/output file browsing is restricted to `--model-roo
 YOLO/RF-DETR paths are required; the playground never downloads weights or uses
 hosted inference.
 
+`CameraBosonDual` (RHP-BOS-DS-IF thermal+visible board, via an HDMI-to-USB
+capture dongle) has its own guided form too, mirroring CameraUSB's: a
+device-source dropdown, IP allowlist/blocklist list editors, and collapsed
+Override/Advanced sections. Its hardware scan is a separate, slower endpoint
+from CameraUSB's -- this capture dongle needs a few seconds (and the exact
+V4L2 backend/FOURCC/resolution CameraBosonDual itself uses) to lock onto its
+incoming HDMI signal before it produces a frame, so a bare, instant scan
+(the kind every other backend's discovery uses) never finds it at all. The
+Resolution field (`720p60`/`1080p60`) only tells the capture dongle what to
+request -- it does not configure the board's own output mode, which must
+already be set (Windows GUI or SBUS/PWM -- see `docs/usage_guide.md`'s
+CameraBosonDual section and issue #60) before starting.
+
 ## Explicit local YOLO provisioning
 
 Before starting the browser UI, activate the `olab_code` virtual environment,
