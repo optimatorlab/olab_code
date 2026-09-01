@@ -553,8 +553,8 @@ def test_conditioning_settings_are_range_validated():
 class _StubBackend:
     """Minimal PcmAudioBackend that replays a fixed frame list."""
 
-    def __init__(self, frames):
-        self.sample_rate_hz = SAMPLE_RATE
+    def __init__(self, frames, sample_rate_hz=SAMPLE_RATE):
+        self.sample_rate_hz = sample_rate_hz
         self._frames = list(frames)
         self._running = False
 
@@ -784,3 +784,258 @@ def test_hf_ratio_is_the_default_detector():
         session_id="s", frequency_hz=1, modulation="NFM", sample_rate_hz=SAMPLE_RATE
     )
     assert segmenter.detector_mode == "hf_ratio"
+
+
+# --- audio spectrum ---------------------------------------------------------
+
+import json  # noqa: E402
+
+from olab_rf.services.voice_segments import (  # noqa: E402
+    MIN_SPECTRUM_BINS,
+    frame_spectrum,
+    ratio_from_spectrum,
+    rebin,
+    spectrum_bin_limit,
+    spectrum_to_db,
+)
+
+
+def test_shared_transform_reproduces_the_standalone_band_ratio():
+    """The ratio must not change just because the transform is now shared."""
+    rng = np.random.default_rng(71)
+    pcm = _noise_frame(rng, 0).pcm_s16le
+
+    assert ratio_from_spectrum(*frame_spectrum(pcm, SAMPLE_RATE)) == band_energy_ratio(
+        pcm, SAMPLE_RATE
+    )
+
+
+def test_silence_yields_finite_db_and_serialises():
+    """dB of zero is -inf, which JSON renders as -Infinity and JSON.parse rejects.
+
+    The page swallows poll exceptions to stay up, so one silent frame would
+    freeze the whole tuning panel rather than just a chart.
+    """
+    silence = np.zeros(FRAME_SAMPLES, dtype="<i2").tobytes()
+    bins = spectrum_to_db(rebin(frame_spectrum(silence, SAMPLE_RATE)[0], 64))
+
+    assert len(bins) == 64
+    assert all(np.isfinite(value) for value in bins)
+    assert "Infinity" not in json.dumps(bins)
+    msgpack = pytest.importorskip("msgpack")
+    assert msgpack.unpackb(msgpack.packb(bins)) == bins
+
+
+def test_degenerate_frame_still_yields_full_length_bins():
+    # A short array would break the wire contract exactly when the page is least
+    # able to report why.
+    assert len(rebin(frame_spectrum(b"\x00\x00", SAMPLE_RATE)[0], 32)) == 32
+
+
+def test_bin_limit_is_computed_from_rate_and_frame_length():
+    # A fixed cap would permit interpolation presented as measurement at lower rates.
+    assert spectrum_bin_limit(16_000, 40) == 256
+    assert spectrum_bin_limit(8_000, 40) == 161
+    assert spectrum_bin_limit(8_000, 1) < MIN_SPECTRUM_BINS
+
+
+def test_spectrum_keys_are_always_present_and_null_when_disabled():
+    """Omitting keys would make payload shape depend on a server-side setting."""
+    payload = _segmenter().status().to_dict()
+
+    for key in ("audio_spectrum_bin_hz", "audio_spectrum_raw_db", "audio_spectrum_conditioned_db"):
+        assert key in payload
+        assert payload[key] is None
+
+
+def test_enabled_spectrum_reports_both_domains_at_the_requested_length():
+    rng = np.random.default_rng(73)
+    segmenter = _segmenter(audio_spectrum_bins=32)
+    for index in range(10):
+        segmenter.ingest(_noise_frame(rng, index))
+    payload = segmenter.status().to_dict()
+
+    assert len(payload["audio_spectrum_raw_db"]) == 32
+    assert len(payload["audio_spectrum_conditioned_db"]) == 32
+    assert payload["audio_spectrum_bin_hz"] == pytest.approx((SAMPLE_RATE / 2) / 32)
+    assert "Infinity" not in json.dumps(payload)
+
+
+def test_conditioning_moves_the_conditioned_curve_and_not_the_raw_one():
+    """Acceptance criterion 3: the chain-order rule, made visible."""
+    rng = np.random.default_rng(79)
+    frames = [_noise_frame(rng, i) for i in range(10)]
+
+    plain = _segmenter(audio_spectrum_bins=32,
+                       conditioner=AudioConditioner(sample_rate_hz=SAMPLE_RATE, deemphasis_us=None))
+    shaped = _segmenter(audio_spectrum_bins=32,
+                        conditioner=AudioConditioner(sample_rate_hz=SAMPLE_RATE, deemphasis_us=75.0))
+    for frame in frames:
+        plain.ingest(frame)
+        shaped.ingest(frame)
+
+    assert plain.status().audio_spectrum_raw_db == shaped.status().audio_spectrum_raw_db
+    high = slice(24, 32)
+    assert sum(shaped.status().audio_spectrum_conditioned_db[high]) < sum(
+        plain.status().audio_spectrum_conditioned_db[high]
+    )
+
+
+def test_pre_first_frame_state_is_well_formed():
+    # The normal first render, not an edge case.
+    payload = _segmenter(audio_spectrum_bins=32).status().to_dict()
+    assert payload["audio_spectrum_raw_db"] is None
+
+
+@pytest.mark.parametrize("bins", [1, 7, 400])
+def test_out_of_range_bin_counts_are_rejected(bins):
+    with pytest.raises(ValueError):
+        _segmenter(audio_spectrum_bins=bins)
+
+
+def test_below_floor_configuration_permits_only_zero():
+    kwargs = dict(session_id="s", frequency_hz=1, modulation="NFM",
+                  sample_rate_hz=8_000, frame_ms=1)
+    RadioVoiceSegmenter(**kwargs, audio_spectrum_bins=0)  # allowed
+    with pytest.raises(ValueError, match="must be 0"):
+        RadioVoiceSegmenter(**kwargs, audio_spectrum_bins=8)
+
+
+def test_disabled_spectrum_costs_one_transform_per_frame(monkeypatch):
+    """Every deployment that never enables this must not pay for it."""
+    import olab_rf.services.voice_segments as module
+
+    calls = []
+    real = np.fft.rfft
+    monkeypatch.setattr(module.np.fft, "rfft", lambda *a, **k: (calls.append(1), real(*a, **k))[1])
+
+    rng = np.random.default_rng(83)
+    _segmenter().ingest(_noise_frame(rng, 0))
+    disabled = len(calls)
+    calls.clear()
+    _segmenter(audio_spectrum_bins=32).ingest(_noise_frame(rng, 1))
+
+    assert disabled == 1
+    assert len(calls) == 2  # raw + conditioned, ratio derived from the raw one
+
+
+# --- live settings must survive a respawn -----------------------------------
+
+def _running_manager(seed=89, **start):
+    rng = np.random.default_rng(seed)
+    frames = [_noise_frame(rng, i, amplitude=0.30) for i in range(40)]
+    manager = SessionManager()
+    manager.start_voice_segments(
+        frequency_hz=462_712_500, backend=_StubBackend(frames), **start
+    )
+    manager.poll()
+    return manager
+
+
+def test_live_settings_survive_a_respawn():
+    """Without the write-back, every knob silently reverts when the receiver respawns.
+
+    Reachable from the tuning page's own Respawn button, during exactly the
+    tune-then-adjust loop it exists to support.
+    """
+    manager = _running_manager()
+    manager.update_voice_segment_settings(threshold_db=4.0, detector_mode="hybrid")
+    manager.restart_voice_capture(backend=_StubBackend([]))
+
+    status = manager.current_voice_segment_status()
+    assert status.detector_mode == "hybrid"
+    assert manager._voice_segmenter.threshold_db == 4.0
+
+
+def test_respawn_after_switching_deemphasis_off_does_not_raise():
+    """start_voice_segments has no `disable_deemphasis` parameter.
+
+    Writing the updater's vocabulary back verbatim would make every later
+    respawn raise TypeError, which /api/respawn does not catch — an unhandled
+    500 for the rest of the session, reachable from two of the page's controls.
+    """
+    manager = _running_manager(seed=91)
+    manager.update_voice_segment_settings(disable_deemphasis=True)
+    manager.restart_voice_capture(backend=_StubBackend([]))
+
+    assert manager._voice_segmenter.conditioner.deemphasis_us is None
+
+
+def test_a_rejected_settings_call_changes_nothing_gate_side():
+    manager = _running_manager(seed=93)
+    before = manager._voice_segmenter.threshold_db
+    with pytest.raises(ValueError):
+        manager.update_voice_segment_settings(threshold_db=5.0, hf_ratio_threshold=-1)
+
+    assert manager._voice_segmenter.threshold_db == before
+
+
+def test_a_rejected_settings_call_changes_nothing_conditioner_side():
+    """The case a gate-side test alone would miss.
+
+    update_settings delegates its last step to a separate object; validating
+    only the gate leaves DC blocking switched off on the live audio path while
+    the caller is told nothing changed.
+    """
+    manager = _running_manager(seed=97)
+    conditioner = manager._voice_segmenter.conditioner
+    before = conditioner.dc_block
+    with pytest.raises(ValueError):
+        manager.update_voice_segment_settings(dc_block=not before, normalize_target_dbfs=5.0)
+
+    assert conditioner.dc_block == before
+
+
+def test_replayed_bin_count_is_clamped_when_the_rate_changes():
+    manager = _running_manager(seed=101, audio_spectrum_bins=200)
+    manager.restart_voice_capture(
+        backend=_StubBackend([], sample_rate_hz=8_000), sample_rate_hz=8_000
+    )
+
+    # 200 exceeds the 161-bin ceiling at 8 kHz, so it is clamped, not rejected.
+    assert manager._voice_segmenter.audio_spectrum_bins == 161
+    # The stored value keeps what was *requested*, so going back restores it.
+    assert manager._voice_params["audio_spectrum_bins"] == 200
+
+
+def test_explicitly_supplied_bin_count_is_still_rejected_on_respawn():
+    """The direction a replay-only test would miss.
+
+    Clamping everything would make the same out-of-range argument raise through
+    start_voice_segments and silently succeed through restart_voice_capture.
+    """
+    manager = _running_manager(seed=103, audio_spectrum_bins=32)
+    with pytest.raises(ValueError):
+        manager.restart_voice_capture(
+            backend=_StubBackend([], sample_rate_hz=8_000),
+            sample_rate_hz=8_000,
+            audio_spectrum_bins=300,
+        )
+
+
+def test_replay_into_a_below_floor_cap_disables_rather_than_raising():
+    """Where the two rules meet: clamping to the raw cap would yield a value the
+    validator itself refuses, so the feature disables instead."""
+    manager = _running_manager(seed=107, audio_spectrum_bins=64)
+    manager.restart_voice_capture(
+        backend=_StubBackend([], sample_rate_hz=8_000), sample_rate_hz=8_000, frame_ms=1
+    )
+
+    assert manager._voice_segmenter.audio_spectrum_bins == 0
+
+
+def test_spectrum_is_amplitude_referenced():
+    """A tone reads at the same level regardless of frame length.
+
+    That is what the 1/N normalisation buys, and it is what lets the display use
+    a fixed dB axis. Broadband content deliberately does *not* have this
+    property: its level falls as the resolution bandwidth narrows, exactly as on
+    any spectrum analyser. An earlier version of this test asserted invariance
+    for broadband too, which is not true and should not be.
+    """
+    def peak(samples: int) -> float:
+        tone = 0.5 * np.sin(2 * np.pi * 1000 * np.arange(samples) / SAMPLE_RATE)
+        pcm = (np.clip(tone, -1, 1) * 32767).astype("<i2").tobytes()
+        return float(20 * np.log10(frame_spectrum(pcm, SAMPLE_RATE)[0].max()))
+
+    assert abs(peak(320) - peak(2560)) < 0.5

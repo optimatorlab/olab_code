@@ -413,6 +413,28 @@ The iterator exposes the same capture and segmentation controls as
 - `silence_floor_db=-60.0`: frames quieter than this are never treated as a
   carrier. Band-energy ratio alone is a "not hissy" test rather than a "signal
   present" one, and digital silence scores 0.0.
+- `audio_spectrum_bins=0`: publish an audio-domain spectrum of the demodulated
+  stream on the status payload, for displaying what conditioning is doing. `0`
+  disables it; otherwise `8` up to the transform's own resolution
+  (`min(256, frame_samples // 2 + 1)`), which depends on sample rate and frame
+  length. Where that limit falls below 8, only `0` is accepted.
+
+  Disabled by default because two float arrays on every `rf.voice.status`
+  message is real growth on a frequently published subject. The three keys —
+  `audio_spectrum_bin_hz`, `audio_spectrum_raw_db`,
+  `audio_spectrum_conditioned_db` — are always present and `null` when disabled,
+  so payload shape never depends on a server-side setting.
+
+  Named `audio_*` to stay distinct from the RF spectrum subsystem
+  (`start_spectrum()`, `SpectrumSnapshot`), which is a different measurement of
+  a different signal. Raw is measured pre-conditioning and conditioned
+  post-conditioning, so toggling de-emphasis moves the conditioned curve and
+  leaves the raw one alone — the chain-order rule, made visible.
+
+  A stored value that is illegal at a new sample rate is **clamped** on respawn
+  rather than rejected, since the caller did not pass it to that call; the
+  stored value keeps what was requested, so respawning back restores it. A value
+  passed explicitly to a respawn is still rejected.
 - `dc_block=True`, `deemphasis_us=75.0`, `normalize=False`: audio conditioning,
   applied in Python to emitted audio only. The detector always measures raw PCM,
   so changing conditioning cannot move a detector threshold.

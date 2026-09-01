@@ -43,7 +43,14 @@ from olab_rf.services.iq_candidates import candidate_from_iq_peak
 from olab_rf.services.range_scanner import build_frequency_range_scan_plan
 from olab_rf.services.track_store import TrackStore
 from olab_rf.services.frequency_catalog import FrequencyCatalog
-from olab_rf.services.voice_segments import AudioConditioner, PcmAudioBackend, RadioVoiceSegmenter, RtlFmAudioBackend
+from olab_rf.services.voice_segments import (
+    MIN_SPECTRUM_BINS,
+    AudioConditioner,
+    PcmAudioBackend,
+    RadioVoiceSegmenter,
+    RtlFmAudioBackend,
+    spectrum_bin_limit,
+)
 from olab_rf.models.tracks import utc_now
 
 
@@ -706,6 +713,7 @@ class SessionManager:
         max_floor_drift_db_per_sec: float = 6.0,
         recalibration_ms: int = 1_000,
         silence_floor_db: float = -60.0,
+        audio_spectrum_bins: int = 0,
         dc_block: bool = True,
         deemphasis_us: float | None = 75.0,
         normalize: bool = False,
@@ -778,6 +786,7 @@ class SessionManager:
             max_floor_drift_db_per_sec=max_floor_drift_db_per_sec,
             recalibration_ms=recalibration_ms,
             silence_floor_db=silence_floor_db,
+            audio_spectrum_bins=audio_spectrum_bins,
             conditioner=AudioConditioner(
                 sample_rate_hz=sample_rate_hz,
                 dc_block=dc_block,
@@ -805,6 +814,7 @@ class SessionManager:
             "max_floor_drift_db_per_sec": max_floor_drift_db_per_sec,
             "recalibration_ms": recalibration_ms,
             "silence_floor_db": silence_floor_db,
+            "audio_spectrum_bins": audio_spectrum_bins,
             "dc_block": dc_block,
             "deemphasis_us": deemphasis_us,
             "normalize": normalize,
@@ -930,6 +940,7 @@ class SessionManager:
         hf_ratio_threshold: float | None = None,
         max_floor_drift_db_per_sec: float | None = None,
         silence_floor_db: float | None = None,
+        audio_spectrum_bins: int | None = None,
         dc_block: bool | None = None,
         deemphasis_us: float | None = None,
         disable_deemphasis: bool = False,
@@ -960,12 +971,42 @@ class SessionManager:
                 hf_ratio_threshold=hf_ratio_threshold,
                 max_floor_drift_db_per_sec=max_floor_drift_db_per_sec,
                 silence_floor_db=silence_floor_db,
+                audio_spectrum_bins=audio_spectrum_bins,
                 dc_block=dc_block,
                 deemphasis_us=deemphasis_us,
                 disable_deemphasis=disable_deemphasis,
                 normalize=normalize,
                 normalize_target_dbfs=normalize_target_dbfs,
             )
+            # Record what was applied, so a respawn restores the tuning instead
+            # of silently reverting to whatever the session started with. This is
+            # a translation, not a copy: the updater and the starter use
+            # different vocabularies for the same state, and `None` means "leave
+            # unchanged" here but "disabled" there.
+            applied: dict[str, object] = {
+                "threshold_db": threshold_db,
+                "min_active_ms": min_active_ms,
+                "hang_time_ms": hang_time_ms,
+                "min_segment_ms": min_segment_ms,
+                "max_segment_sec": max_segment_sec,
+                "pre_roll_ms": pre_roll_ms,
+                "detector_mode": detector_mode,
+                "hf_ratio_threshold": hf_ratio_threshold,
+                "max_floor_drift_db_per_sec": max_floor_drift_db_per_sec,
+                "silence_floor_db": silence_floor_db,
+                "audio_spectrum_bins": audio_spectrum_bins,
+                "dc_block": dc_block,
+                "normalize": normalize,
+                "normalize_target_dbfs": normalize_target_dbfs,
+            }
+            self._voice_params.update({k: v for k, v in applied.items() if v is not None})
+            if disable_deemphasis:
+                # start_voice_segments has no `disable_deemphasis` parameter at
+                # all; writing the updater's own vocabulary back would make every
+                # later respawn raise TypeError.
+                self._voice_params["deemphasis_us"] = None
+            elif deemphasis_us is not None:
+                self._voice_params["deemphasis_us"] = deemphasis_us
             return self._voice_segmenter.status(error=self.status.error)
 
     def restart_voice_capture(self, **overrides: object) -> RadioSession:
@@ -981,6 +1022,11 @@ class SessionManager:
           ``start_voice_segments()`` clears both, which during a capture run would
           be silent data loss rather than a cosmetic reset.
         * **Carries run counters**, so totals stay monotonic across a respawn.
+        * **Preserves live settings.** Gate and conditioning values applied since
+          the session started are replayed, rather than reverting to whatever it
+          began with. A stored ``audio_spectrum_bins`` illegal at the new rate is
+          clamped, not rejected; the stored value keeps what was *requested*, so
+          respawning back restores it.
 
         A ``sample_rate_hz`` change additionally rebuilds the segmenter and so
         discards the learned noise floor -- unavoidable, since the byte caps and
@@ -1003,6 +1049,7 @@ class SessionManager:
         # refused *after* stopping and never restarted, so frame consumption died,
         # the segment could never end, and the remedy the error recommends became
         # unreachable. The session wedged on its own guard.
+        requested_bins: int | None = None
         was_auto_polling = self._voice_poll_thread is not None
         poll_interval = float(self._voice_params.get("poll_interval_sec", 0.05) or 0.05)
         self._stop_voice_auto_poll()
@@ -1026,6 +1073,27 @@ class SessionManager:
             )
             params = dict(self._voice_params)
         params.update(overrides)
+        # A stored bin count may be illegal at a new sample rate or frame length.
+        # Clamp it rather than raising for a parameter this caller never passed --
+        # but only when it *was* replayed. An explicitly supplied value must still
+        # be rejected, or the same argument would behave differently depending on
+        # which entry point it arrived through.
+        if "audio_spectrum_bins" not in overrides and params.get("audio_spectrum_bins"):
+            limit = spectrum_bin_limit(
+                int(params.get("sample_rate_hz", 16_000)), int(params.get("frame_ms", 40))
+            )
+            stored = int(params["audio_spectrum_bins"])
+            if limit < MIN_SPECTRUM_BINS:
+                # Clamping to the raw cap would produce a value the validator
+                # itself refuses, so the feature disables instead.
+                params["audio_spectrum_bins"] = 0
+            elif stored > limit:
+                params["audio_spectrum_bins"] = limit
+            # start_voice_segments rebuilds _voice_params from its own arguments,
+            # so without restoring this afterwards the clamped value would become
+            # the stored one and the setting would ratchet down permanently after
+            # a temporary excursion to a lower rate.
+            requested_bins = stored
 
         try:
             session = self.start_voice_segments(**params)  # type: ignore[arg-type]
@@ -1042,6 +1110,10 @@ class SessionManager:
         with self._poll_lock:
             self._voice_segments[:0] = pending_segments
             self._voice_events[:0] = pending_events
+            if requested_bins is not None:
+                # Stored means "what was asked for"; the array length in status
+                # means "what is in effect".
+                self._voice_params["audio_spectrum_bins"] = requested_bins
             if self._voice_segmenter is not None:
                 self._voice_segmenter.carry_counters(
                     completed=carried[0], dropped=carried[1], capped_closes=carried[2]

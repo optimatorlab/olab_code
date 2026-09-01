@@ -138,19 +138,21 @@ class AudioConditioner:
         State is deliberately *not* reset: re-initialising a running IIR produces
         an audible click at exactly the moment an operator is judging quality.
         """
+        # Validate every argument before applying any of them. Interleaving the
+        # two means a rejected call still changes the live audio path: switching
+        # DC blocking off and *then* raising tells the operator nothing changed
+        # while what they are listening to just did.
+        validate_conditioner_settings(deemphasis_us, normalize_target_dbfs)
+
         if dc_block is not None:
             self.dc_block = dc_block
         if clear_deemphasis:
             self.deemphasis_us = None
         elif deemphasis_us is not None:
-            if deemphasis_us <= 0:
-                raise ValueError("deemphasis_us must be greater than zero")
             self.deemphasis_us = deemphasis_us
         if normalize is not None:
             self.normalize = normalize
         if normalize_target_dbfs is not None:
-            if normalize_target_dbfs > 0:
-                raise ValueError("normalize_target_dbfs must be at or below 0 dBFS")
             self.normalize_target_dbfs = normalize_target_dbfs
 
     def process(self, pcm_s16le: bytes) -> bytes:
@@ -202,7 +204,62 @@ class AudioConditioner:
         return out
 
 
+def validate_conditioner_settings(
+    deemphasis_us: float | None, normalize_target_dbfs: float | None
+) -> None:
+    """Raise if either conditioning value is out of range.
+
+    Shared so a caller can check the conditioner's rules *before* applying gate
+    settings; otherwise a rejected combined update leaves the gate changed and
+    the conditioner not.
+    """
+    if deemphasis_us is not None and deemphasis_us <= 0:
+        raise ValueError("deemphasis_us must be greater than zero")
+    if normalize_target_dbfs is not None and normalize_target_dbfs > 0:
+        raise ValueError("normalize_target_dbfs must be at or below 0 dBFS")
+
+
 DETECTOR_MODES = ("rms_quieting", "hf_ratio", "hybrid")
+
+
+# Magnitudes below this floor are treated as this floor before any log. dB of
+# zero is -inf, which json.dumps renders as -Infinity and JSON.parse rejects --
+# and the tuning page swallows poll exceptions to stay up, so one silent frame
+# would freeze the whole panel rather than just a chart. `_pcm_levels` already
+# floors for the same reason.
+SPECTRUM_FLOOR = 1e-6
+
+MAX_SPECTRUM_BINS = 256
+MIN_SPECTRUM_BINS = 8
+
+
+def frame_spectrum(pcm_s16le: bytes, sample_rate_hz: int) -> tuple[np.ndarray, np.ndarray]:
+    """Return (magnitudes, frequencies) for one frame -- a single transform.
+
+    Shared so the band ratio and the display bins cost one ``rfft`` between them
+    rather than one each.
+    """
+    samples = np.frombuffer(pcm_s16le, dtype="<i2").astype(np.float64) / 32768.0
+    if len(samples) < 8:
+        return np.zeros(0), np.zeros(0)
+    # Amplitude-referenced: divided by frame length so a tone reads at the same
+    # dB regardless of frame size, which is what lets the display use a fixed
+    # axis. Unnormalised, the scale rides on frame size and a full-scale signal
+    # reads as positive dB. Broadband content still moves with the resolution
+    # bandwidth — narrower bins, lower noise floor — exactly as on any spectrum
+    # analyser; that is a property of the measurement, not a defect.
+    # The band ratio is unaffected either way: a common factor cancels in a ratio.
+    magnitudes = np.abs(np.fft.rfft(samples * np.hanning(len(samples)))) / len(samples)
+    return magnitudes, np.fft.rfftfreq(len(samples), 1.0 / sample_rate_hz)
+
+
+def ratio_from_spectrum(magnitudes: np.ndarray, freqs: np.ndarray) -> float:
+    """Derive the 2-6 kHz over 300-2000 Hz ratio from an existing transform."""
+    if not len(magnitudes):
+        return 0.0
+    high = float(magnitudes[(freqs >= 2000) & (freqs < 6000)].sum())
+    low = float(magnitudes[(freqs >= 300) & (freqs < 2000)].sum())
+    return high / max(low, 1e-9)
 
 
 def band_energy_ratio(pcm_s16le: bytes, sample_rate_hz: int) -> float:
@@ -212,14 +269,46 @@ def band_energy_ratio(pcm_s16le: bytes, sample_rate_hz: int) -> float:
     reference captures this separates the populations (0.27-0.85 speech,
     2.07-2.99 hiss) where broadband RMS does not.
     """
-    samples = np.frombuffer(pcm_s16le, dtype="<i2").astype(np.float64) / 32768.0
-    if len(samples) < 8:
-        return 0.0
-    spectrum = np.abs(np.fft.rfft(samples * np.hanning(len(samples))))
-    freqs = np.fft.rfftfreq(len(samples), 1.0 / sample_rate_hz)
-    high = float(spectrum[(freqs >= 2000) & (freqs < 6000)].sum())
-    low = float(spectrum[(freqs >= 300) & (freqs < 2000)].sum())
-    return high / max(low, 1e-9)
+    return ratio_from_spectrum(*frame_spectrum(pcm_s16le, sample_rate_hz))
+
+
+def rebin(magnitudes: np.ndarray, bins: int) -> np.ndarray:
+    """Reduce a transform to ``bins`` linear bands of mean magnitude.
+
+    Always returns exactly ``bins`` values, including for a degenerate frame that
+    produced no transform at all -- a short array would break the wire contract
+    at precisely the moment the page is least able to report why.
+    """
+    if bins <= 0:
+        return np.zeros(0)
+    if not len(magnitudes):
+        return np.full(bins, SPECTRUM_FLOOR)
+    edges = np.linspace(0, len(magnitudes), bins + 1).astype(int)
+    return np.array([
+        magnitudes[start:stop].mean() if stop > start else SPECTRUM_FLOOR
+        for start, stop in zip(edges[:-1], edges[1:])
+    ])
+
+
+def spectrum_bin_limit(sample_rate_hz: int, frame_ms: int) -> int:
+    """Highest bin count this transform can support without interpolating.
+
+    Computed rather than fixed: sample rate and frame length are public
+    parameters, so a hardcoded ceiling would permit interpolation presented as
+    measurement at lower rates.
+    """
+    frame_samples = max(sample_rate_hz * frame_ms // 1000, 0)
+    return min(MAX_SPECTRUM_BINS, frame_samples // 2 + 1)
+
+
+def spectrum_to_db(linear: np.ndarray) -> list[float]:
+    """Convert accumulated linear magnitudes to rounded, finite dB.
+
+    ``.tolist()`` is not optional: ``msgpack.packb`` raises ``TypeError`` on an
+    ``np.ndarray``. Rounding keeps the payload estimate honest.
+    """
+    floored = np.maximum(linear, SPECTRUM_FLOOR)
+    return [round(value, 1) for value in (20.0 * np.log10(floored)).tolist()]
 
 
 def _to_pcm_bytes(samples: np.ndarray) -> bytes:
@@ -255,6 +344,8 @@ class RadioVoiceSegmenter:
         max_floor_drift_db_per_sec: float = 6.0,
         recalibration_ms: int = 1_000,
         silence_floor_db: float = -60.0,
+        audio_spectrum_bins: int = 0,
+        spectrum_window_ms: int = 200,
         conditioner: "AudioConditioner | None" = None,
     ) -> None:
         if detector_mode not in DETECTOR_MODES:
@@ -269,6 +360,11 @@ class RadioVoiceSegmenter:
         self.hf_ratio_threshold = hf_ratio_threshold
         self.max_floor_drift_db_per_sec = max_floor_drift_db_per_sec
         self.silence_floor_db = silence_floor_db
+        self.spectrum_bin_limit = spectrum_bin_limit(sample_rate_hz, frame_ms)
+        self.audio_spectrum_bins = self._validated_spectrum_bins(audio_spectrum_bins)
+        window = max(1, -(-spectrum_window_ms // frame_ms))
+        self._raw_spectra: Deque[np.ndarray] = deque(maxlen=window)
+        self._conditioned_spectra: Deque[np.ndarray] = deque(maxlen=window)
         self.min_active_frames = max(1, -(-min_active_ms // frame_ms))
         self.hang_frames = max(1, -(-hang_time_ms // frame_ms))
         self.min_segment_bytes = sample_rate_hz * 2 * min_segment_ms // 1000
@@ -296,7 +392,9 @@ class RadioVoiceSegmenter:
         if frame.sample_rate_hz != self.sample_rate_hz:
             raise ValueError("PCM frame sample rate does not match segmenter")
         rms_db, peak_db = _pcm_levels(frame.pcm_s16le)
-        band_ratio = band_energy_ratio(frame.pcm_s16le, self.sample_rate_hz)
+        # One transform for this frame, shared by the detector and the display.
+        raw_magnitudes, freqs = frame_spectrum(frame.pcm_s16le, self.sample_rate_hz)
+        band_ratio = ratio_from_spectrum(raw_magnitudes, freqs)
         self._last_frame_rms_db = rms_db
         self._last_frame_peak_db = peak_db
         self._last_frame_band_ratio = band_ratio
@@ -304,7 +402,20 @@ class RadioVoiceSegmenter:
 
         # Conditioning runs on every frame, including discarded ones, so IIR state
         # stays warm and no step transient enters the pre-roll splice.
-        entry = (frame, self.conditioner.process(frame.pcm_s16le))
+        conditioned = self.conditioner.process(frame.pcm_s16le)
+        entry = (frame, conditioned)
+
+        if self.audio_spectrum_bins:
+            # Accumulate LINEAR magnitudes; dB is a log, so averaging there is a
+            # geometric mean that biases low and one silent frame would poison
+            # the window. Convert once, at read.
+            self._raw_spectra.append(rebin(raw_magnitudes, self.audio_spectrum_bins))
+            self._conditioned_spectra.append(
+                rebin(
+                    frame_spectrum(conditioned, self.sample_rate_hz)[0],
+                    self.audio_spectrum_bins,
+                )
+            )
 
         # Floor updates come only from hiss-like frames, and happen whether or not
         # the gate is open. Both halves matter: the first stops speech (which is
@@ -407,6 +518,17 @@ class RadioVoiceSegmenter:
             last_frame_band_ratio=self._last_frame_band_ratio,
             recalibrating=self._recalibrating,
             capped_closes=self._capped_closes,
+            # Keys are always present; null when disabled. Omitting them would
+            # make the payload's shape depend on a server-side setting, so a
+            # consumer would KeyError on one deployment and not another --
+            # indistinguishable from a stale library.
+            audio_spectrum_bin_hz=(
+                (self.sample_rate_hz / 2.0) / self.audio_spectrum_bins
+                if self.audio_spectrum_bins
+                else None
+            ),
+            audio_spectrum_raw_db=self._averaged_spectrum(self._raw_spectra),
+            audio_spectrum_conditioned_db=self._averaged_spectrum(self._conditioned_spectra),
         )
 
     def update_settings(
@@ -422,48 +544,76 @@ class RadioVoiceSegmenter:
         hf_ratio_threshold: float | None = None,
         max_floor_drift_db_per_sec: float | None = None,
         silence_floor_db: float | None = None,
+        audio_spectrum_bins: int | None = None,
         dc_block: bool | None = None,
         deemphasis_us: float | None = None,
         disable_deemphasis: bool = False,
         normalize: bool | None = None,
         normalize_target_dbfs: float | None = None,
     ) -> None:
-        """Apply safe gate and conditioning changes to frames received after this call."""
+        """Apply safe gate and conditioning changes to frames received after this call.
+
+        Every argument is validated before any is applied, across the gate *and*
+        the conditioner. A partially applied update was survivable while the
+        inconsistency died with the process; once these values are replayed on
+        respawn it becomes durable and silent.
+        """
+        if threshold_db is not None and threshold_db < 0:
+            raise ValueError("threshold_db must be non-negative")
+        for name, value in (
+            ("min_active_ms", min_active_ms),
+            ("hang_time_ms", hang_time_ms),
+            ("pre_roll_ms", pre_roll_ms),
+            ("min_segment_ms", min_segment_ms),
+        ):
+            if value is not None and value <= 0:
+                raise ValueError(f"{name} must be greater than zero")
+        if max_segment_sec is not None and max_segment_sec <= 0:
+            raise ValueError("max_segment_sec must be greater than zero")
+        if detector_mode is not None and detector_mode not in DETECTOR_MODES:
+            raise ValueError(f"detector_mode must be one of {list(DETECTOR_MODES)}")
+        if hf_ratio_threshold is not None and hf_ratio_threshold <= 0:
+            raise ValueError("hf_ratio_threshold must be greater than zero")
+        if max_floor_drift_db_per_sec is not None and max_floor_drift_db_per_sec <= 0:
+            raise ValueError("max_floor_drift_db_per_sec must be greater than zero")
+        if silence_floor_db is not None and silence_floor_db > 0:
+            raise ValueError("silence_floor_db must be at or below 0 dBFS")
+        checked_bins = (
+            self._validated_spectrum_bins(audio_spectrum_bins)
+            if audio_spectrum_bins is not None
+            else None
+        )
+        validate_conditioner_settings(deemphasis_us, normalize_target_dbfs)
+
         if threshold_db is not None:
-            if threshold_db < 0:
-                raise ValueError("threshold_db must be non-negative")
             self.threshold_db = threshold_db
         if min_active_ms is not None:
             self.min_active_frames = self._frames_for_ms(min_active_ms, "min_active_ms")
         if hang_time_ms is not None:
             self.hang_frames = self._frames_for_ms(hang_time_ms, "hang_time_ms")
+        # Everything below is apply-only: the checks above have already run, so a
+        # second copy here could never fire and would drift from them silently.
         if min_segment_ms is not None:
-            if min_segment_ms <= 0:
-                raise ValueError("min_segment_ms must be greater than zero")
             self.min_segment_bytes = self.sample_rate_hz * 2 * min_segment_ms // 1000
         if max_segment_sec is not None:
-            if max_segment_sec <= 0:
-                raise ValueError("max_segment_sec must be greater than zero")
             self.max_segment_bytes = int(self.sample_rate_hz * 2 * max_segment_sec)
         if pre_roll_ms is not None:
             maxlen = self._frames_for_ms(pre_roll_ms, "pre_roll_ms")
             self._pre_roll = deque(self._pre_roll, maxlen=maxlen)
         if detector_mode is not None:
-            if detector_mode not in DETECTOR_MODES:
-                raise ValueError(f"detector_mode must be one of {list(DETECTOR_MODES)}")
             self.detector_mode = detector_mode
         if hf_ratio_threshold is not None:
-            if hf_ratio_threshold <= 0:
-                raise ValueError("hf_ratio_threshold must be greater than zero")
             self.hf_ratio_threshold = hf_ratio_threshold
         if max_floor_drift_db_per_sec is not None:
-            if max_floor_drift_db_per_sec <= 0:
-                raise ValueError("max_floor_drift_db_per_sec must be greater than zero")
             self.max_floor_drift_db_per_sec = max_floor_drift_db_per_sec
         if silence_floor_db is not None:
-            if silence_floor_db > 0:
-                raise ValueError("silence_floor_db must be at or below 0 dBFS")
             self.silence_floor_db = silence_floor_db
+        if checked_bins is not None and checked_bins != self.audio_spectrum_bins:
+            self.audio_spectrum_bins = checked_bins
+            # Bin count changed, so accumulated frames are a different width and
+            # cannot be averaged together.
+            self._raw_spectra.clear()
+            self._conditioned_spectra.clear()
         self.conditioner.update(
             dc_block=dc_block,
             deemphasis_us=deemphasis_us,
@@ -471,6 +621,32 @@ class RadioVoiceSegmenter:
             normalize_target_dbfs=normalize_target_dbfs,
             clear_deemphasis=disable_deemphasis,
         )
+
+    def _validated_spectrum_bins(self, bins: int) -> int:
+        """Accept 0, or 8 up to this transform's resolution.
+
+        Where the transform cannot supply the minimum, only 0 is legal -- quoting
+        an impossible range like 8..5 would be worse than saying so.
+        """
+        if bins == 0:
+            return 0
+        if self.spectrum_bin_limit < MIN_SPECTRUM_BINS:
+            raise ValueError(
+                f"audio_spectrum_bins must be 0 at {self.sample_rate_hz} Hz with "
+                f"{self.frame_ms} ms frames: the transform supports only "
+                f"{self.spectrum_bin_limit} bins, below the minimum of {MIN_SPECTRUM_BINS}"
+            )
+        if not MIN_SPECTRUM_BINS <= bins <= self.spectrum_bin_limit:
+            raise ValueError(
+                f"audio_spectrum_bins must be 0 or between {MIN_SPECTRUM_BINS} and "
+                f"{self.spectrum_bin_limit} for this sample rate and frame length"
+            )
+        return bins
+
+    def _averaged_spectrum(self, window: "Deque[np.ndarray]") -> list[float] | None:
+        if not self.audio_spectrum_bins or not window:
+            return None
+        return spectrum_to_db(np.mean(np.stack(window), axis=0))
 
     def carry_counters(self, *, completed: int, dropped: int, capped_closes: int) -> None:
         """Seed run totals from a previous segmenter, so a respawn does not zero them."""

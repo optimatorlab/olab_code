@@ -126,6 +126,14 @@ class VoiceSegmentStatus:
     last_frame_band_ratio: float | None = None
     recalibrating: bool = False
     capped_closes: int = 0
+    # Audio-domain spectrum of the demodulated stream. Named audio_* to keep it
+    # distinct from the RF spectrum subsystem, which has its own snapshot type
+    # whose field is also called `bins`. Null unless explicitly enabled: two
+    # float arrays on every rf.voice.status message is real growth on a
+    # frequently published subject.
+    audio_spectrum_bin_hz: float | None = None
+    audio_spectrum_raw_db: list[float] | None = None
+    audio_spectrum_conditioned_db: list[float] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -147,6 +155,9 @@ class VoiceSegmentStatus:
             "last_frame_band_ratio": self.last_frame_band_ratio,
             "recalibrating": self.recalibrating,
             "capped_closes": self.capped_closes,
+            "audio_spectrum_bin_hz": self.audio_spectrum_bin_hz,
+            "audio_spectrum_raw_db": self.audio_spectrum_raw_db,
+            "audio_spectrum_conditioned_db": self.audio_spectrum_conditioned_db,
         }
 
 
