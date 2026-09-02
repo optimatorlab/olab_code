@@ -35,6 +35,7 @@ class FasterWhisperStreamingTranscriber:
     silence_threshold_db: float = -55.0
     vad_filter: bool = True
     max_queued_frames: int = 128
+    initial_prompt_context_chars: int = 200
     _model: Any | None = field(default=None, init=False, repr=False)
     _frame_queue: asyncio.Queue[AudioFrame | None] | None = field(
         default=None, init=False, repr=False
@@ -52,6 +53,7 @@ class FasterWhisperStreamingTranscriber:
     _segment_start_time: float | None = field(default=None, init=False, repr=False)
     _segment_end_time: float | None = field(default=None, init=False, repr=False)
     _last_speech_end_time: float | None = field(default=None, init=False, repr=False)
+    _next_initial_prompt: str | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.model_path = Path(self.model_path).expanduser()
@@ -182,9 +184,16 @@ class FasterWhisperStreamingTranscriber:
         if not has_speech:
             return
         pcm = b"".join(frame.data for frame in frames)
-        text, confidence = await asyncio.to_thread(self._transcribe, pcm)
+        initial_prompt = self._next_initial_prompt
+        # A real pause (endpoint silence) ends the utterance, so don't carry its
+        # trailing words into whatever unrelated speech comes next; only a
+        # mid-utterance interval split gets continuity across the boundary.
+        self._next_initial_prompt = None
+        text, confidence = await asyncio.to_thread(self._transcribe, pcm, initial_prompt)
         if not text:
             return
+        if event_type == "transcript.interval_final":
+            self._next_initial_prompt = text[-self.initial_prompt_context_chars :]
         self._segment_counter += 1
         event = TranscriptEvent(
             text=text,
@@ -200,7 +209,7 @@ class FasterWhisperStreamingTranscriber:
             raise RuntimeError("Faster-Whisper event queue was not initialized")
         await self._event_queue.put(event)
 
-    def _transcribe(self, pcm: bytes) -> tuple[str, float | None]:
+    def _transcribe(self, pcm: bytes, initial_prompt: str | None) -> tuple[str, float | None]:
         if self._model is None:
             raise RuntimeError("Faster-Whisper streaming transcriber has not been initialized")
         samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
@@ -209,6 +218,7 @@ class FasterWhisperStreamingTranscriber:
             language=self.language,
             beam_size=self.beam_size,
             vad_filter=self.vad_filter,
+            initial_prompt=initial_prompt,
         )
         collected = list(segments)
         text = " ".join(segment.text.strip() for segment in collected if segment.text.strip()).strip()
