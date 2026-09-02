@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from math import log10, sqrt
+from math import isfinite, log10, sqrt
 from pathlib import Path
 from typing import Any, AsyncIterator, Literal
 
@@ -36,6 +36,16 @@ class FasterWhisperStreamingTranscriber:
     vad_filter: bool = True
     max_queued_frames: int = 128
     initial_prompt_context_chars: int = 200
+    context_reset_silence_multiplier: float = 4.0
+    """Scale factor on ``endpoint_silence_seconds`` (not an absolute number of
+    seconds): the carried ``initial_prompt`` is discarded once the real gap
+    since speech was last heard exceeds ``endpoint_silence_seconds *
+    context_reset_silence_multiplier``. A value below ``1.0`` makes that
+    threshold shorter than ``endpoint_silence_seconds`` itself, so every
+    ``transcript.segment_final`` resets context — recovering the previous
+    (pre-#63-fix) never-carry-past-segment_final behavior as an explicit
+    opt-in escape hatch for a consumer who disagrees with the "always carry"
+    default."""
     _model: Any | None = field(default=None, init=False, repr=False)
     _frame_queue: asyncio.Queue[AudioFrame | None] | None = field(
         default=None, init=False, repr=False
@@ -53,16 +63,67 @@ class FasterWhisperStreamingTranscriber:
     _segment_start_time: float | None = field(default=None, init=False, repr=False)
     _segment_end_time: float | None = field(default=None, init=False, repr=False)
     _last_speech_end_time: float | None = field(default=None, init=False, repr=False)
+    _segment_first_speech_time: float | None = field(default=None, init=False, repr=False)
+    _last_speech_heard_time: float | None = field(default=None, init=False, repr=False)
+    """Cross-segment bookkeeping: the timestamp speech was last heard,
+    updated only in ``_emit_segment`` and deliberately **not** cleared by
+    ``_reset_segment()`` — it has to survive segment boundaries to measure
+    the real elapsed gap for the long-silence context reset. Do not fold
+    this into ``_reset_segment()``'s per-segment cleanup."""
     _next_initial_prompt: str | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.model_path = Path(self.model_path).expanduser()
-        if self.target_interval_seconds <= 0:
-            raise ValueError("target_interval_seconds must be positive")
-        if self.endpoint_silence_seconds <= 0:
-            raise ValueError("endpoint_silence_seconds must be positive")
+        if not (self.target_interval_seconds > 0 and isfinite(self.target_interval_seconds)):
+            raise ValueError("target_interval_seconds must be a positive, finite number")
+        if not (
+            self.endpoint_silence_seconds > 0 and isfinite(self.endpoint_silence_seconds)
+        ):
+            raise ValueError("endpoint_silence_seconds must be a positive, finite number")
+        if not (
+            self.context_reset_silence_multiplier > 0
+            and isfinite(self.context_reset_silence_multiplier)
+        ):
+            raise ValueError("context_reset_silence_multiplier must be a positive, finite number")
         if self.max_queued_frames < 1:
             raise ValueError("max_queued_frames must be at least 1")
+        if self.initial_prompt_context_chars < 1:
+            raise ValueError("initial_prompt_context_chars must be at least 1")
+
+    def update_tuning(
+        self,
+        *,
+        target_interval_seconds: float | None = None,
+        endpoint_silence_seconds: float | None = None,
+        context_reset_silence_multiplier: float | None = None,
+    ) -> None:
+        """Live-update chunking-tuning knobs without reconstructing the
+        transcriber. Any argument left as ``None`` is unchanged. Validates
+        every provided value before assigning any of them, so a bad value
+        raises ``ValueError`` and leaves all existing tuning fields
+        unmodified (no partial application). Not thread-safe beyond the
+        normal single-asyncio-loop assumptions the rest of this class makes;
+        ``_consume_frame`` reads these fields fresh every frame, so an
+        update takes effect on the very next frame."""
+        if target_interval_seconds is not None and not (
+            target_interval_seconds > 0 and isfinite(target_interval_seconds)
+        ):
+            raise ValueError("target_interval_seconds must be a positive, finite number")
+        if endpoint_silence_seconds is not None and not (
+            endpoint_silence_seconds > 0 and isfinite(endpoint_silence_seconds)
+        ):
+            raise ValueError("endpoint_silence_seconds must be a positive, finite number")
+        if context_reset_silence_multiplier is not None and not (
+            context_reset_silence_multiplier > 0 and isfinite(context_reset_silence_multiplier)
+        ):
+            raise ValueError("context_reset_silence_multiplier must be a positive, finite number")
+
+        if target_interval_seconds is not None:
+            self.target_interval_seconds = target_interval_seconds
+        if endpoint_silence_seconds is not None:
+            self.endpoint_silence_seconds = endpoint_silence_seconds
+        if context_reset_silence_multiplier is not None:
+            self.context_reset_silence_multiplier = context_reset_silence_multiplier
 
     async def start(self) -> None:
         if self._started:
@@ -159,6 +220,8 @@ class FasterWhisperStreamingTranscriber:
         self._segment_end_time = frame_end_time
 
         if self._is_speech(frame):
+            if self._last_speech_end_time is None:
+                self._segment_first_speech_time = frame.timestamp
             self._last_speech_end_time = frame_end_time
 
         if self._last_speech_end_time is not None:
@@ -179,21 +242,53 @@ class FasterWhisperStreamingTranscriber:
         segment_start_time = self._segment_start_time
         segment_end_time = self._segment_end_time
         has_speech = self._last_speech_end_time is not None
+        segment_first_speech_time = self._segment_first_speech_time
+        segment_last_speech_time = self._last_speech_end_time
         self._reset_segment()
 
         if not has_speech:
             return
-        pcm = b"".join(frame.data for frame in frames)
+
+        # Cross-segment context continuity (olab_code#63): by default we
+        # always carry the previous segment's trailing text forward as
+        # `initial_prompt`, regardless of whether that segment ended via
+        # transcript.interval_final or transcript.segment_final — a real
+        # pause is usually just a natural breath at typical
+        # endpoint_silence_seconds, and re-decoding the next chunk with no
+        # context is what causes the stuttered/duplicated first word. Only a
+        # genuinely long silence (relative to endpoint_silence_seconds)
+        # discards the carried context, since at that point it's more likely
+        # to be a stale, unrelated topic than useful continuity.
         initial_prompt = self._next_initial_prompt
-        # A real pause (endpoint silence) ends the utterance, so don't carry its
-        # trailing words into whatever unrelated speech comes next; only a
-        # mid-utterance interval split gets continuity across the boundary.
-        self._next_initial_prompt = None
+        previous_speech_heard_time = self._last_speech_heard_time
+        if previous_speech_heard_time is not None:
+            gap = segment_first_speech_time - previous_speech_heard_time
+            reset_threshold = self.endpoint_silence_seconds * self.context_reset_silence_multiplier
+            if gap > reset_threshold:
+                initial_prompt = None
+                # Discard the stored context outright, not just for this one
+                # call: if this segment's own transcription comes back empty
+                # (a cough/click right after the long pause), leaving
+                # `_next_initial_prompt` in place would let the *next*
+                # segment inherit stale, pre-gap context.
+                self._next_initial_prompt = None
+
+        pcm = b"".join(frame.data for frame in frames)
         text, confidence = await asyncio.to_thread(self._transcribe, pcm, initial_prompt)
+
+        # Roll `_last_speech_heard_time` forward on every segment that had
+        # speech, whether or not it transcribed to non-empty text, so the
+        # next segment's gap is always measured from the true most-recent
+        # speech rather than going stale across an empty-text segment.
+        self._last_speech_heard_time = segment_last_speech_time
+
         if not text:
             return
-        if event_type == "transcript.interval_final":
-            self._next_initial_prompt = text[-self.initial_prompt_context_chars :]
+        # An empty transcription must not clear the carried context — only a
+        # non-empty result replaces it with its own trailing text. This
+        # keeps continuity intact across a breath/click/cough that clears
+        # the dB gate but produces no words.
+        self._next_initial_prompt = text[-self.initial_prompt_context_chars :]
         self._segment_counter += 1
         event = TranscriptEvent(
             text=text,
@@ -244,6 +339,10 @@ class FasterWhisperStreamingTranscriber:
         self._segment_start_time = None
         self._segment_end_time = None
         self._last_speech_end_time = None
+        self._segment_first_speech_time = None
+        # NOTE: _last_speech_heard_time is deliberately NOT cleared here — it
+        # is cross-segment bookkeeping for the long-silence context reset in
+        # _emit_segment and must survive across segment boundaries.
 
     def _validate_frame(self, frame: AudioFrame) -> None:
         if frame.format != "pcm_s16le":
