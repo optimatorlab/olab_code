@@ -13,6 +13,18 @@ from olab_voice.stt.faster_whisper_streaming import (
 )
 
 
+def _transcriber_with_segments(tmp_path, texts):
+    """A transcriber whose _transcribe() will see one internal segment per
+    text in `texts`, without going through start()/the async pipeline --
+    _transcribe() is a plain sync method once _model is set."""
+    transcriber = FasterWhisperStreamingTranscriber(tmp_path / "model")
+    segments = [SimpleNamespace(text=text, avg_logprob=-0.1) for text in texts]
+    transcriber._model = SimpleNamespace(
+        transcribe=lambda samples, **kwargs: (iter(segments), SimpleNamespace())
+    )
+    return transcriber
+
+
 class _FakeSegment:
     text = " corrected text "
     avg_logprob = -0.25
@@ -414,3 +426,94 @@ def test_update_tuning_takes_effect_on_the_next_frame(monkeypatch, tmp_path):
 
     event = asyncio.run(run())
     assert event.type == "transcript.segment_final"
+
+
+def test_transcribe_strips_internal_segment_join_artifacts(tmp_path):
+    """olab_code: Faster-Whisper's own internal VAD can split one
+    _transcribe() call's buffer into multiple internal segments (common with
+    a longer buffer). Each gets independent capitalization/terminal
+    punctuation from the decoder, which a plain join bakes in as spurious
+    mid-utterance artifacts -- e.g. real sayso examples "deferred until..
+    you're at the bench" and "...FRS, GMRS, Corpus mentioned...". Every
+    segment except the last should have its full trailing .!?... run
+    stripped (not just one char -- a single-char strip does not fully
+    resolve "deferred until.."), and every segment except the first should
+    have its leading letter decapitalized -- but the last segment's own
+    trailing punctuation, and the first segment's own leading capital, are
+    real and must survive untouched."""
+    transcriber = _transcriber_with_segments(
+        tmp_path,
+        [
+            # Interior trailing whitespace after the punctuation run --
+            # rstrip() alone would leave "Deferred until " (regression check
+            # for the re-.strip() step, not just the punctuation strip;
+            # verified against the reported bug's exact "deferred until.."
+            # example, plus a leading space before the punctuation run).
+            "Deferred until ..",
+            # Unicode ellipsis (Whisper emits this codepoint, not "...").
+            "you're at the bench…",
+            # Acronym list -- the guard must leave this alone.
+            "ADS-B, AIS, FRS, GMRS,",
+            # The last segment: not stripped (no trailing punctuation here
+            # to strip), but still decapitalized like any non-first
+            # segment -- this is the plan's other reported bug example.
+            "Corpus mentioned in the issue",
+        ],
+    )
+    text, _confidence = transcriber._transcribe(b"\x00\x10" * 160, initial_prompt=None)
+    assert (
+        text
+        == "Deferred until you're at the bench ADS-B, AIS, FRS, GMRS, corpus mentioned in the issue"
+    )
+    assert "  " not in text
+
+
+def test_transcribe_preserves_a_last_segment_that_strips_to_empty_raw_text(tmp_path):
+    """A raw trailing segment that strips to empty text (e.g. Faster-Whisper
+    emitting a blank/whitespace-only segment right at the end of a call)
+    must not be mistaken for "the real last segment" -- the real last
+    non-empty segment must still keep its own trailing punctuation."""
+    transcriber = _transcriber_with_segments(
+        tmp_path, ["Copy that.", "we can proceed.", "   "]
+    )
+    text, _confidence = transcriber._transcribe(b"\x00\x10" * 160, initial_prompt=None)
+    assert text == "Copy that we can proceed."
+
+
+def test_transcribe_decap_guard_does_not_crash_on_non_alpha_leading_char(tmp_path):
+    """A non-alphabetic leading character (a digit or an opening quote) must
+    not crash the decapitalization guard."""
+    transcriber = _transcriber_with_segments(
+        tmp_path, ["First,", '"42 degrees, hold."', "9 o'clock now"]
+    )
+    text, _confidence = transcriber._transcribe(b"\x00\x10" * 160, initial_prompt=None)
+    assert text == 'First, "42 degrees, hold." 9 o\'clock now'
+
+
+def test_transcribe_drops_a_punctuation_only_internal_segment(tmp_path):
+    """A middle internal segment that is only punctuation (Faster-Whisper
+    emits bare "..." segments for near-silence under vad_filter=True -- the
+    exact regime this fix targets) must be dropped entirely, not crash on an
+    empty string during decapitalization and not leave a stray double space
+    in the join."""
+    transcriber = _transcriber_with_segments(tmp_path, ["Okay", "...", "we can start"])
+    text, _confidence = transcriber._transcribe(b"\x00\x10" * 160, initial_prompt=None)
+    assert text == "Okay we can start"
+    assert "  " not in text
+
+
+def test_transcribe_decap_guard_skips_pronoun_i_and_acronyms(tmp_path):
+    """The decapitalization guard must not lowercase a leading "I"/"I'll"
+    pronoun or a multi-char all-uppercase acronym token -- both are
+    legitimately capitalized mid-utterance, and blindly decapitalizing them
+    would replace one artifact with a worse one (this is exactly the
+    plan's own motivating acronym-list example: "ADS-B, AIS, FRS, GMRS,
+    ..."). An ordinary lowercase-eligible continuation in the same call
+    still gets decapitalized, confirming the guard is scoped rather than a
+    blanket skip."""
+    transcriber = _transcriber_with_segments(
+        tmp_path,
+        ["Copy that.", "I'll check the feed.", "ADS-B, AIS,", "FRS, GMRS", "Corpus mentioned it"],
+    )
+    text, _confidence = transcriber._transcribe(b"\x00\x10" * 160, initial_prompt=None)
+    assert text == "Copy that I'll check the feed ADS-B, AIS, FRS, GMRS corpus mentioned it"

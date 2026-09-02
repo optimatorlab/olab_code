@@ -20,6 +20,28 @@ class StreamingBackpressureError(RuntimeError):
     """Raised when a live-audio producer outruns the bounded worker queue."""
 
 
+# Full trailing run of these characters (including the Unicode ellipsis, which
+# Faster-Whisper emits as a single codepoint rather than three periods) is
+# stripped from every internal segment except the last when joining one
+# _transcribe() call's segments -- see _transcribe() below.
+_INTERNAL_SEGMENT_TRAILING_PUNCTUATION = ".!?…"
+
+
+def _leading_token_is_guarded(text: str) -> bool:
+    """True if decapitalizing ``text``'s leading letter would damage it.
+
+    Guards two token classes that a blanket decapitalize-the-leading-letter
+    rule would otherwise corrupt: the first-person pronoun ("I", "I'll",
+    "I'm", ...) and multi-character acronyms ("AIS,", "GMRS", ...).
+    ``str.isupper()`` ignores uncased characters such as a trailing comma,
+    so no extra punctuation-stripping is needed for the acronym check.
+    """
+    token = text.split(" ", 1)[0]
+    if token == "I" or token.startswith("I'"):
+        return True
+    return len(token) > 1 and token.isupper()
+
+
 @dataclass(slots=True)
 class FasterWhisperStreamingTranscriber:
     """Bounded, local Faster-Whisper transcription for ordered PCM frames."""
@@ -316,7 +338,45 @@ class FasterWhisperStreamingTranscriber:
             initial_prompt=initial_prompt,
         )
         collected = list(segments)
-        text = " ".join(segment.text.strip() for segment in collected if segment.text.strip()).strip()
+        # By the time _transcribe() is called, the caller (_emit_segment) has
+        # already decided this whole buffer is one continuous utterance --
+        # via endpoint_silence_seconds or the target_interval_seconds
+        # backstop. So any re-segmentation Faster-Whisper's own internal VAD
+        # does *within* this one call is never a real sentence boundary from
+        # the caller's perspective, and the per-internal-segment
+        # capitalization/terminal punctuation the decoder assigns at each
+        # split is spurious. Strip it out before joining -- but never for the
+        # last segment (the real end of this call's utterance, whose own
+        # trailing punctuation/capitalization is legitimate).
+        raw_texts = [segment.text.strip() for segment in collected if segment.text.strip()]
+        last_index = len(raw_texts) - 1
+        pieces: list[str] = []
+        for index, raw_text in enumerate(raw_texts):
+            piece = raw_text
+            if index != last_index:
+                # Full trailing run, not just one char -- a single-char strip
+                # does not fully resolve real examples like "deferred
+                # until..": stripping only the last char still leaves
+                # "deferred until.", the same artifact class. Re-.strip()
+                # afterward: rstrip() alone can leave interior whitespace
+                # behind (e.g. "hello . . ." -> "hello . .").
+                piece = piece.rstrip(_INTERNAL_SEGMENT_TRAILING_PUNCTUATION).strip()
+                if not piece:
+                    # A segment that was only punctuation (Faster-Whisper
+                    # emits bare "..." segments for near-silence under
+                    # vad_filter=True) contributes nothing -- drop it rather
+                    # than leaving a stray double space in the join.
+                    continue
+            # Decapitalize every segment except the first surviving one (the
+            # true start of this call's joined text -- not necessarily
+            # raw_texts[0], if that segment was itself all punctuation and
+            # got dropped above). Guarded so this doesn't damage "I"/"I'll"
+            # or multi-char acronyms like "AIS," that a blanket decap would
+            # otherwise corrupt.
+            if pieces and piece[0].isalpha() and not _leading_token_is_guarded(piece):
+                piece = piece[0].lower() + piece[1:]
+            pieces.append(piece)
+        text = " ".join(pieces).strip()
         probabilities = [segment.avg_logprob for segment in collected if segment.avg_logprob is not None]
         confidence = sum(probabilities) / len(probabilities) if probabilities else None
         return text, confidence
