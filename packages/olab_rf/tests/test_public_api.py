@@ -27,6 +27,7 @@ def test_top_level_exports_cover_primary_python_api():
         "SpectrumSnapshot",
         "build_frequency_range_scan_plan",
         "get_history",
+        "read_sigmf_iq",
     }
 
     assert expected <= set(olab_rf.__all__)

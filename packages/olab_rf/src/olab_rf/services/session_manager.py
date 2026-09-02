@@ -9,6 +9,7 @@ from statistics import median
 from tempfile import TemporaryDirectory
 from threading import Event, Lock, Thread, current_thread
 import time
+from typing import Literal
 from uuid import uuid4
 
 from olab_rf.config import OlabRfConfig
@@ -20,6 +21,7 @@ from olab_rf.decoders.rtl_fm import rtl_fm_audio_rate_hz, rtl_fm_command
 from olab_rf.decoders.rtl_power import parse_rtl_power_line, rtl_power_command
 from olab_rf.decoders.rtl_sdr_iq import estimate_iq_peak
 from olab_rf.decoders.rtl_ais import parse_ais_nmea_line, rtl_ais_command
+from olab_rf.decoders.sigmf import read_sigmf_iq, sigmf_paths, truncate_to_iq_pairs, write_sigmf_meta
 from olab_rf.history import SqliteHistory
 from olab_rf.models import ReceiverConfig, RecordingRequest, RecordingStatus, SensorStatus
 from olab_rf.models.digital import DigitalListenStatus
@@ -38,7 +40,7 @@ from olab_rf.models.spectrum import (
     SpectrumEvent,
     SpectrumSnapshot,
 )
-from olab_rf.receivers.rtlsdr_iq import capture_iq_samples_with_rtl_sdr
+from olab_rf.receivers.rtlsdr_iq import capture_iq_samples_with_rtl_sdr, rtl_sdr_iq_command
 from olab_rf.services.iq_candidates import candidate_from_iq_peak
 from olab_rf.services.range_scanner import build_frequency_range_scan_plan
 from olab_rf.services.track_store import TrackStore
@@ -51,7 +53,9 @@ from olab_rf.services.voice_segments import (
     RtlFmAudioBackend,
     spectrum_bin_limit,
 )
-from olab_rf.models.tracks import utc_now
+from olab_rf.models.tracks import dt_to_iso, utc_now
+
+_DEFAULT_REPLAY_SECONDS = 5.0
 
 
 @dataclass(slots=True)
@@ -94,6 +98,7 @@ class SessionManager:
     _previous_request: tuple[str, dict[str, object]] | None = None
     _poll_lock: Lock = field(default_factory=Lock)
     _recording: RecordingStatus | None = None
+    _recording_process: DecoderProcess | None = None
     _voice_backend: PcmAudioBackend | None = None
     _voice_segmenter: RadioVoiceSegmenter | None = None
     _voice_segments: list[RadioVoiceSegment] = field(default_factory=list)
@@ -319,6 +324,8 @@ class SessionManager:
         ``error``. If ``baseline`` is omitted, the most recent baseline captured
         by this manager is reused when available.
         """
+        if backend == "iq_replay":
+            raise ValueError("iq_replay is not supported here; use start_iq_replay_scan()")
         path = path or self._frequency_scan_backend_path(backend)
         request = FrequencyScanRequest(
             min_freq_hz=min_freq_hz,
@@ -362,6 +369,8 @@ class SessionManager:
         channel definitions, or explicit min/max inputs, are converted to a
         grid using ``step_hz`` or ``channel_width_hz``.
         """
+        if backend == "iq_replay":
+            raise ValueError("iq_replay is not supported here; use start_iq_replay_scan()")
         plan = build_frequency_range_scan_plan(
             catalog=self.frequency_catalog,
             range_id=range_id,
@@ -400,6 +409,8 @@ class SessionManager:
         resume_previous: bool = False,
     ) -> FrequencyScanStatus:
         """Scan known catalog channels in a range and return scan status."""
+        if backend == "iq_replay":
+            raise ValueError("iq_replay is not supported here; use start_iq_replay_scan()")
         frequency_range = self.frequency_catalog.range_by_id(range_id)
         if frequency_range is None:
             raise ValueError(f"range id not found: {range_id}")
@@ -432,6 +443,8 @@ class SessionManager:
         sample_rate_hz: int | None = None,
     ) -> FrequencyScanStatus:
         """Start a bounded baseline scan for later differential comparison."""
+        if backend == "iq_replay":
+            raise ValueError("iq_replay is not supported here; use start_iq_replay_scan()")
         path = path or self._frequency_scan_backend_path(backend)
         request = FrequencyScanRequest(
             min_freq_hz=min_freq_hz,
@@ -467,6 +480,8 @@ class SessionManager:
         sample_rate_hz: int | None = None,
     ) -> FrequencyScanStatus:
         """Start a range baseline from catalog or arbitrary frequency inputs."""
+        if backend == "iq_replay":
+            raise ValueError("iq_replay is not supported here; use start_iq_replay_scan()")
         plan = build_frequency_range_scan_plan(
             catalog=self.frequency_catalog,
             range_id=range_id,
@@ -489,6 +504,37 @@ class SessionManager:
             sample_rate_hz=sample_rate_hz,
         )
 
+    def start_iq_replay_scan(
+        self,
+        *,
+        replay_path: str,
+        channel_width_hz: int | None = None,
+        replay_max_samples: int | None = None,
+    ) -> FrequencyScanStatus:
+        """Replay a previously recorded SigMF IQ file through the live IQ path.
+
+        Unlike every other scan entry point this reads a file and touches no
+        device: it does not call ``stop()`` (so it does not conflict with a
+        live recording or any other mode) and does not create a
+        ``RadioSession`` or mutate ``self.session``/``self.status``. It does
+        still respect the single ``self._frequency_scan`` slot every scan
+        backend shares — call this while another scan is ``"running"`` and it
+        raises, the same "one scan at a time" invariant ``stop()`` enforces
+        for the other backends.
+        """
+        request = FrequencyScanRequest(
+            backend="iq_replay",
+            replay_path=replay_path,
+            channel_width_hz=channel_width_hz,
+            replay_max_samples=replay_max_samples,
+        )
+        return self._start_frequency_scan(
+            request=request,
+            path="",
+            baseline=None,
+            is_baseline=False,
+        )
+
     def _start_frequency_scan(
         self,
         *,
@@ -497,6 +543,8 @@ class SessionManager:
         baseline: FrequencyBaseline | None,
         is_baseline: bool,
     ) -> FrequencyScanStatus:
+        if request.backend == "iq_replay":
+            return self._run_iq_replay_scan(request=request)
         if request.backend == "rtl_sdr_iq":
             return self._run_iq_frequency_scan(
                 request=request,
@@ -667,6 +715,88 @@ class SessionManager:
             sweeps_completed=len(request.channel_frequencies_hz),
         )
         self._complete_frequency_scan()
+        return self._frequency_scan
+
+    def _run_iq_replay_scan(self, *, request: FrequencyScanRequest) -> FrequencyScanStatus:
+        """Replay a recorded SigMF file through the same IQ-peak code path.
+
+        Deliberately does not call ``self.stop()`` and does not touch
+        ``self.session``/``self.status`` — replay reads a file, it does not
+        need exclusive access to the physical receiver, so it must not
+        conflict with a live recording (or clobber a live scan/listen mode's
+        status surface). It still respects the single ``self._frequency_scan``
+        slot every scan backend shares.
+
+        Failures (a missing/corrupt SigMF file, an unsupported datatype, a
+        capture with no samples) are routed through this scan's own ``error``
+        status, the same convention every other backend uses, rather than
+        letting a raw exception escape uncaught.
+        """
+        if self._frequency_scan and self._frequency_scan.status == "running":
+            raise RuntimeError("a frequency scan is already running")
+        assert request.replay_path is not None  # enforced by __post_init__
+
+        self._frequency_scan_started_monotonic = time.monotonic()
+        self._frequency_scan_powers = {}
+        self._frequency_scan_is_baseline = False
+        self._frequency_scan_baseline = None
+        self._frequency_scan = FrequencyScanStatus.created(
+            request=request, session_id=None, baseline_id=None
+        )
+
+        try:
+            # A cheap probe (one sample) validates the file -- datatype,
+            # non-empty captures -- via read_sigmf_iq's own checks, and gives
+            # us the file's own sample rate to size the default read window,
+            # without a second hand-rolled parse of the sidecar.
+            probe = read_sigmf_iq(request.replay_path, max_samples=1)
+            max_samples = (
+                request.replay_max_samples
+                if request.replay_max_samples is not None
+                else int(probe.sample_rate_hz * _DEFAULT_REPLAY_SECONDS)
+            )
+            recording = read_sigmf_iq(request.replay_path, max_samples=max_samples)
+            if recording.samples.size == 0:
+                raise ValueError(
+                    f"SigMF capture has no samples to replay: {request.replay_path}"
+                )
+            tolerance_hz = request.channel_width_hz or 2_500
+            fft_size = _largest_power_of_two_leq(int(recording.samples.size))
+            estimate = estimate_iq_peak(
+                recording.samples,
+                center_frequency_hz=recording.frequency_hz,
+                sample_rate_hz=recording.sample_rate_hz,
+                fft_size=fft_size,
+                max_offset_hz=tolerance_hz,
+            )
+            catalog = self._catalog_with_history_favorites()
+            candidate = candidate_from_iq_peak(
+                estimate,
+                catalog=catalog,
+                tolerance_hz=tolerance_hz,
+            )
+        except (OSError, ValueError) as exc:
+            error = str(exc)
+            self._frequency_scan = self._replace_scan(
+                self._frequency_scan,
+                status="error",
+                progress=1.0,
+                stopped_at=utc_now(),
+                error=error,
+            )
+            raise RuntimeError(error) from exc
+
+        self._frequency_scan = self._replace_scan(
+            self._frequency_scan,
+            status="complete",
+            candidates=[candidate],
+            elapsed_sec=time.monotonic() - self._frequency_scan_started_monotonic,
+            progress=1.0,
+            sweeps_completed=1,
+            stopped_at=utc_now(),
+        )
+        if self.history:
+            self.history.add_frequency_scan(self._frequency_scan)
         return self._frequency_scan
 
     def start_listen(
@@ -1464,6 +1594,7 @@ class SessionManager:
             self.ingest_frequency_scan_stdout()
             self.ingest_voice_segments()
             self._poll_digital_listen()
+            self.ingest_recording()
         return self.status
 
     def poll_frequency_scan(self) -> FrequencyScanStatus | None:
@@ -1472,12 +1603,30 @@ class SessionManager:
             self.ingest_frequency_scan_stdout()
             return self._frequency_scan
 
-    def stop(self, *, clear_previous: bool = True, clear_error: bool = True) -> None:
+    def stop(
+        self,
+        *,
+        clear_previous: bool = True,
+        clear_error: bool = True,
+        stop_active_recording: bool = False,
+    ) -> None:
         """Stop the active workflow.
 
         By default this also clears any stored previous request used by
-        ``resume_previous``.
+        ``resume_previous``. If an IQ recording is active, ``stop()`` raises
+        unless ``stop_active_recording=True`` is passed — silently
+        discarding a partially-written corpus file is not this method's
+        default behavior. Pass ``stop_active_recording=True`` to end the
+        recording as part of this call (the same finalize
+        ``stop_recording()`` performs).
         """
+        if self._recording and self._recording.status == "running":
+            if not stop_active_recording:
+                raise RuntimeError(
+                    "an IQ recording is active; call stop_recording() or "
+                    "stop(stop_active_recording=True) first"
+                )
+            self._finalize_recording("stopped")
         self._stop_voice_auto_poll()
         if self._voice_backend and self.session and self.session.mode == "voice_segments":
             self._emit_voice_event("capture_stopped", state="stopped")
@@ -1555,39 +1704,186 @@ class SessionManager:
         diagnostic = _last_nonempty(stderr_lines)
         self.status.error = diagnostic or fallback
 
-    def start_recording(self, request: RecordingRequest) -> RecordingStatus:
-        """Validate and record the requested recording contract.
+    def _is_other_mode_active(self) -> bool:
+        """True when a live device-mode backend is running.
 
-        Actual recording is intentionally not implemented yet. The returned
-        status is an explicit error so callers can build against the stable
-        request/status shape without assuming bytes are being captured.
+        Recording never sets ``self.session``/``self._process`` (see
+        ``start_recording``), so this predicate cannot see a recording's own
+        state by construction — no special-case exclusion needed.
+        """
+        return bool(
+            self.session is not None
+            and self.session.status == "running"
+            and (self._process or self._digital_backend or self._voice_backend)
+        )
+
+    def start_recording(self, request: RecordingRequest) -> RecordingStatus:
+        """Start recording. Only ``kind="iq"`` is implemented.
+
+        Captures raw ``cu8`` IQ samples straight to a SigMF ``.sigmf-meta``/
+        ``.sigmf-data`` pair via a continuous, unbounded ``rtl_sdr`` process
+        (see ``olab_rf.decoders.sigmf``). Does not create a ``RadioSession``
+        or touch ``self.status`` — a recording is tracked exclusively through
+        ``current_recording()``, independent of the scan/listen/digital/voice/
+        ADS-B/AIS device-mode subsystem the rest of this class maintains.
         """
         if self._recording and self._recording.status == "running":
             raise RuntimeError("recording is already active")
+        if request.kind != "iq":
+            self._recording = RecordingStatus(
+                request=request,
+                status="error",
+                error="recording is designed but not implemented",
+            )
+            return self._recording
+        if request.rotate_seconds is not None or request.max_bytes is not None:
+            raise NotImplementedError(
+                "rotate_seconds/max_bytes are not implemented for kind='iq'"
+            )
+        if self._is_other_mode_active():
+            raise RuntimeError(
+                "another mode is active; stop it before starting a recording"
+            )
+
+        meta_path, data_path = sigmf_paths(request.path)
+        if meta_path.exists() or data_path.exists():
+            existing = meta_path if meta_path.exists() else data_path
+            raise RuntimeError(f"recording target already exists: {existing}")
+        data_path.parent.mkdir(parents=True, exist_ok=True)
+
+        assert request.frequency_hz is not None  # enforced by __post_init__
+        assert request.sample_rate_hz is not None  # enforced by __post_init__
+        command = rtl_sdr_iq_command(
+            path=self._decoder_path("rtl_sdr", "rtl_sdr"),
+            center_frequency_hz=request.frequency_hz,
+            sample_rate_hz=request.sample_rate_hz,
+            sample_count=None,
+            device_index=request.device_index,
+            gain_db=_receiver_gain_db(self.receiver.gain, request.gain_db),
+            ppm=self.receiver.ppm,
+            output_path=str(data_path),
+        )
+        process = DecoderProcess(command=command)
+        try:
+            process.start()
+        except FileNotFoundError as exc:
+            error = f"{command[0]} not found"
+            self._recording = RecordingStatus(request=request, status="error", error=error)
+            raise RuntimeError(error) from exc
+
+        started_at = utc_now()
+        try:
+            write_sigmf_meta(
+                meta_path,
+                sample_rate_hz=request.sample_rate_hz,
+                frequency_hz=request.frequency_hz,
+                datetime_iso=dt_to_iso(started_at),
+            )
+        except OSError as exc:
+            # Never leave a live process behind with no "running" status
+            # tracking it — that process would be unreachable by both
+            # stop() (keyed off self._process, which recording never uses)
+            # and stop_recording() (keyed off a "running" self._recording).
+            process.stop()
+            error = f"failed to write recording metadata: {exc}"
+            self._recording = RecordingStatus(request=request, status="error", error=error)
+            raise RuntimeError(error) from exc
+
+        self._recording_process = process
         self._recording = RecordingStatus(
             request=request,
-            status="error",
-            error="recording is designed but not implemented",
+            status="running",
+            started_at=started_at,
+            bytes_written=0,
         )
         return self._recording
 
+    def ingest_recording(self) -> None:
+        """Advance an active recording: refresh bytes written, detect death."""
+        if self._recording is None or self._recording.status != "running":
+            return
+        process = self._recording_process
+        stderr_lines = process.read_stderr_lines() if process else []
+        running = process.is_running() if process else False
+        if not running:
+            diagnostic = _last_nonempty(stderr_lines) or "rtl_sdr process stopped"
+            self._finalize_recording("error", error=diagnostic)
+            return
+        _, data_path = sigmf_paths(self._recording.request.path)
+        try:
+            bytes_written = data_path.stat().st_size if data_path.exists() else 0
+        except OSError:
+            bytes_written = self._recording.bytes_written or 0
+        self._recording = replace(self._recording, bytes_written=bytes_written)
+
+    def _finalize_recording(
+        self,
+        status: Literal["stopped", "error"],
+        *,
+        error: str | None = None,
+    ) -> None:
+        """Stop the capture process and write the final SigMF sidecar.
+
+        Never propagates an exception — this runs from inside
+        ``ingest_recording()``/``poll()`` (shared with every other mode's
+        ingestion) as well as from ``stop()``/``stop_recording()``, so a
+        recording-side failure must land in ``RecordingStatus.error`` rather
+        than aborting the caller.
+        """
+        if self._recording is None:
+            return
+        request = self._recording.request
+        if self._recording_process is not None:
+            try:
+                self._recording_process.stop()
+            except OSError:
+                pass
+            self._recording_process = None
+        bytes_written = self._recording.bytes_written or 0
+        finalize_error = error
+        try:
+            meta_path, data_path = sigmf_paths(request.path)
+            bytes_written = truncate_to_iq_pairs(data_path)
+            assert request.sample_rate_hz is not None
+            assert request.frequency_hz is not None
+            write_sigmf_meta(
+                meta_path,
+                sample_rate_hz=request.sample_rate_hz,
+                frequency_hz=request.frequency_hz,
+                datetime_iso=dt_to_iso(self._recording.started_at),
+                # A recording stopped before rtl_sdr wrote anything has
+                # bytes_written == 0; a zero-length annotation is degenerate
+                # under the spec (an annotation is meant to apply to
+                # samples), so treat it the same as "no count yet" rather
+                # than writing one.
+                sample_count=(bytes_written // 2) or None,
+            )
+        except OSError as exc:
+            finalize_error = finalize_error or f"failed to finalize recording: {exc}"
+        self._recording = replace(
+            self._recording,
+            status="error" if finalize_error else status,
+            stopped_at=utc_now(),
+            bytes_written=bytes_written,
+            error=finalize_error,
+        )
+
     def stop_recording(self) -> RecordingStatus | None:
-        """Stop the active recording placeholder, if any."""
+        """Stop the active recording, if any.
+
+        A recording whose process has already died but whose ``poll()``
+        hasn't run yet still reports ``status == "running"`` here — the same
+        way ``stop()`` treats it — since ``poll()`` catching up is what
+        clears it, not a bug.
+        """
         if self._recording is None:
             return None
         if self._recording.status == "running":
-            self._recording = RecordingStatus(
-                request=self._recording.request,
-                recording_id=self._recording.recording_id,
-                status="stopped",
-                started_at=self._recording.started_at,
-                stopped_at=utc_now(),
-                bytes_written=self._recording.bytes_written,
-            )
+            self._finalize_recording("stopped")
         return self._recording
 
     def current_recording(self) -> RecordingStatus | None:
-        """Return the active or most recent recording placeholder status."""
+        """Return the active or most recent recording status."""
         return self._recording
 
     def status_dict(self) -> dict[str, object]:
@@ -1929,3 +2225,15 @@ def _last_nonempty(lines: list[str]) -> str | None:
         if stripped:
             return stripped
     return None
+
+
+def _largest_power_of_two_leq(n: int) -> int:
+    """Return the largest power of two that is <= n.
+
+    Used to bound the FFT length for a replayed capture: a real capture stops
+    at an arbitrary byte count, and an arbitrary (e.g. large-prime) FFT length
+    can fall back to NumPy's much slower Bluestein algorithm.
+    """
+    if n <= 0:
+        raise ValueError("n must be greater than zero")
+    return 1 << (n.bit_length() - 1)

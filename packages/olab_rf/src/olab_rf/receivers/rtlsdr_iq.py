@@ -87,11 +87,19 @@ def rtl_sdr_iq_command(
     path: str = "rtl_sdr",
     center_frequency_hz: int,
     sample_rate_hz: int,
-    sample_count: int,
+    sample_count: int | None = None,
     device_index: int = 0,
     gain_db: float | None = None,
     ppm: int = 0,
+    output_path: str | None = None,
 ) -> list[str]:
+    """Build an ``rtl_sdr`` command line.
+
+    ``sample_count`` is omitted (no ``-n``) when ``None``, producing an
+    unbounded capture that runs until the process is stopped. ``output_path``
+    names the file ``rtl_sdr`` writes cu8 samples to; the default ``None``
+    preserves the existing stdout-capture behavior (``-``).
+    """
     command = [
         path,
         "-f",
@@ -102,13 +110,13 @@ def rtl_sdr_iq_command(
         str(device_index),
         "-p",
         str(ppm),
-        "-n",
-        str(sample_count),
-        "-S",
     ]
+    if sample_count is not None:
+        command.extend(["-n", str(sample_count)])
+    command.append("-S")
     if gain_db is not None:
         command.extend(["-g", f"{gain_db:g}"])
-    command.append("-")
+    command.append(output_path if output_path is not None else "-")
     return command
 
 

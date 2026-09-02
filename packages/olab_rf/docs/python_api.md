@@ -286,6 +286,120 @@ The `rtl_sdr_iq` backend uses NumPy (a base dependency, always installed)
 plus the system `rtl_sdr` command-line recorder. It is slower and
 channelized; it is not a broad sweep replacement for `rtl_power`.
 
+## IQ Recording And Replay
+
+Record raw IQ once at the bench, then replay that file through the exact same
+detector code path a live receiver would feed — no hardware needed to
+exercise or regression-test IQ-based detectors like `estimate_iq_peak()`.
+
+### Recording
+
+```python
+from olab_rf import RecordingRequest
+
+request = RecordingRequest(
+    kind="iq",
+    path="corpus/adsb_pass",
+    frequency_hz=1_090_000_000,
+    sample_rate_hz=2_400_000,
+)
+status = manager.start_recording(request)
+# ... let it run, e.g. while an event is in progress ...
+final = manager.stop_recording()
+```
+
+`start_recording()` launches a continuous, unbounded `rtl_sdr` capture that
+writes raw `cu8` samples directly to disk — there's no `duration_sec` to
+guess up front. `path` is a base name: it produces `<path>.sigmf-meta` (JSON
+metadata) and `<path>.sigmf-data` (raw `cu8` bytes) — the
+[SigMF](https://github.com/sigmf/SigMF) format, so files are readable by
+other SigMF tooling (`sigmf-python`, inspectrum), not just olab_rf. Parent
+directories are created automatically; `start_recording()` raises
+`RuntimeError` rather than overwriting either target file if it already
+exists.
+
+`RecordingRequest` fields for `kind="iq"`:
+
+- `frequency_hz: int`, `sample_rate_hz: int`: required, must be `> 0`.
+- `gain_db: float | None = None`: receiver gain; resolved the same way scans
+  resolve gain (`None` means auto/default).
+- `device_index: int = 0`: RTL-SDR device index (`-d`). Serial-based device
+  selection isn't wired up for recording yet.
+- `rotate_seconds`, `max_bytes`: accepted and round-trip through
+  `to_dict()`/`from_dict()`, but `start_recording()` raises
+  `NotImplementedError` if either is set — file rotation isn't implemented
+  yet.
+- `format`: accepted but ignored for `kind="iq"` (the on-disk format is
+  always the SigMF pair).
+
+A recording is tracked independently of `SessionManager`'s scan/listen/
+digital/voice/ADS-B/AIS state — it doesn't create a `RadioSession` and
+doesn't appear in `manager.status`. Poll it explicitly:
+
+```python
+manager.poll()  # advances every active mode, recording included
+recording = manager.current_recording()
+print(recording.status, recording.bytes_written)
+```
+
+Starting a recording while another mode (scan/listen/digital/voice) is
+active raises `RuntimeError`; conversely, starting another mode while a
+recording is active also raises, unless you mean to end the recording as
+part of the mode switch:
+
+```python
+manager.stop(stop_active_recording=True)  # ends a live recording too
+```
+
+A plain `manager.stop()` (the default `stop_active_recording=False`) raises
+instead of silently discarding a live recording.
+
+### Replaying a recorded file
+
+```python
+scan = manager.start_iq_replay_scan(replay_path="corpus/adsb_pass.sigmf-meta")
+```
+
+`start_iq_replay_scan(...)` reads a `.sigmf-meta`/`.sigmf-data` pair and
+evaluates it as a single `FrequencyCandidate` at the file's own recorded
+center frequency — a captured file can't be re-hopped across a channel list
+the way a live scan retunes. Parameters:
+
+- `replay_path: str`: required. Base path or either SigMF file for a
+  previously recorded capture.
+- `channel_width_hz: int | None = None`: match tolerance against the
+  catalog, same meaning as a live scan; defaults to 2.5 kHz.
+- `replay_max_samples: int | None = None`: cap on samples read from the
+  file. Defaults to 5 seconds' worth at the file's own recorded sample rate
+  — pass this explicitly to read more of a long capture.
+
+Returns a `FrequencyScanStatus` like any other scan; poll it the normal way.
+`iq_replay` is a `FrequencyScanBackend` value, but it is *not* accepted by
+`start_range_scan(...)`, `start_frequency_scan(...)`,
+`find_active_channels(...)`, `capture_range_baseline(...)`, or
+`capture_frequency_baseline(...)` — those build a live scan plan that
+doesn't apply to a fixed recorded file, so they raise `ValueError` if given
+`backend="iq_replay"`. Replaying a file touches
+no hardware and no shared scan/recording state beyond one "one scan at a
+time" slot, so it can run concurrently with a live recording.
+
+### Reading a SigMF file directly
+
+```python
+from olab_rf import read_sigmf_iq
+
+recording = read_sigmf_iq("corpus/adsb_pass.sigmf-meta")
+print(recording.frequency_hz, recording.sample_rate_hz)
+samples = recording.samples  # decoded complex64 IQ samples
+```
+
+`read_sigmf_iq(path, *, sample_start=0, max_samples=None) -> SigMFIqRecording`
+decodes the requested `[sample_start, sample_start + max_samples)` window of
+I/Q pairs (the same `cu8` → complex64 conversion a live capture goes
+through) plus `frequency_hz`/`sample_rate_hz`/`datatype` from the sidecar and
+`total_sample_count` for the whole file. Useful standalone, e.g. in a demo
+script that doesn't go through `SessionManager` at all.
+
 ## Frequency Catalog
 
 `FrequencyCatalog` contains named ranges, known channels, and favorites. The
@@ -688,7 +802,9 @@ Scan known catalog channels in a range.
 Parameters:
 
 - `range_id: str`: required catalog range id. The range must define channels.
-- `backend: "rtl_power" | "rtl_sdr_iq" = "rtl_power"`: scan backend.
+- `backend: "rtl_power" | "rtl_sdr_iq" = "rtl_power"`: scan backend. `iq_replay`
+  is not accepted here (raises `ValueError`); use `start_iq_replay_scan(...)`
+  to replay a recorded SigMF capture instead.
 - `path: str | None = None`: optional decoder path override. When omitted,
   the manager uses configured decoder paths, then command-name defaults.
 - `duration_sec: float = 10.0`: scan duration.
@@ -719,7 +835,8 @@ Parameters:
 - `step_hz`: grid spacing for arbitrary ranges or catalog ranges without channels.
 - `channel_frequencies_hz`: optional manual channel list in Hz.
 - `channel_width_hz`: match/search width in Hz.
-- `backend`: `rtl_power` or `rtl_sdr_iq`.
+- `backend`: `rtl_power` or `rtl_sdr_iq`. `iq_replay` is not accepted here
+  either (raises `ValueError`); use `start_iq_replay_scan(...)`.
 - `path`, `duration_sec`, `gain_db`, `sample_rate_hz`, `baseline`,
   `resume_previous`: same meaning as `find_active_channels(...)`.
 

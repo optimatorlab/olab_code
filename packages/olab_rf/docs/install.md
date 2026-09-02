@@ -113,7 +113,11 @@ causes are:
 - multiple RTL-SDR dongles have duplicate/default serials.
 
 The optional `rtl_sdr_iq` backend uses the system `rtl_sdr` recorder for normal
-runtime scans. The lower-level direct Python adapter can also load `librtlsdr`
+runtime scans, and IQ recording (`SessionManager.start_recording(kind="iq")`)
+and the `iq_replay` scan backend (`start_iq_replay_scan(...)`) share the same
+`rtl_sdr`/`pyrtlsdr` dependency — `iq_replay` itself needs no hardware at
+replay time, only for the original recording. The lower-level direct Python
+adapter can also load `librtlsdr`
 through `pyrtlsdr`; if that path reports an undefined symbol such as
 `rtlsdr_set_dithering`, the Python wrapper and installed system `librtlsdr` are
 not compatible. Use the command-line `rtl_sdr` path or resolve the `librtlsdr`

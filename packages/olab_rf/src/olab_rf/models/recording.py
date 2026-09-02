@@ -18,8 +18,16 @@ RECORDING_STATUS_VALUES = {"created", "running", "stopped", "error"}
 class RecordingRequest:
     """Requested recording contract.
 
-    Recording execution is not implemented yet. This model defines the stable
-    input shape future recording APIs will accept.
+    ``kind="iq"`` is implemented (see ``SessionManager.start_recording``):
+    it captures raw ``cu8`` IQ samples to a SigMF ``.sigmf-meta``/
+    ``.sigmf-data`` pair derived from ``path`` (see
+    ``olab_rf.decoders.sigmf.sigmf_paths``). It requires ``frequency_hz`` and
+    ``sample_rate_hz``; ``gain_db``/``device_index`` are optional.
+    ``rotate_seconds``/``max_bytes`` are accepted and round-trip normally but
+    are not implemented for ``kind="iq"`` — ``start_recording()`` raises
+    ``NotImplementedError`` if either is set. ``format`` is accepted but
+    ignored for ``kind="iq"`` (the on-disk format is always the SigMF pair).
+    Other ``kind`` values remain unimplemented placeholders.
     """
 
     kind: RecordingKind
@@ -28,6 +36,10 @@ class RecordingRequest:
     include_metadata: bool = True
     rotate_seconds: int | None = None
     max_bytes: int | None = None
+    frequency_hz: int | None = None
+    sample_rate_hz: int | None = None
+    gain_db: float | None = None
+    device_index: int = 0
 
     def __post_init__(self) -> None:
         if self.kind not in RECORDING_KINDS:
@@ -38,6 +50,13 @@ class RecordingRequest:
             raise ValueError("rotate_seconds must be greater than zero")
         if self.max_bytes is not None and self.max_bytes <= 0:
             raise ValueError("max_bytes must be greater than zero")
+        if self.device_index < 0:
+            raise ValueError("device_index must be non-negative")
+        if self.kind == "iq":
+            if self.frequency_hz is None or self.frequency_hz <= 0:
+                raise ValueError("frequency_hz must be greater than zero for kind='iq'")
+            if self.sample_rate_hz is None or self.sample_rate_hz <= 0:
+                raise ValueError("sample_rate_hz must be greater than zero for kind='iq'")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -47,6 +66,10 @@ class RecordingRequest:
             "include_metadata": self.include_metadata,
             "rotate_seconds": self.rotate_seconds,
             "max_bytes": self.max_bytes,
+            "frequency_hz": self.frequency_hz,
+            "sample_rate_hz": self.sample_rate_hz,
+            "gain_db": self.gain_db,
+            "device_index": self.device_index,
         }
 
     @classmethod
@@ -64,6 +87,18 @@ class RecordingRequest:
             max_bytes=(
                 int(payload["max_bytes"]) if payload.get("max_bytes") is not None else None
             ),
+            frequency_hz=(
+                int(payload["frequency_hz"]) if payload.get("frequency_hz") is not None else None
+            ),
+            sample_rate_hz=(
+                int(payload["sample_rate_hz"])
+                if payload.get("sample_rate_hz") is not None
+                else None
+            ),
+            gain_db=(
+                float(payload["gain_db"]) if payload.get("gain_db") is not None else None
+            ),
+            device_index=int(payload.get("device_index", 0)),
         )
 
 
