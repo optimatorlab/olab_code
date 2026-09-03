@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field, replace
+from datetime import datetime
 from pathlib import Path
 import os
 import shlex
@@ -9,7 +10,7 @@ from statistics import median
 from tempfile import TemporaryDirectory
 from threading import Event, Lock, Thread, current_thread
 import time
-from typing import Literal
+from typing import Any, Literal
 from uuid import uuid4
 
 from olab_rf.config import OlabRfConfig
@@ -23,7 +24,14 @@ from olab_rf.decoders.rtl_sdr_iq import estimate_iq_peak
 from olab_rf.decoders.rtl_ais import parse_ais_nmea_line, rtl_ais_command
 from olab_rf.decoders.sigmf import read_sigmf_iq, sigmf_paths, truncate_to_iq_pairs, write_sigmf_meta
 from olab_rf.history import SqliteHistory
-from olab_rf.models import ReceiverConfig, RecordingRequest, RecordingStatus, SensorStatus
+from olab_rf.models import (
+    FrequencyCatalogRange,
+    FrequencyChannel,
+    ReceiverConfig,
+    RecordingRequest,
+    RecordingStatus,
+    SensorStatus,
+)
 from olab_rf.models.digital import DigitalListenStatus
 from olab_rf.decoders.sdrtrunk import SdrTrunkBackend
 from olab_rf.models.voice import RadioVoiceSegment, VoiceCaptureEvent, VoiceSegmentStatus
@@ -33,6 +41,7 @@ from olab_rf.models.scanning import (
     FrequencyCandidate,
     FrequencyScanRequest,
     FrequencyScanStatus,
+    PriorityScanStatus,
 )
 from olab_rf.models.sessions import RadioSession
 from olab_rf.models.spectrum import (
@@ -46,6 +55,7 @@ from olab_rf.services.range_scanner import build_frequency_range_scan_plan
 from olab_rf.services.track_store import TrackStore
 from olab_rf.services.frequency_catalog import FrequencyCatalog
 from olab_rf.services.voice_segments import (
+    DETECTOR_MODES,
     MIN_SPECTRUM_BINS,
     AudioConditioner,
     PcmAudioBackend,
@@ -56,6 +66,92 @@ from olab_rf.services.voice_segments import (
 from olab_rf.models.tracks import dt_to_iso, utc_now
 
 _DEFAULT_REPLAY_SECONDS = 5.0
+
+
+class _UnsetType:
+    """Sentinel distinguishing "caller left this unset" from any real value.
+
+    ``start_priority_scan``/``priority_scan``'s ``deemphasis_us`` parameter
+    needs this: it has a per-channel-modulation default (see
+    ``_resolve_priority_scan_channels``), so a plain literal default (e.g.
+    ``75.0``) would make "caller didn't pass it" indistinguishable from
+    "caller explicitly passed the same value the default happens to be" --
+    the AM per-modulation override could then never apply to a caller who
+    passes ``deemphasis_us=75.0`` on purpose.
+    """
+
+    def __repr__(self) -> str:
+        return "UNSET"
+
+
+_UNSET = _UnsetType()
+
+
+def _priority_scan_rtl_fm_mode(modulation: str) -> str:
+    """Normalize a modulation string to "am"/"wbfm"/"fm".
+
+    Mirrors ``decoders.rtl_fm._rtl_fm_mode`` exactly (that function is
+    private, so it can't be imported here) -- deliberately kept as its own
+    small copy rather than deriving AM/wbfm from
+    ``rtl_fm_audio_rate_hz()``'s *return value* (12_000/32_000), which
+    couples a modulation decision to an audio-rate constant that could
+    change for an unrelated reason in the future without any test failing.
+    """
+    normalized = modulation.strip().lower()
+    if normalized in {"am", "airband", "aviation"}:
+        return "am"
+    if normalized in {"wfm", "widefm", "broadcast_fm"}:
+        return "wbfm"
+    return "fm"
+
+
+@dataclass(slots=True)
+class _PriorityScanChannel:
+    """One resolved, fully-configured channel in a priority scan's rotation."""
+
+    channel_id: str
+    channel_label: str
+    range_id: str
+    range_label: str
+    frequency_hz: int
+    modulation: str
+    sample_rate_hz: int
+    deemphasis_us: float | None
+    detector_mode: str
+    hf_ratio_threshold: float
+
+
+@dataclass(slots=True)
+class _PriorityScanState:
+    """Mutable per-scan state, separate from the ``PriorityScanStatus`` snapshot.
+
+    Reused across every channel visit for the lifetime of one
+    ``start_priority_scan`` call; discarded entirely by ``stop()``.
+    """
+
+    scan_id: str
+    session_id: str
+    channels: list[_PriorityScanChannel]
+    dwell_ms: int
+    max_lock_ms: int
+    max_segment_sec: float
+    hang_time_ms: int
+    frame_ms: int
+    dc_block: bool
+    normalize: bool
+    normalize_target_dbfs: float
+    gain_db: float | None
+    index: int = 0
+    mode: str = "scanning"  # "scanning" | "locked"
+    dwell_frame_count: int = 0
+    lock_frame_count: int = 0
+    cycle_count: int = 0
+    # Scan-lifetime run totals, carried forward via carry_counters() at every
+    # visit teardown so a fresh per-visit segmenter doesn't reset them to 0.
+    completed: int = 0
+    dropped: int = 0
+    capped_closes: int = 0
+    started_at: datetime = field(default_factory=utc_now)
 
 
 @dataclass(slots=True)
@@ -108,6 +204,7 @@ class SessionManager:
     _voice_event_callback: Callable[[VoiceCaptureEvent], None] | None = None
     _voice_segment_callback: Callable[[RadioVoiceSegment], None] | None = None
     _voice_params: dict[str, object] = field(default_factory=dict)
+    _priority_scan_state: _PriorityScanState | None = None
     spectrum_history_limit: int = 60
     spectrum_event_limit: int = 100
 
@@ -1330,6 +1427,565 @@ class SessionManager:
         finally:
             self.stop(clear_error=False)
 
+    # --- priority scan (issue #7) -------------------------------------------
+    #
+    # Non-preemptive round-robin over a caller-supplied list of catalog
+    # channels: SCANNING dwells on each channel long enough to detect a
+    # carrier, LOCKED follows an active transmission to completion, then
+    # advances to the next channel. Reuses self._voice_backend/
+    # self._voice_segmenter (decision 2) under session.mode="priority_scan",
+    # so stop()/_is_other_mode_active()/start_recording() exclusion all work
+    # unchanged. Both backend and segmenter are rebuilt fresh on every
+    # channel visit (decision 9) -- no state survives a visit gap except the
+    # scan-lifetime completed/dropped/capped_closes totals, carried forward
+    # via RadioVoiceSegmenter.carry_counters() (decision 16).
+
+    def _resolve_priority_scan_channel(
+        self, catalog: FrequencyCatalog, channel_id: str
+    ) -> tuple[FrequencyCatalogRange, FrequencyChannel]:
+        """Resolve a bare channel id or a 'range_id.channel_id' qualified id."""
+        if "." in channel_id:
+            range_id, _, bare_id = channel_id.partition(".")
+            frequency_range = catalog.range_by_id(range_id)
+            if frequency_range is None:
+                raise ValueError(f"unknown range id in priority scan channel id: {channel_id!r}")
+            for channel in frequency_range.channels:
+                if channel.id == bare_id:
+                    return frequency_range, channel
+            raise ValueError(f"unknown channel id {bare_id!r} in range {range_id!r}")
+        matches = [
+            (frequency_range, channel)
+            for frequency_range in catalog.ranges
+            for channel in frequency_range.channels
+            if channel.id == channel_id
+        ]
+        if not matches:
+            raise ValueError(f"unknown priority scan channel id: {channel_id!r}")
+        if len(matches) > 1:
+            colliding = ", ".join(sorted(frequency_range.id for frequency_range, _ in matches))
+            raise ValueError(
+                f"ambiguous priority scan channel id {channel_id!r}: present in ranges "
+                f"{colliding}; use 'range_id.channel_id' to disambiguate"
+            )
+        return matches[0]
+
+    def _resolve_priority_scan_channels(
+        self, channel_ids: list[str]
+    ) -> list[tuple[FrequencyCatalogRange, FrequencyChannel]]:
+        if not channel_ids:
+            raise ValueError("channel_ids must not be empty")
+        catalog = self.frequency_catalog
+        seen: set[str] = set()
+        resolved: list[tuple[FrequencyCatalogRange, FrequencyChannel]] = []
+        for channel_id in channel_ids:
+            # De-duplicated by the raw string a caller passed, preserving
+            # first occurrence's position: round-robin has no use for
+            # visiting the same channel twice per cycle. Deliberately *not*
+            # de-duplicated by resolved channel id: ["kbuf_tower",
+            # "local_airports.kbuf_tower"] still visits the same channel
+            # twice, since telling those two spellings apart would need
+            # resolving before de-duplicating, one extra pass this simple
+            # case doesn't seem worth. detector_overrides, by contrast, is a
+            # dict keyed by whatever the caller writes and so is naturally
+            # de-duplicated by *resolved* id once looked up -- the two are
+            # accepted to disagree on this edge case, not reconciled.
+            if channel_id in seen:
+                continue
+            seen.add(channel_id)
+            resolved.append(self._resolve_priority_scan_channel(catalog, channel_id))
+        return resolved
+
+    def _resolve_priority_scan_overrides(
+        self,
+        resolved: list[tuple[FrequencyCatalogRange, FrequencyChannel]],
+        detector_overrides: dict[str, dict[str, object]] | None,
+    ) -> dict[str, dict[str, object]]:
+        """Resolve and validate ``detector_overrides`` eagerly.
+
+        Every mistake here must surface as a ``ValueError`` from
+        ``start_priority_scan`` itself, before ``self.stop()`` runs and before
+        any backend is touched -- deferring validation to
+        ``RadioVoiceSegmenter.__init__`` (which raises on a bad
+        ``detector_mode``) means the failure instead lands wherever the
+        affected channel's *visit* happens to occur, which can be well after
+        the manager has already started a live backend for an earlier
+        channel, or from inside ``poll()`` where a raised exception is never
+        expected.
+        """
+        if not detector_overrides:
+            return {}
+        resolved_channel_ids = {channel.id for _range, channel in resolved}
+        catalog = self.frequency_catalog
+        allowed_keys = {"detector_mode", "hf_ratio_threshold"}
+        result: dict[str, dict[str, object]] = {}
+        for key, override in detector_overrides.items():
+            _range, channel = self._resolve_priority_scan_channel(catalog, key)
+            if channel.id not in resolved_channel_ids:
+                raise ValueError(
+                    f"detector_overrides key {key!r} resolves to channel {channel.id!r}, "
+                    "which is not present in channel_ids"
+                )
+            unknown_keys = set(override) - allowed_keys
+            if unknown_keys:
+                raise ValueError(
+                    f"detector_overrides[{key!r}] has unrecognised key(s) "
+                    f"{sorted(unknown_keys)!r}; only {sorted(allowed_keys)!r} are supported"
+                )
+            if "detector_mode" in override and override["detector_mode"] not in DETECTOR_MODES:
+                raise ValueError(
+                    f"detector_overrides[{key!r}]['detector_mode'] must be one of "
+                    f"{list(DETECTOR_MODES)}"
+                )
+            if "hf_ratio_threshold" in override:
+                threshold = override["hf_ratio_threshold"]
+                if not isinstance(threshold, (int, float)) or isinstance(threshold, bool) or threshold <= 0:
+                    raise ValueError(
+                        f"detector_overrides[{key!r}]['hf_ratio_threshold'] must be a "
+                        "positive number"
+                    )
+            result[channel.id] = override
+        return result
+
+    def start_priority_scan(
+        self,
+        channel_ids: list[str],
+        *,
+        dwell_ms: int = 2_000,
+        max_segment_sec: float = 20.0,
+        hang_time_ms: int = 600,
+        max_lock_ms: int | None = None,
+        detector_overrides: dict[str, dict[str, object]] | None = None,
+        dc_block: bool = True,
+        deemphasis_us: Any = _UNSET,
+        normalize: bool = False,
+        normalize_target_dbfs: float = -20.0,
+        gain_db: float | None = None,
+        frame_ms: int = 40,
+        on_segment: Callable[[RadioVoiceSegment], None] | None = None,
+    ) -> RadioSession:
+        """Start a non-preemptive round-robin scan over ``channel_ids``.
+
+        v1 is non-preemptive round-robin: channels are visited in list order,
+        one dwell/lock at a time; there is no priority-driven preemption of
+        an active lock. Advance the scan with ``poll()``, drain completed
+        segments with ``pop_voice_segments()``, and inspect state with
+        ``current_priority_scan_status()`` -- or use ``priority_scan()`` for
+        a blocking generator that does all three.
+
+        Each ``channel_ids`` entry is a bare catalog channel id (must be
+        unique across the whole merged catalog) or a qualified
+        ``"range_id.channel_id"`` form to disambiguate. ``wbfm``/``wfm``
+        channels are rejected: ``RtlFmAudioBackend`` cannot express that
+        modulation at an explicit sample rate without emitting a broken
+        rtl_fm command. ``detector_overrides`` maps a channel id (same bare-
+        or-qualified form) to a ``{"detector_mode": ..., "hf_ratio_threshold":
+        ...}`` override for that channel only -- an unknown key raises rather
+        than being silently ignored. AM channels are detection-unvalidated
+        for v1 (the ``hf_ratio`` gate was tuned on NFM captures) but get
+        ``deemphasis_us=None`` automatically unless the caller passes an
+        explicit value, since AM audio was never FM pre-emphasised.
+        """
+        if dwell_ms <= 0:
+            raise ValueError("dwell_ms must be greater than zero")
+        if max_lock_ms is not None and max_lock_ms <= 0:
+            raise ValueError("max_lock_ms must be greater than zero")
+        resolved = self._resolve_priority_scan_channels(channel_ids)
+        overrides = self._resolve_priority_scan_overrides(resolved, detector_overrides)
+        effective_max_lock_ms = (
+            max_lock_ms
+            if max_lock_ms is not None
+            else int(max_segment_sec * 1000) + hang_time_ms + 1_000
+        )
+        channels: list[_PriorityScanChannel] = []
+        for frequency_range, channel in resolved:
+            modulation = channel.modulation or frequency_range.default_modulation or "NFM"
+            rtl_fm_mode = _priority_scan_rtl_fm_mode(modulation)
+            if rtl_fm_mode == "wbfm":
+                raise ValueError(
+                    f"channel {channel.id!r} resolves to wbfm modulation, which "
+                    "start_priority_scan does not support (RtlFmAudioBackend cannot "
+                    "express wbfm at an explicit sample rate)"
+                )
+            sample_rate_hz = rtl_fm_audio_rate_hz(modulation)
+            is_am = rtl_fm_mode == "am"
+            channel_deemphasis_us = (
+                deemphasis_us if deemphasis_us is not _UNSET else (None if is_am else 75.0)
+            )
+            override = overrides.get(channel.id, {})
+            channels.append(
+                _PriorityScanChannel(
+                    channel_id=channel.id,
+                    channel_label=channel.label,
+                    range_id=frequency_range.id,
+                    range_label=frequency_range.label,
+                    frequency_hz=channel.frequency_hz,
+                    modulation=modulation,
+                    sample_rate_hz=sample_rate_hz,
+                    deemphasis_us=channel_deemphasis_us,
+                    detector_mode=str(override.get("detector_mode", "hf_ratio")),
+                    hf_ratio_threshold=float(override.get("hf_ratio_threshold", 1.2)),
+                )
+            )
+        self.stop()
+        session = RadioSession(
+            session_id=f"session-{uuid4()}",
+            mode="priority_scan",
+            receiver_id=self.receiver.id,
+            status="starting",
+            decoder="rtl_fm",
+        )
+        self.session = session
+        self.status = SensorStatus(sensor_id=self.receiver.id, mode="priority_scan", tool_found=False)
+        state = _PriorityScanState(
+            scan_id=f"priority-scan-{uuid4()}",
+            session_id=session.session_id,
+            channels=channels,
+            dwell_ms=dwell_ms,
+            max_lock_ms=effective_max_lock_ms,
+            max_segment_sec=max_segment_sec,
+            hang_time_ms=hang_time_ms,
+            frame_ms=frame_ms,
+            dc_block=dc_block,
+            normalize=normalize,
+            normalize_target_dbfs=normalize_target_dbfs,
+            gain_db=gain_db,
+        )
+        self._priority_scan_state = state
+        self._voice_segment_callback = on_segment
+        # A priority scan has no on_event parameter of its own (v1 doesn't
+        # expose one), so any callback left over from a prior
+        # start_voice_segments(on_event=...) call must not silently receive
+        # this scan's capture_started/capture_stopped events.
+        self._voice_event_callback = None
+        self._voice_segments.clear()
+        try:
+            self._start_priority_scan_visit(state)
+        except FileNotFoundError as exc:
+            self._priority_scan_state = None
+            session.status = "error"
+            self.status.error = str(exc)
+            raise RuntimeError(self.status.error) from exc
+        except ValueError as exc:
+            # Defense in depth: _resolve_priority_scan_overrides already
+            # validates detector_overrides eagerly, so this should be
+            # unreachable via normal API misuse, but a future construction
+            # failure of some other kind must still leave the manager in a
+            # clean IDLE-like state rather than a half-started scan whose
+            # session.status is stuck at "starting".
+            self._priority_scan_state = None
+            session.status = "error"
+            self.status.error = str(exc)
+            raise
+        session.status = "running"
+        self.status.process_running = self._voice_backend.is_running() if self._voice_backend else False
+        self.status.tool_found = True
+        self._emit_voice_event("capture_started", state="calibrating")
+        return session
+
+    def _start_priority_scan_visit(
+        self, state: _PriorityScanState, *, keep_backend: bool = False
+    ) -> None:
+        """(Re)build the backend/segmenter for ``state``'s current channel.
+
+        Only rebuilds the backend when ``keep_backend`` is false (or none
+        exists yet) -- the single-channel short-circuit passes
+        ``keep_backend=True`` to avoid a pointless device re-open. The
+        segmenter is always rebuilt fresh (decision 9): its run counters are
+        seeded from ``state``'s scan-lifetime totals via ``carry_counters()``
+        so they read as scan totals, not per-visit counts (decision 16).
+
+        Any failure here -- either ``backend.start()`` (``FileNotFoundError``)
+        or segmenter construction (a ``ValueError``, since
+        ``detector_overrides`` values are validated eagerly in
+        ``_resolve_priority_scan_overrides`` but this is still defense in
+        depth against any other future construction failure) -- must not
+        leave a started backend stranded holding the RTL-SDR with nothing
+        recorded about it. If this call built a fresh backend, that backend
+        is stopped and ``self._voice_backend`` cleared before the exception
+        propagates.
+        """
+        channel = state.channels[state.index]
+        built_backend_this_call = not keep_backend or self._voice_backend is None
+        if built_backend_this_call:
+            path = self._decoder_path("rtl_fm", "rtl_fm")
+            config_fir, config_atan, config_args = self._decoder_settings("rtl_fm")
+            backend = RtlFmAudioBackend(
+                path=path,
+                frequency_hz=channel.frequency_hz,
+                modulation=channel.modulation,
+                sample_rate_hz=channel.sample_rate_hz,
+                frame_ms=state.frame_ms,
+                ppm=self.receiver.ppm,
+                gain_db=state.gain_db,
+                fir_size=config_fir,
+                atan_math=config_atan,
+                extra_args=config_args,
+            )
+            try:
+                backend.start()
+            except FileNotFoundError as exc:
+                raise FileNotFoundError(f"{path or 'voice backend'} not found") from exc
+            self._voice_backend = backend
+        try:
+            self._voice_segmenter = RadioVoiceSegmenter(
+                session_id=state.session_id,
+                frequency_hz=channel.frequency_hz,
+                modulation=channel.modulation,
+                sample_rate_hz=channel.sample_rate_hz,
+                frame_ms=state.frame_ms,
+                hang_time_ms=state.hang_time_ms,
+                max_segment_sec=state.max_segment_sec,
+                detector_mode=channel.detector_mode,
+                hf_ratio_threshold=channel.hf_ratio_threshold,
+                conditioner=AudioConditioner(
+                    sample_rate_hz=channel.sample_rate_hz,
+                    dc_block=state.dc_block,
+                    deemphasis_us=channel.deemphasis_us,
+                    normalize=state.normalize,
+                    normalize_target_dbfs=state.normalize_target_dbfs,
+                ),
+            )
+        except Exception:
+            if built_backend_this_call and self._voice_backend is not None:
+                self._voice_backend.stop()
+                self._voice_backend = None
+            raise
+        self._voice_segmenter.carry_counters(
+            completed=state.completed, dropped=state.dropped, capped_closes=state.capped_closes
+        )
+        self.status.process_running = self._voice_backend.is_running() if self._voice_backend else False
+
+    def _advance_priority_scan_channel(self, state: _PriorityScanState) -> None:
+        """Tear down the current visit and move to the next channel."""
+        outgoing = self._voice_segmenter
+        if outgoing is not None:
+            outgoing_status = outgoing.status()
+            state.completed = outgoing_status.completed_segments
+            state.dropped = outgoing_status.dropped_segments
+            state.capped_closes = outgoing_status.capped_closes
+        keep_backend = len(state.channels) == 1
+        if not keep_backend and self._voice_backend is not None:
+            self._voice_backend.stop()
+            self._voice_backend = None
+        next_index = (state.index + 1) % len(state.channels)
+        if next_index == 0:
+            state.cycle_count += 1
+        state.index = next_index
+        state.mode = "scanning"
+        state.dwell_frame_count = 0
+        state.lock_frame_count = 0
+        try:
+            self._start_priority_scan_visit(state, keep_backend=keep_backend)
+        except (FileNotFoundError, ValueError) as exc:
+            # ValueError is defense in depth: _resolve_priority_scan_overrides
+            # already validates detector_overrides eagerly at start_priority_scan
+            # time, so a bad value should never reach here -- but a mid-scan
+            # construction failure on any *other* future ground must abort the
+            # whole scan the same way a missing backend binary does (decision
+            # 12), not raise out of poll(), which every other mode treats as
+            # non-raising.
+            self.status.error = str(exc)
+            self.stop(clear_error=False)
+
+    def _fail_priority_scan(self, stderr_lines: list[str], *, fallback: str) -> None:
+        """Abort the whole scan to IDLE on a mid-scan backend failure (decision 12)."""
+        self._set_process_exit_error(stderr_lines, fallback=fallback)
+        self.stop(clear_error=False)
+
+    def ingest_priority_scan(self) -> int:
+        """Advance an active priority scan by one poll's worth of frames.
+
+        ``backend.read_frames()`` materializes the whole buffered batch up
+        front, so once a channel switch happens mid-batch the remaining
+        frames in that batch belong to the *old* channel's RF -- feeding
+        them into the newly built segmenter would misattribute stale,
+        pre-retune audio to the new channel. So a switch always stops
+        draining this batch immediately; any leftover frames are simply not
+        processed this poll (the new backend will have fresh frames of its
+        own by the next one).
+        """
+        state = self._priority_scan_state
+        if not self.session or self.session.mode != "priority_scan" or state is None:
+            return 0
+        backend = self._voice_backend
+        segmenter = self._voice_segmenter
+        if backend is None or segmenter is None:
+            return 0
+        emitted = 0
+        switched = False
+        for frame in backend.read_frames():
+            channel = state.channels[state.index]
+            segments = segmenter.ingest(frame)
+            now_active = segmenter.status().active
+            for segment in segments:
+                tagged = replace(
+                    segment,
+                    metadata={
+                        **segment.metadata,
+                        "channel_id": channel.channel_id,
+                        "channel_label": channel.channel_label,
+                        "range_id": channel.range_id,
+                        "range_label": channel.range_label,
+                    },
+                )
+                self._voice_segments.append(tagged)
+                self._notify_voice_segment(tagged)
+                emitted += 1
+            if state.mode == "scanning":
+                state.dwell_frame_count += 1
+                if now_active or segments:
+                    state.mode = "locked"
+                    state.lock_frame_count = 0
+                elif state.dwell_frame_count * state.frame_ms >= state.dwell_ms:
+                    self._advance_priority_scan_channel(state)
+                    switched = True
+                    break
+            else:  # locked
+                state.lock_frame_count += 1
+                timed_out = state.lock_frame_count * state.frame_ms >= state.max_lock_ms
+                if (not now_active) or timed_out:
+                    self._advance_priority_scan_channel(state)
+                    switched = True
+                    break
+        if switched:
+            # A mid-scan failure inside _advance_priority_scan_channel already
+            # called stop() (clearing _priority_scan_state and the backend);
+            # nothing further to check against a torn-down manager.
+            if self._priority_scan_state is None:
+                return emitted
+            backend = self._voice_backend
+        if backend is None:
+            return emitted
+        stderr_lines = backend.read_stderr_lines()
+        self.status.process_running = backend.is_running()
+        if not self.status.process_running and self.session.status == "running":
+            self._fail_priority_scan(stderr_lines, fallback="priority scan process stopped")
+            return emitted
+        self._message_count += emitted
+        self.status.message_count = self._message_count
+        return emitted
+
+    def current_priority_scan_status(self) -> PriorityScanStatus | None:
+        """Return the current priority scan's status, or ``None`` if none is active."""
+        state = self._priority_scan_state
+        if state is None:
+            return None
+        channel = state.channels[state.index]
+        segmenter_status = self._voice_segmenter.status() if self._voice_segmenter else None
+        if self.status.error:
+            scan_state = "error"
+        elif not (self.session and self.session.status == "running"):
+            scan_state = "stopped"
+        elif state.mode == "locked":
+            scan_state = "locked"
+        else:
+            scan_state = "scanning"
+        return PriorityScanStatus(
+            scan_id=state.scan_id,
+            session_id=state.session_id,
+            channel_ids=[c.channel_id for c in state.channels],
+            state=scan_state,
+            current_channel_id=channel.channel_id,
+            current_channel_label=channel.channel_label,
+            current_range_id=channel.range_id,
+            current_range_label=channel.range_label,
+            cycle_count=state.cycle_count,
+            completed_segments=(
+                segmenter_status.completed_segments if segmenter_status else state.completed
+            ),
+            dropped_segments=(
+                segmenter_status.dropped_segments if segmenter_status else state.dropped
+            ),
+            capped_closes=(
+                segmenter_status.capped_closes if segmenter_status else state.capped_closes
+            ),
+            error=self.status.error,
+            noise_floor_db=segmenter_status.noise_floor_db if segmenter_status else None,
+            last_frame_band_ratio=(
+                segmenter_status.last_frame_band_ratio if segmenter_status else None
+            ),
+            active=segmenter_status.active if segmenter_status else False,
+            recalibrating=segmenter_status.recalibrating if segmenter_status else False,
+            started_at=state.started_at,
+        )
+
+    def priority_scan_dict(self) -> dict[str, object] | None:
+        status = self.current_priority_scan_status()
+        return status.to_dict() if status else None
+
+    def priority_scan(
+        self,
+        channel_ids: list[str],
+        *,
+        dwell_ms: int = 2_000,
+        max_segment_sec: float = 20.0,
+        hang_time_ms: int = 600,
+        max_lock_ms: int | None = None,
+        detector_overrides: dict[str, dict[str, object]] | None = None,
+        dc_block: bool = True,
+        deemphasis_us: Any = _UNSET,
+        normalize: bool = False,
+        normalize_target_dbfs: float = -20.0,
+        gain_db: float | None = None,
+        frame_ms: int = 40,
+        duration_sec: float | None = None,
+        max_segments: int | None = None,
+        debug_wav_dir: str | Path | None = None,
+    ) -> Iterator[RadioVoiceSegment]:
+        """Blocking generator over ``start_priority_scan``: yield each segment as it completes.
+
+        v1 is non-preemptive round-robin (see ``start_priority_scan``). Calls
+        ``start_priority_scan`` internally, polls on a fixed safe interval,
+        and always stops the scan on exit -- normal exhaustion, an early
+        ``break``/``return`` from the consuming loop, or a
+        ``KeyboardInterrupt``/``GeneratorExit`` raised while iterating. This
+        is the primary entry point for a script author (``import olab_rf``);
+        ``start_priority_scan()``/``poll()`` remain available directly for a
+        caller (e.g. a GUI) that needs to integrate scanning into its own
+        request/response cycle without blocking.
+
+        Mirrors ``iter_voice_segments()``'s shape exactly (parameter names,
+        the 10ms poll interval, the ``try/finally`` teardown) rather than
+        inventing a new one.
+        """
+        if duration_sec is not None and duration_sec <= 0:
+            raise ValueError("duration_sec must be greater than zero")
+        if max_segments is not None and max_segments <= 0:
+            raise ValueError("max_segments must be greater than zero")
+        self.start_priority_scan(
+            channel_ids,
+            dwell_ms=dwell_ms,
+            max_segment_sec=max_segment_sec,
+            hang_time_ms=hang_time_ms,
+            max_lock_ms=max_lock_ms,
+            detector_overrides=detector_overrides,
+            dc_block=dc_block,
+            deemphasis_us=deemphasis_us,
+            normalize=normalize,
+            normalize_target_dbfs=normalize_target_dbfs,
+            gain_db=gain_db,
+            frame_ms=frame_ms,
+        )
+        started = time.monotonic()
+        yielded = 0
+        try:
+            while duration_sec is None or time.monotonic() - started < duration_sec:
+                self.poll()
+                for segment in self.pop_voice_segments():
+                    if debug_wav_dir is not None:
+                        wav_path = Path(debug_wav_dir) / f"{segment.segment_id}.wav"
+                        segment.save_wav(wav_path)
+                        segment = replace(segment, wav_path=str(wav_path))
+                    yield segment
+                    yielded += 1
+                    if max_segments is not None and yielded >= max_segments:
+                        return
+                if not self.status.process_running:
+                    return
+                time.sleep(0.01)
+        finally:
+            self.stop(clear_error=False)
+
     def _start_process_mode(
         self,
         *,
@@ -1593,6 +2249,7 @@ class SessionManager:
             self.ingest_listen_stdout()
             self.ingest_frequency_scan_stdout()
             self.ingest_voice_segments()
+            self.ingest_priority_scan()
             self._poll_digital_listen()
             self.ingest_recording()
         return self.status
@@ -1628,7 +2285,10 @@ class SessionManager:
                 )
             self._finalize_recording("stopped")
         self._stop_voice_auto_poll()
-        if self._voice_backend and self.session and self.session.mode == "voice_segments":
+        if self._voice_backend and self.session and self.session.mode in (
+            "voice_segments",
+            "priority_scan",
+        ):
             self._emit_voice_event("capture_stopped", state="stopped")
         if self._process:
             self._process.stop()
@@ -1644,6 +2304,7 @@ class SessionManager:
             self._voice_backend = None
         self._voice_segmenter = None
         self._voice_segments.clear()
+        self._priority_scan_state = None
         if self.session:
             self.session.status = "stopped"
         self.status.process_running = False

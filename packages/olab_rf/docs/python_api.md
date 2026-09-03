@@ -601,6 +601,128 @@ counters across the respawn. A `sample_rate_hz` change additionally rebuilds the
 segmenter and so discards the learned noise floor. Backend changes still require
 a new session. Live speaker tee playback is future work.
 
+### Priority Scan (Multi-Channel)
+
+**v1 is non-preemptive round-robin, not true priority scanning.** Given a
+list of catalog channels, `priority_scan()` visits them in order, dwells on
+each briefly waiting for a carrier, follows an active transmission to
+completion once one appears, then moves on -- there is no mechanism for one
+channel to interrupt another mid-transmission. "Priority" in the name
+describes the feature's intent for a future version, not v1's behavior.
+
+```python
+for segment in manager.priority_scan(
+    channel_ids=["erie_fire_vhf.buffalo_fd_f1", "noaa_wx_1", "kbuf_tower"],
+    dwell_ms=2_000,
+):
+    print(segment.metadata["channel_label"], segment.duration_sec)
+```
+
+No `poll()`, no manual loop, no sleep-interval tuning -- `priority_scan()`
+calls `start_priority_scan()` internally, polls on a fixed 10ms interval, and
+always stops the scan on exit (normal completion, an early `break`/`return`,
+or a `KeyboardInterrupt`/`GeneratorExit` raised while iterating). This is the
+primary entry point for a script author (`import olab_rf`). A caller that
+needs to integrate scanning into its own request/response cycle without
+blocking (e.g. a GUI) should drive the lower-level primitives directly:
+
+```python
+manager.start_priority_scan(channel_ids=["erie_fire_vhf.buffalo_fd_f1", "noaa_wx_1"])
+# ... elsewhere, on whatever cadence the caller already polls on:
+manager.poll()
+for segment in manager.pop_voice_segments():
+    ...
+status = manager.current_priority_scan_status()
+```
+
+Each entry in `channel_ids` is a catalog channel id -- either a bare id (must
+be unique across every range in the merged catalog) or a qualified
+`"range_id.channel_id"` form to disambiguate a bare id that collides across
+ranges. Duplicate entries are de-duplicated, keeping the first occurrence's
+position. An unresolvable or ambiguous id raises `ValueError` before any
+receiver is touched.
+
+Every completed `RadioVoiceSegment` carries `channel_id`, `channel_label`,
+`range_id`, and `range_label` in `.metadata`, taken from the channel id that
+was actually resolved and tuned to -- not re-derived from the segment's
+frequency via `FrequencyCatalog.match_frequency()`, which can resolve to the
+wrong (wider, overlapping) catalog range for a frequency that also matches a
+more specific one.
+
+Tuning knobs:
+
+- `dwell_ms=2_000`: how long to wait on a silent channel before moving to the
+  next one. The dwell clock starts at the first PCM frame actually received
+  for this visit, not at process spawn, so `rtl_fm` startup/USB retune
+  latency does not eat into the budget. An informed default pending bench
+  tuning, like every other threshold in this library -- not a validated
+  constant.
+- `max_segment_sec=20.0`, `hang_time_ms=600`: same meaning as
+  `start_voice_segments()`'s parameters of the same name, applied to every
+  channel.
+- `max_lock_ms`: hard cap on how long the scanner will stay locked onto one
+  channel before being forced to check on the others, regardless of whether
+  that channel is still active. Without this, a continuously-modulated
+  channel (e.g. a 24/7 weather broadcast) can capture the scanner
+  indefinitely, since its "no carrier" gap between transmissions may never
+  be long enough to register. Defaults to
+  `int(max_segment_sec * 1000) + hang_time_ms + 1_000` when not given, so a
+  default-length transmission can complete before being forced off --
+  changing `max_segment_sec`/`hang_time_ms` moves this default with them.
+  Pass an explicit value to override. **Accepted tradeoff:** hitting this cap
+  truncates whatever transmission is in progress; the partial audio is
+  discarded, the same as manually stopping mid-segment.
+- `detector_overrides={"channel_id": {"detector_mode": ..., "hf_ratio_threshold": ...}}`:
+  per-channel overrides for the carrier detector, keyed the same way as
+  `channel_ids` (bare or qualified). Without an override, a channel uses the
+  scan's global `hf_ratio`/`1.2` defaults. A key that doesn't resolve to a
+  channel present in `channel_ids`, an unrecognised key inside an override
+  dict, an invalid `detector_mode`, or a non-positive `hf_ratio_threshold`
+  all raise `ValueError` from `start_priority_scan` itself, before any
+  receiver is touched -- none of these mistakes is deferred to wherever the
+  affected channel's visit happens to land.
+- `dc_block=True`, `normalize=False`, `normalize_target_dbfs=-20.0`: same
+  meaning as `start_voice_segments()`, applied to every channel.
+- `deemphasis_us`: same meaning as `start_voice_segments()`, with one
+  addition -- **AM channels are unvalidated for carrier detection in v1**
+  (the `hf_ratio` gate was tuned on NFM captures; AM's band split at a 12kHz
+  sample rate is a materially different measurement, not yet bench-tested),
+  but they do get `deemphasis_us=None` automatically, since AM audio was
+  never FM pre-emphasised and applying a 75us de-emphasis lowpass to it would
+  audibly muffle the captured speech. This automatic override only applies
+  when `deemphasis_us` is left unset; an explicit value (including a literal
+  `75.0` or `None`) always wins, for every channel regardless of modulation.
+- `gain_db`, `frame_ms=40`: same meaning as `start_voice_segments()`, applied
+  to every channel.
+
+`completed_segments`/`dropped_segments`/`capped_closes` on
+`current_priority_scan_status()`/`priority_scan_dict()` are scan-lifetime
+totals: each channel visit rebuilds both the `rtl_fm` process and the
+segmenter from scratch (a new subprocess is required per frequency change
+anyway), which would otherwise reset these counters to 0 on every channel
+hop. They are carried forward across every rebuild instead, the same way
+`restart_voice_capture()` already carries them across a respawn.
+
+Wideband FM (`wbfm`/`wfm`) channels are rejected with a clear `ValueError`
+before any backend starts: `RtlFmAudioBackend` cannot express `wbfm` at an
+explicit sample rate without producing a broken `rtl_fm` command (see the
+wideband-FM note above).
+
+Known limitation: a channel that is already mid-transmission the moment the
+scanner tunes to it can have its noise floor bootstrapped from voice level
+rather than hiss, since there is no protected calibration window -- the gate
+is live and the floor bootstraps from whatever the very first frame measures.
+This is harmless under the default `hf_ratio` detector (which never consults
+the floor) and only affects `rms_quieting`/`hybrid`, where it can delay that
+detector's carrier-absent branch until the floor's rate-limited drift
+recovers. Because every visit gets a fresh segmenter, this cannot compound
+across repeat visits to the same channel -- each one is an independent shot
+at a clean bootstrap. A segment captured this way also reports a
+voice-level `noise_floor_db`/`threshold_db` in its own fields, which is
+correct-but-misleading if read back for threshold tuning (the issue #3
+workflow) -- it played no role in gating that particular segment under
+`hf_ratio`.
+
 ### Automated Capture And Status
 
 Most server/event-loop integrations should call `manager.poll()` themselves.
@@ -906,6 +1028,41 @@ Important fields:
 - `margin_db`: active power minus baseline power, if available.
 - `label`, `range_id`, `channel_id`, `modulation`: catalog match metadata.
 - `source`: candidate source, such as `bin`, `channel`, or `iq_peak`.
+
+### `start_priority_scan(channel_ids, ...) -> RadioSession`
+
+Start a non-preemptive round-robin scan over a caller-supplied list of
+catalog channels (see "Priority Scan (Multi-Channel)" above for the full
+parameter reference and tuning guidance). Advance with `poll()`, drain
+segments with `pop_voice_segments()`, inspect state with
+`current_priority_scan_status()`/`priority_scan_dict()`.
+
+### `priority_scan(channel_ids, ...) -> Iterator[RadioVoiceSegment]`
+
+Blocking generator wrapper over `start_priority_scan()`, mirroring
+`iter_voice_segments()`'s shape: calls `start_priority_scan()`, polls on a
+fixed interval, yields each completed segment, and always stops the scan on
+exit (normal completion, an early `break`/`return`, or
+`KeyboardInterrupt`/`GeneratorExit`). The primary entry point for a script
+author; `start_priority_scan()`/`poll()` remain for callers (e.g. a GUI)
+needing non-blocking integration.
+
+### `PriorityScanStatus`
+
+Important fields:
+
+- `state`: `scanning`, `locked`, `stopped`, or `error`.
+- `current_channel_id`, `current_channel_label`, `current_range_id`,
+  `current_range_label`: the channel currently tuned to.
+- `cycle_count`: number of full passes through `channel_ids` completed.
+- `completed_segments`, `dropped_segments`, `capped_closes`: scan-lifetime
+  totals, not reset by a channel hop (see above).
+- `noise_floor_db`, `last_frame_band_ratio`, `active`, `recalibrating`: a
+  live view of the currently-tuned channel's segmenter.
+- `error`: set when a mid-scan backend failure aborted the scan to IDLE.
+
+`to_dict()` includes the same fields; web/API adapters should use it rather
+than inspecting dataclass internals.
 
 ### `start_adsb(...) -> RadioSession`
 

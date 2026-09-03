@@ -10,6 +10,7 @@ from olab_rf import (
     FrequencyScanBackend,
     FrequencyScanRequest,
     FrequencyScanStatus,
+    PriorityScanStatus,
     SessionManager,
     SpectrumSnapshot,
 )
@@ -22,6 +23,7 @@ def test_top_level_exports_cover_primary_python_api():
         "FrequencyScanBackend",
         "FrequencyScanRequest",
         "FrequencyScanStatus",
+        "PriorityScanStatus",
         "RadioSession",
         "SessionManager",
         "SpectrumSnapshot",
@@ -34,6 +36,7 @@ def test_top_level_exports_cover_primary_python_api():
     assert olab_rf.SessionManager is SessionManager
     assert olab_rf.FrequencyRangeScanPlan is FrequencyRangeScanPlan
     assert olab_rf.FrequencyScanBackend is FrequencyScanBackend
+    assert olab_rf.PriorityScanStatus is PriorityScanStatus
 
 
 def test_frequency_scan_request_rejects_invalid_inputs():

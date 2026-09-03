@@ -341,6 +341,70 @@ class FrequencyScanStatus:
         )
 
 
+PriorityScanStateValue = Literal["scanning", "locked", "stopped", "error"]
+
+
+@dataclass(frozen=True, slots=True)
+class PriorityScanStatus:
+    """Snapshot of a multi-channel priority scan.
+
+    See ``SessionManager.start_priority_scan``/``SessionManager.priority_scan``.
+    v1 is non-preemptive round-robin: channels are visited in list order, one
+    dwell or lock at a time, with no priority-driven interruption of an
+    active lock -- "priority" in the feature name is aspirational for v1.
+
+    ``completed_segments``/``dropped_segments``/``capped_closes`` are
+    scan-lifetime totals, carried forward across the fresh backend/segmenter
+    every channel visit builds -- they do not reset to 0 when the scanner
+    hops to the next channel.
+    """
+
+    scan_id: str
+    session_id: str
+    channel_ids: list[str]
+    state: PriorityScanStateValue = "scanning"
+    current_channel_id: str | None = None
+    current_channel_label: str | None = None
+    current_range_id: str | None = None
+    current_range_label: str | None = None
+    cycle_count: int = 0
+    completed_segments: int = 0
+    dropped_segments: int = 0
+    capped_closes: int = 0
+    error: str | None = None
+    # Live view of the currently-tuned channel's segmenter, for a future
+    # tuning-playground panel -- null whenever no segmenter is active yet.
+    noise_floor_db: float | None = None
+    last_frame_band_ratio: float | None = None
+    active: bool = False
+    recalibrating: bool = False
+    started_at: datetime = field(default_factory=utc_now)
+    stopped_at: datetime | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "scan_id": self.scan_id,
+            "session_id": self.session_id,
+            "channel_ids": list(self.channel_ids),
+            "state": self.state,
+            "current_channel_id": self.current_channel_id,
+            "current_channel_label": self.current_channel_label,
+            "current_range_id": self.current_range_id,
+            "current_range_label": self.current_range_label,
+            "cycle_count": self.cycle_count,
+            "completed_segments": self.completed_segments,
+            "dropped_segments": self.dropped_segments,
+            "capped_closes": self.capped_closes,
+            "error": self.error,
+            "noise_floor_db": self.noise_floor_db,
+            "last_frame_band_ratio": self.last_frame_band_ratio,
+            "active": self.active,
+            "recalibrating": self.recalibrating,
+            "started_at": dt_to_iso(self.started_at),
+            "stopped_at": dt_to_iso(self.stopped_at),
+        }
+
+
 def _coerce_dt(value: object) -> datetime | None:
     if isinstance(value, datetime):
         return value
