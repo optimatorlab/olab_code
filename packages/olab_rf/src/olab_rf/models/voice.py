@@ -36,6 +36,14 @@ class RadioVoiceSegment:
     noise_floor_db: float
     threshold_db: float
     channels: int = 1
+    # Conditioned-domain measurements. Separate fields rather than redefining
+    # rms_db/peak_db, so `rms_db - noise_floor_db` stays arithmetically valid for
+    # existing consumers of the rf.voice.segment payload. The raw fields are
+    # measured pre-conditioning and correctly do not move when conditioning
+    # changes -- that is the chain-order rule, not a bug to fix.
+    conditioned_rms_db: float | None = None
+    conditioned_peak_db: float | None = None
+    conditioned_band_ratio: float | None = None
     wav_path: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -73,6 +81,9 @@ class RadioVoiceSegment:
             "peak_db": self.peak_db,
             "noise_floor_db": self.noise_floor_db,
             "threshold_db": self.threshold_db,
+            "conditioned_rms_db": self.conditioned_rms_db,
+            "conditioned_peak_db": self.conditioned_peak_db,
+            "conditioned_band_ratio": self.conditioned_band_ratio,
             "wav_path": self.wav_path,
             "metadata": self.metadata,
         }
@@ -111,6 +122,18 @@ class VoiceSegmentStatus:
     completed_segments: int = 0
     dropped_segments: int = 0
     error: str | None = None
+    detector_mode: str = "hf_ratio"
+    last_frame_band_ratio: float | None = None
+    recalibrating: bool = False
+    capped_closes: int = 0
+    # Audio-domain spectrum of the demodulated stream. Named audio_* to keep it
+    # distinct from the RF spectrum subsystem, which has its own snapshot type
+    # whose field is also called `bins`. Null unless explicitly enabled: two
+    # float arrays on every rf.voice.status message is real growth on a
+    # frequently published subject.
+    audio_spectrum_bin_hz: float | None = None
+    audio_spectrum_raw_db: list[float] | None = None
+    audio_spectrum_conditioned_db: list[float] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -128,6 +151,13 @@ class VoiceSegmentStatus:
             "completed_segments": self.completed_segments,
             "dropped_segments": self.dropped_segments,
             "error": self.error,
+            "detector_mode": self.detector_mode,
+            "last_frame_band_ratio": self.last_frame_band_ratio,
+            "recalibrating": self.recalibrating,
+            "capped_closes": self.capped_closes,
+            "audio_spectrum_bin_hz": self.audio_spectrum_bin_hz,
+            "audio_spectrum_raw_db": self.audio_spectrum_raw_db,
+            "audio_spectrum_conditioned_db": self.audio_spectrum_conditioned_db,
         }
 
 
