@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from math import log10, sqrt
+from math import isfinite, log10, sqrt
 from pathlib import Path
 from typing import Any, AsyncIterator, Literal
 
@@ -20,6 +20,47 @@ class StreamingBackpressureError(RuntimeError):
     """Raised when a live-audio producer outruns the bounded worker queue."""
 
 
+# A *contiguous* trailing run of 2+ of these characters is collapsed to just
+# the last one when joining one _transcribe() call's internal segments --
+# uniformly, on every segment including the last, since a doubled/malformed
+# punctuation run is never correct English regardless of whether the split
+# it sits on is a real sentence boundary or a decoder artifact. Deliberately
+# excludes the Unicode ellipsis ("…", which Faster-Whisper emits as a single
+# codepoint rather than three periods): that mark is already a single
+# legitimate character and must never be collapsed. See
+# _collapse_malformed_trailing_punctuation() and _transcribe() below.
+_COLLAPSIBLE_TERMINAL_PUNCTUATION = ".!?"
+
+
+def _collapse_malformed_trailing_punctuation(text: str) -> str:
+    """Collapse a trailing run of 2+ ``_COLLAPSIBLE_TERMINAL_PUNCTUATION``
+    (".!?") characters down to just the last one.
+
+    Such a run is malformed regardless of whether the internal segment it
+    ends is a real sentence boundary or a decoder artifact, so this needs no
+    boundary classification at all (olab_code#66): e.g. "deferred until.."
+    -> "deferred until.", and "Deferred until .." -> "Deferred until."
+    (any whitespace immediately preceding the run is removed too, or the
+    collapse would leave a new malformed " ." shape behind).
+
+    The Unicode ellipsis ("…") is a separate, already-legitimate single
+    codepoint: it is never collapsed, and because it isn't in the character
+    set above it also *terminates* any run it's adjacent to -- so "wait….",
+    "wait..…" and the like are deliberately left exactly as the decoder
+    produced them, not a missed case.
+
+    Only a contiguous trailing run is in scope. The pre-#66 blanket strip
+    additionally re-``.strip()``-ed to squash whitespace between separated
+    marks (e.g. "hello . . ." -> "hello . ."); that concern is knowingly
+    retired here, since trusting the decoder's own punctuation includes
+    trusting shapes like that one.
+    """
+    stripped_len = len(text) - len(text.rstrip(_COLLAPSIBLE_TERMINAL_PUNCTUATION))
+    if stripped_len < 2:
+        return text
+    return text[: len(text) - stripped_len].rstrip() + text[-1]
+
+
 @dataclass(slots=True)
 class FasterWhisperStreamingTranscriber:
     """Bounded, local Faster-Whisper transcription for ordered PCM frames."""
@@ -35,6 +76,32 @@ class FasterWhisperStreamingTranscriber:
     silence_threshold_db: float = -55.0
     vad_filter: bool = True
     max_queued_frames: int = 128
+    initial_prompt_context_chars: int = 200
+    context_reset_silence_multiplier: float = 4.0
+    """Scale factor on ``endpoint_silence_seconds`` (not an absolute number of
+    seconds): the carried ``initial_prompt`` is discarded once the real gap
+    since speech was last heard exceeds ``endpoint_silence_seconds *
+    context_reset_silence_multiplier``. A value below ``1.0`` makes that
+    threshold shorter than ``endpoint_silence_seconds`` itself, so every
+    ``transcript.segment_final`` resets context — recovering the previous
+    (pre-#63-fix) never-carry-past-segment_final behavior as an explicit
+    opt-in escape hatch for a consumer who disagrees with the "always carry"
+    default."""
+    interval_overlap_seconds: float = 0.0
+    """Trailing audio (in seconds) retained across a
+    ``transcript.interval_final`` cut and seeded into the next segment's
+    buffer, so a word's audio spanning the exact cut instant isn't split
+    across two independently-decoded buffers. Applies only to
+    ``interval_final`` boundaries — a ``transcript.segment_final`` fires on
+    real silence (``endpoint_silence_seconds``), where by definition nothing
+    can be mid-word. ``0.0`` (the default) disables retention entirely —
+    byte-identical to the no-overlap behavior. Must stay below
+    ``target_interval_seconds`` (an overlap approaching or exceeding the
+    whole buffer duration is degenerate — most or all of each buffer would
+    be repeated content). Any call whose buffer carries a retained overlap
+    prefix pays a ``word_timestamps=True`` decode cost on that call only —
+    never on the first segment after ``start()``, and never on a segment
+    following a ``segment_final`` (which never retains overlap)."""
     _model: Any | None = field(default=None, init=False, repr=False)
     _frame_queue: asyncio.Queue[AudioFrame | None] | None = field(
         default=None, init=False, repr=False
@@ -49,18 +116,122 @@ class FasterWhisperStreamingTranscriber:
     _worker_error: Exception | None = field(default=None, init=False, repr=False)
     _segment_counter: int = field(default=0, init=False, repr=False)
     _frames: list[AudioFrame] = field(default_factory=list, init=False, repr=False)
-    _segment_start_time: float | None = field(default=None, init=False, repr=False)
+    _new_content_start_time: float | None = field(default=None, init=False, repr=False)
+    """Timestamp of the first genuinely new (i.e. not retained-overlap)
+    frame consumed for the current segment. Distinct from
+    ``_segment_start_time`` in the pre-overlap design (removed -- nothing
+    reads it once both this field and ``capture_start_time`` exist): this
+    field measures only new content, so ``_segment_duration()``'s
+    ``target_interval_seconds`` timer and the emitted event's
+    ``capture_start_time`` aren't inflated by "free" retained overlap.
+    Cleared to ``None`` by every ``_reset_segment()`` call and left
+    ``None`` through an overlap seed -- set only by ``_consume_frame``,
+    which only ever processes genuinely new frames."""
+    _pending_overlap_seconds: float = field(default=0.0, init=False, repr=False)
+    """The actual retained-audio duration (sample/byte-duration based, may
+    overshoot ``interval_overlap_seconds`` by less than one frame) seeded
+    into the *current* segment's buffer by the previous emit's
+    ``_reset_segment(retain_overlap=True)``. Read exactly once per
+    ``_emit_segment`` call, into a local captured before that call's own
+    ``_reset_segment()`` overwrites it for the *next* segment -- this is
+    what ``_transcribe()`` uses as its word-trim cutoff."""
     _segment_end_time: float | None = field(default=None, init=False, repr=False)
     _last_speech_end_time: float | None = field(default=None, init=False, repr=False)
+    _segment_first_speech_time: float | None = field(default=None, init=False, repr=False)
+    _last_speech_heard_time: float | None = field(default=None, init=False, repr=False)
+    """Cross-segment bookkeeping: the timestamp speech was last heard,
+    updated only in ``_emit_segment`` and deliberately **not** cleared by
+    ``_reset_segment()`` — it has to survive segment boundaries to measure
+    the real elapsed gap for the long-silence context reset. Do not fold
+    this into ``_reset_segment()``'s per-segment cleanup."""
+    _next_initial_prompt: str | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.model_path = Path(self.model_path).expanduser()
-        if self.target_interval_seconds <= 0:
-            raise ValueError("target_interval_seconds must be positive")
-        if self.endpoint_silence_seconds <= 0:
-            raise ValueError("endpoint_silence_seconds must be positive")
+        if not (self.target_interval_seconds > 0 and isfinite(self.target_interval_seconds)):
+            raise ValueError("target_interval_seconds must be a positive, finite number")
+        if not (
+            self.endpoint_silence_seconds > 0 and isfinite(self.endpoint_silence_seconds)
+        ):
+            raise ValueError("endpoint_silence_seconds must be a positive, finite number")
+        if not (
+            self.context_reset_silence_multiplier > 0
+            and isfinite(self.context_reset_silence_multiplier)
+        ):
+            raise ValueError("context_reset_silence_multiplier must be a positive, finite number")
+        if not (
+            self.interval_overlap_seconds >= 0 and isfinite(self.interval_overlap_seconds)
+        ):
+            raise ValueError("interval_overlap_seconds must be a non-negative, finite number")
+        if self.interval_overlap_seconds >= self.target_interval_seconds:
+            raise ValueError("interval_overlap_seconds must be less than target_interval_seconds")
         if self.max_queued_frames < 1:
             raise ValueError("max_queued_frames must be at least 1")
+        if self.initial_prompt_context_chars < 1:
+            raise ValueError("initial_prompt_context_chars must be at least 1")
+
+    def update_tuning(
+        self,
+        *,
+        target_interval_seconds: float | None = None,
+        endpoint_silence_seconds: float | None = None,
+        context_reset_silence_multiplier: float | None = None,
+        interval_overlap_seconds: float | None = None,
+    ) -> None:
+        """Live-update chunking-tuning knobs without reconstructing the
+        transcriber. Any argument left as ``None`` is unchanged. Validates
+        every provided value before assigning any of them, so a bad value
+        raises ``ValueError`` and leaves all existing tuning fields
+        unmodified (no partial application). Not thread-safe beyond the
+        normal single-asyncio-loop assumptions the rest of this class makes;
+        ``_consume_frame`` reads these fields fresh every frame, so an
+        update takes effect on the very next frame."""
+        if target_interval_seconds is not None and not (
+            target_interval_seconds > 0 and isfinite(target_interval_seconds)
+        ):
+            raise ValueError("target_interval_seconds must be a positive, finite number")
+        if endpoint_silence_seconds is not None and not (
+            endpoint_silence_seconds > 0 and isfinite(endpoint_silence_seconds)
+        ):
+            raise ValueError("endpoint_silence_seconds must be a positive, finite number")
+        if context_reset_silence_multiplier is not None and not (
+            context_reset_silence_multiplier > 0 and isfinite(context_reset_silence_multiplier)
+        ):
+            raise ValueError("context_reset_silence_multiplier must be a positive, finite number")
+        if interval_overlap_seconds is not None and not (
+            interval_overlap_seconds >= 0 and isfinite(interval_overlap_seconds)
+        ):
+            raise ValueError("interval_overlap_seconds must be a non-negative, finite number")
+
+        # interval_overlap_seconds < target_interval_seconds is a
+        # *cross-field* rule: if a caller updates only one of the two
+        # fields, it must be checked against the resulting combination (new
+        # value where provided this call, existing attribute value
+        # otherwise), not just whichever field this call happens to touch --
+        # e.g. lowering target_interval_seconds alone must still be rejected
+        # if it would invalidate the interval_overlap_seconds already set
+        # from construction (or a prior update_tuning() call).
+        resulting_target = (
+            target_interval_seconds
+            if target_interval_seconds is not None
+            else self.target_interval_seconds
+        )
+        resulting_overlap = (
+            interval_overlap_seconds
+            if interval_overlap_seconds is not None
+            else self.interval_overlap_seconds
+        )
+        if resulting_overlap >= resulting_target:
+            raise ValueError("interval_overlap_seconds must be less than target_interval_seconds")
+
+        if target_interval_seconds is not None:
+            self.target_interval_seconds = target_interval_seconds
+        if endpoint_silence_seconds is not None:
+            self.endpoint_silence_seconds = endpoint_silence_seconds
+        if context_reset_silence_multiplier is not None:
+            self.context_reset_silence_multiplier = context_reset_silence_multiplier
+        if interval_overlap_seconds is not None:
+            self.interval_overlap_seconds = interval_overlap_seconds
 
     async def start(self) -> None:
         if self._started:
@@ -144,19 +315,37 @@ class FasterWhisperStreamingTranscriber:
                 raise RuntimeError("Faster-Whisper frame queue was not initialized")
             while (frame := await self._frame_queue.get()) is not None:
                 await self._consume_frame(frame)
-            if self._flush_on_stop and self._frames:
+            # `_new_content_start_time is not None` guards against flushing a
+            # buffer that holds nothing but a never-consumed retained overlap
+            # prefix (stop(flush=True) called immediately after an
+            # interval_final, with zero new frames submitted in between) --
+            # every _consume_frame-triggered _emit_segment call below has
+            # already set _new_content_start_time earlier in that same
+            # frame's processing, so it can only be None here.
+            if self._flush_on_stop and self._frames and self._new_content_start_time is not None:
                 await self._emit_segment("transcript.segment_final")
         except Exception as exc:
             self._worker_error = exc
 
     async def _consume_frame(self, frame: AudioFrame) -> None:
+        # Every frame reaching this method is, by construction, genuinely
+        # new: a retained overlap prefix is injected directly into
+        # `self._frames` by `_reset_segment()`, never routed through here.
         frame_end_time = frame.timestamp + len(frame.data) / (2 * frame.sample_rate)
-        if not self._frames:
-            self._segment_start_time = frame.timestamp
+        if self._new_content_start_time is None:
+            self._new_content_start_time = frame.timestamp
         self._frames.append(frame)
         self._segment_end_time = frame_end_time
 
         if self._is_speech(frame):
+            # Gated on `_segment_first_speech_time` itself (not on
+            # `_last_speech_end_time`, which overlap replay can legitimately
+            # pre-populate from the *previous* segment's audio) so this
+            # fires exactly once, on the first genuinely-new speech frame,
+            # regardless of whether `_reset_segment()` seeded
+            # `_last_speech_end_time` from a retained tail.
+            if self._segment_first_speech_time is None:
+                self._segment_first_speech_time = frame.timestamp
             self._last_speech_end_time = frame_end_time
 
         if self._last_speech_end_time is not None:
@@ -174,17 +363,98 @@ class FasterWhisperStreamingTranscriber:
         if not self._frames:
             return
         frames = self._frames
-        segment_start_time = self._segment_start_time
+        new_content_start_time = self._new_content_start_time
         segment_end_time = self._segment_end_time
-        has_speech = self._last_speech_end_time is not None
-        self._reset_segment()
+        segment_first_speech_time = self._segment_first_speech_time
+        # `has_speech` means "this segment observed genuinely new speech" --
+        # gated on `_segment_first_speech_time`, not on
+        # `_last_speech_end_time`, because overlap replay can legitimately
+        # pre-populate the latter from the *previous* segment's audio (see
+        # `_reset_segment`). Byte-identical to the old
+        # `_last_speech_end_time is not None` check when overlap is
+        # disabled, since `_consume_frame` sets both fields on the same
+        # frame in that case. This also closes a real duplicate-emission
+        # gap: without it, a segment with zero new speech but a straddling
+        # word whose alignment timestamp lands past the overlap cutoff
+        # (Faster-Whisper's own VAD picking up audio the dB gate missed --
+        # the same gate/VAD disagreement the source bug's repro shows)
+        # could still decode and publish that word again as "new" text.
+        has_speech = segment_first_speech_time is not None
+        segment_last_speech_time = self._last_speech_end_time
+        # Captured before `_reset_segment()` runs again below and overwrites
+        # `_pending_overlap_seconds` for the *next* segment -- this is the
+        # overlap that was seeded into *this* segment, not the next one.
+        overlap_cutoff_seconds = self._pending_overlap_seconds
+        retain_overlap = (
+            event_type == "transcript.interval_final" and self.interval_overlap_seconds > 0
+        )
+        self._reset_segment(retain_overlap=retain_overlap)
 
         if not has_speech:
             return
+
+        # Cross-segment context continuity (olab_code#63): by default we
+        # always carry the previous segment's trailing text forward as
+        # `initial_prompt`, regardless of whether that segment ended via
+        # transcript.interval_final or transcript.segment_final — a real
+        # pause is usually just a natural breath at typical
+        # endpoint_silence_seconds, and re-decoding the next chunk with no
+        # context is what causes the stuttered/duplicated first word. Only a
+        # genuinely long silence (relative to endpoint_silence_seconds)
+        # discards the carried context, since at that point it's more likely
+        # to be a stale, unrelated topic than useful continuity.
+        #
+        # An overlap-carrying call is a local override on top of this: the
+        # old segment's own (possibly garbled -- that's the whole premise of
+        # the truncation bug) trailing text must not become a text-
+        # continuation hint for the *same audio* this call is about to
+        # re-decode acoustically.
+        initial_prompt = None if overlap_cutoff_seconds > 0 else self._next_initial_prompt
+        previous_speech_heard_time = self._last_speech_heard_time
+        # `segment_first_speech_time is not None` always holds here (the
+        # `has_speech` early return above already guarantees it) -- kept as
+        # an explicit guard anyway so this doesn't silently rely on that
+        # invariant holding through call order alone.
+        if previous_speech_heard_time is not None and segment_first_speech_time is not None:
+            gap = segment_first_speech_time - previous_speech_heard_time
+            reset_threshold = self.endpoint_silence_seconds * self.context_reset_silence_multiplier
+            if gap > reset_threshold:
+                # This block is not dead code on the overlap path: a
+                # `context_reset_silence_multiplier < 1.0` escape hatch
+                # makes `reset_threshold` shorter than
+                # `endpoint_silence_seconds`, so a gap that stays under
+                # `endpoint_silence_seconds` (and therefore never fires
+                # `segment_final`, leaving overlap carrying) can still
+                # exceed it. `initial_prompt = None` here is redundant
+                # whenever `overlap_cutoff_seconds > 0` (already suppressed
+                # above), but the `_next_initial_prompt` cleanup below is
+                # not redundant and must keep running regardless.
+                initial_prompt = None
+                # Discard the stored context outright, not just for this one
+                # call: if this segment's own transcription comes back empty
+                # (a cough/click right after the long pause), leaving
+                # `_next_initial_prompt` in place would let the *next*
+                # segment inherit stale, pre-gap context.
+                self._next_initial_prompt = None
+
         pcm = b"".join(frame.data for frame in frames)
-        text, confidence = await asyncio.to_thread(self._transcribe, pcm)
+        text, confidence = await asyncio.to_thread(
+            self._transcribe, pcm, initial_prompt, overlap_cutoff_seconds
+        )
+
+        # Roll `_last_speech_heard_time` forward on every segment that had
+        # speech, whether or not it transcribed to non-empty text, so the
+        # next segment's gap is always measured from the true most-recent
+        # speech rather than going stale across an empty-text segment.
+        self._last_speech_heard_time = segment_last_speech_time
+
         if not text:
             return
+        # An empty transcription must not clear the carried context — only a
+        # non-empty result replaces it with its own trailing text. This
+        # keeps continuity intact across a breath/click/cough that clears
+        # the dB gate but produces no words.
+        self._next_initial_prompt = text[-self.initial_prompt_context_chars :]
         self._segment_counter += 1
         event = TranscriptEvent(
             text=text,
@@ -193,14 +463,19 @@ class FasterWhisperStreamingTranscriber:
             revision=1,
             engine="faster_whisper",
             confidence=confidence,
-            capture_start_time=segment_start_time,
+            capture_start_time=new_content_start_time,
             capture_end_time=segment_end_time,
         )
         if self._event_queue is None:
             raise RuntimeError("Faster-Whisper event queue was not initialized")
         await self._event_queue.put(event)
 
-    def _transcribe(self, pcm: bytes) -> tuple[str, float | None]:
+    def _transcribe(
+        self,
+        pcm: bytes,
+        initial_prompt: str | None,
+        overlap_cutoff_seconds: float = 0.0,
+    ) -> tuple[str, float | None]:
         if self._model is None:
             raise RuntimeError("Faster-Whisper streaming transcriber has not been initialized")
         samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
@@ -209,10 +484,118 @@ class FasterWhisperStreamingTranscriber:
             language=self.language,
             beam_size=self.beam_size,
             vad_filter=self.vad_filter,
+            initial_prompt=initial_prompt,
+            # Per-call, not a static `self.interval_overlap_seconds > 0`
+            # config check: the first segment after start() and any segment
+            # after a segment_final (which never retains overlap) must pay
+            # zero extra decode cost even when overlap is configured on.
+            word_timestamps=overlap_cutoff_seconds > 0,
         )
         collected = list(segments)
-        text = " ".join(segment.text.strip() for segment in collected if segment.text.strip()).strip()
-        probabilities = [segment.avg_logprob for segment in collected if segment.avg_logprob is not None]
+
+        # Overlap word-trim preprocessing pass (audio continuity across
+        # interval_final cuts), composed *before* the internal-segment-join
+        # logic below: this pass only decides which per-segment texts exist
+        # and how each is trimmed, and the join below only decides how those
+        # texts are combined and which are dropped, so the two compose
+        # independently (the join was reworked by olab_code#66 without
+        # touching this pass). A no-op pass-through when this call carries
+        # no overlap.
+        texts: list[str] = []
+        trimmed_by_overlap: list[bool] = []
+        for segment in collected:
+            if overlap_cutoff_seconds <= 0 or not segment.words:
+                # No overlap on this call, or Faster-Whisper gave no
+                # word-level breakdown for this segment (word_timestamps
+                # off, or an unalignable subsegment) -- the keep-bias
+                # applies to the whole segment rather than defaulting to
+                # drop it.
+                texts.append(segment.text)
+                trimmed_by_overlap.append(False)
+                continue
+            # word.end is rounded to 2 decimals by Faster-Whisper, so this
+            # comparison is only accurate to +/-5ms -- doesn't change the
+            # keep-bias below, just bounds its precision.
+            kept = [word for word in segment.words if word.end > overlap_cutoff_seconds]
+            if len(kept) == len(segment.words):
+                # Nothing to trim -- fast path, use the segment unchanged.
+                texts.append(segment.text)
+                trimmed_by_overlap.append(False)
+            elif not kept:
+                # Entirely within the already-covered overlap window --
+                # already correctly emitted by the old segment.
+                texts.append("")
+                trimmed_by_overlap.append(True)
+            else:
+                # Partial trim: a word ending exactly at or before the
+                # cutoff is dropped; a word straddling or past the cutoff is
+                # kept (an ambiguous boundary word is kept -- risk a visible,
+                # correctable duplicate rather than a silent, invisible
+                # loss). Reconstruct from only the surviving words -- each
+                # Word.word carries its own leading space (confirmed against
+                # the actually-installed faster-whisper version), so this is
+                # "".join, not " ".join, or every inter-word space doubles.
+                texts.append("".join(word.word for word in kept).strip())
+                trimmed_by_overlap.append(False)
+
+        # By the time _transcribe() is called, the caller (_emit_segment) has
+        # already decided this whole buffer is one continuous utterance --
+        # via endpoint_silence_seconds or the target_interval_seconds
+        # backstop. That does *not* mean an internal split Faster-Whisper's
+        # own decoder makes within this one call is never a real sentence
+        # boundary, which is what the earlier (78105c1) version of this block
+        # assumed: Faster-Whisper's decode-time <|timestamp|> segmentation
+        # usually reflects a genuine acoustic break, so blanket-stripping the
+        # trailing punctuation of every non-last segment and decapitalizing
+        # every non-first one corrupted real sentence boundaries that
+        # happened to fall inside one buffer -- confirmed on live hardware
+        # (olab_code#66: "...sessions. Next: decide whether..." came out as
+        # "...sessions next, decide whether...").
+        #
+        # So: join trusting the decoder's own punctuation and capitalization,
+        # applying only two guards that hold regardless of whether a given
+        # split is real or an artifact, uniformly on every segment including
+        # the last (neither guard depends on position):
+        #   1. drop a segment with no alphanumeric content at all;
+        #   2. collapse a malformed trailing punctuation run (see
+        #      _collapse_malformed_trailing_punctuation).
+        #
+        # NOTE, one observable consequence of guard 1 now being
+        # position-independent: a call whose only contributing segment is
+        # punctuation-only (a bare "...") returns "" rather than that
+        # punctuation, so _emit_segment's `if not text: return` publishes no
+        # event at all for it and leaves the carried initial_prompt context
+        # in place -- where pre-#66 such a call published text="..." (that
+        # lone segment was always "the last segment", hence exempt from the
+        # drop) and overwrote the carried context with it.
+        raw_texts = [text.strip() for text in texts if text.strip()]
+        pieces: list[str] = []
+        for raw_text in raw_texts:
+            piece = _collapse_malformed_trailing_punctuation(raw_text)
+            if not any(char.isalnum() for char in piece):
+                # No alphanumeric content -- e.g. a bare "..." or "…"
+                # segment, which Faster-Whisper emits for near-silence under
+                # vad_filter=True. Contributes nothing to the joined text
+                # regardless of position, so drop it rather than leaving a
+                # stray double space in the join.
+                continue
+            pieces.append(piece)
+        text = " ".join(pieces).strip()
+        # Excludes only segments the overlap trim dropped entirely (their
+        # text isn't in `event.text`, so their confidence shouldn't
+        # contribute to `event.confidence`) -- deliberately narrower than
+        # "any segment contributing no output text": a punctuation-only
+        # internal segment, which the join's alnum guard above drops from the
+        # text, still contributes here exactly as it always has, so this
+        # stays byte-identical to pre-overlap behavior whenever
+        # `overlap_cutoff_seconds == 0`. Harmless for the all-punctuation
+        # call described above: its confidence is computed but never
+        # published, since _emit_segment emits no event on empty text.
+        probabilities = [
+            segment.avg_logprob
+            for segment, dropped in zip(collected, trimmed_by_overlap)
+            if not dropped and segment.avg_logprob is not None
+        ]
         confidence = sum(probabilities) / len(probabilities) if probabilities else None
         return text, confidence
 
@@ -225,15 +608,72 @@ class FasterWhisperStreamingTranscriber:
         return db >= self.silence_threshold_db
 
     def _segment_duration(self) -> float:
-        if self._segment_start_time is None or self._segment_end_time is None:
+        # Measures only genuinely new content -- retained overlap is "free"
+        # extra context on top, not counted against the interval timer.
+        if self._new_content_start_time is None or self._segment_end_time is None:
             return 0.0
-        return self._segment_end_time - self._segment_start_time
+        return self._segment_end_time - self._new_content_start_time
 
-    def _reset_segment(self) -> None:
-        self._frames = []
-        self._segment_start_time = None
+    def _reset_segment(self, *, retain_overlap: bool = False) -> None:
+        """Reset per-segment bookkeeping. With ``retain_overlap=True`` (only
+        ever passed by ``_emit_segment`` for a ``transcript.interval_final``
+        with ``interval_overlap_seconds > 0``), the trailing
+        ``interval_overlap_seconds`` worth of audio is kept as a seed for
+        the next segment instead of being discarded, at whole-frame
+        granularity (no frame-splitting). Every other caller
+        (``transcript.segment_final``, ``stop(flush=False)``) uses the
+        default full discard, byte-identical to pre-overlap behavior."""
+        retained_frames: list[AudioFrame] = []
+        retained_seconds = 0.0
+        if retain_overlap and self.interval_overlap_seconds > 0 and self._frames:
+            accumulated = 0.0
+            suffix: list[AudioFrame] = []
+            for frame in reversed(self._frames):
+                suffix.append(frame)
+                accumulated += len(frame.data) / (2 * frame.sample_rate)
+                if accumulated >= self.interval_overlap_seconds:
+                    break
+            suffix.reverse()
+            retained_frames = suffix
+            retained_seconds = accumulated
+
+        # Rebind, never mutate in place: `_emit_segment` still holds its own
+        # `frames = self._frames` reference to the *old* list at the point
+        # this runs, and builds this call's `pcm` from that reference after
+        # `_reset_segment()` returns -- an in-place truncation here would
+        # silently corrupt the buffer already committed to this emit.
+        self._frames = retained_frames
+        self._pending_overlap_seconds = retained_seconds
         self._segment_end_time = None
-        self._last_speech_end_time = None
+        self._new_content_start_time = None
+        self._segment_first_speech_time = None
+        if retained_frames:
+            # Replay only `_last_speech_end_time` (endpoint-silence
+            # bookkeeping) over the retained suffix -- it needs to know "how
+            # long since any speech, including the tail just carried
+            # forward" to correctly measure the next real silence gap.
+            # `_segment_first_speech_time` and `_new_content_start_time` are
+            # deliberately left `None` above and never touched here: they
+            # must be set only by a genuinely new frame in `_consume_frame`,
+            # never by replay, or both the interval timer and #63's
+            # long-silence gap check would be contaminated by audio the
+            # *previous* segment already accounted for.
+            for frame in retained_frames:
+                if self._is_speech(frame):
+                    self._last_speech_end_time = frame.timestamp + len(frame.data) / (
+                        2 * frame.sample_rate
+                    )
+            # If the retained tail has no speech at all, `_last_speech_end_time`
+            # is deliberately left at whatever value it already held (simply
+            # never touched by the loop above) rather than nulled -- that
+            # older instant genuinely is the true last-speech time, and
+            # keeping it is what lets endpoint-silence measurement stay
+            # continuous across the boundary.
+        else:
+            self._last_speech_end_time = None
+        # NOTE: _last_speech_heard_time is deliberately NOT cleared here — it
+        # is cross-segment bookkeeping for the long-silence context reset in
+        # _emit_segment and must survive across segment boundaries.
 
     def _validate_frame(self, frame: AudioFrame) -> None:
         if frame.format != "pcm_s16le":
