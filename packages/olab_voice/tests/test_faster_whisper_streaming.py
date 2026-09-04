@@ -483,95 +483,187 @@ def test_update_tuning_takes_effect_on_the_next_frame(monkeypatch, tmp_path):
     assert event.type == "transcript.segment_final"
 
 
-def test_transcribe_strips_internal_segment_join_artifacts(tmp_path):
-    """olab_code: Faster-Whisper's own internal VAD can split one
-    _transcribe() call's buffer into multiple internal segments (common with
-    a longer buffer). Each gets independent capitalization/terminal
-    punctuation from the decoder, which a plain join bakes in as spurious
-    mid-utterance artifacts -- e.g. real sayso examples "deferred until..
-    you're at the bench" and "...FRS, GMRS, Corpus mentioned...". Every
-    segment except the last should have its full trailing .!?... run
-    stripped (not just one char -- a single-char strip does not fully
-    resolve "deferred until.."), and every segment except the first should
-    have its leading letter decapitalized -- but the last segment's own
-    trailing punctuation, and the first segment's own leading capital, are
-    real and must survive untouched."""
+def test_transcribe_preserves_real_sentence_boundaries_when_joining(tmp_path):
+    """olab_code#66: Faster-Whisper's own decoder can split one _transcribe()
+    call's buffer into multiple internal segments, and such a split usually
+    reflects a *real* acoustic break -- a natural pause between two
+    sentences that is shorter than endpoint_silence_seconds (so the outer
+    segmentation correctly keeps it in one buffer) but long enough for the
+    decoder to emit its own terminal-punctuated split. The join must trust
+    the decoder here: the earlier (78105c1) blanket
+    strip-punctuation-and-decapitalize rule turned the real, live-hardware
+    example below into a run-on ("...sessions next, decide whether..."),
+    which is the bug this test exists to keep fixed."""
     transcriber = _transcriber_with_segments(
-        tmp_path,
-        [
-            # Interior trailing whitespace after the punctuation run --
-            # rstrip() alone would leave "Deferred until " (regression check
-            # for the re-.strip() step, not just the punctuation strip;
-            # verified against the reported bug's exact "deferred until.."
-            # example, plus a leading space before the punctuation run).
-            "Deferred until ..",
-            # Unicode ellipsis (Whisper emits this codepoint, not "...").
-            "you're at the bench…",
-            # Acronym list -- the guard must leave this alone.
-            "ADS-B, AIS, FRS, GMRS,",
-            # The last segment: not stripped (no trailing punctuation here
-            # to strip), but still decapitalized like any non-first
-            # segment -- this is the plan's other reported bug example.
-            "Corpus mentioned in the issue",
-        ],
+        tmp_path, ["...affecting all your Cloud Code sessions.", "Next: decide whether to merge."]
     )
     text, _confidence = transcriber._transcribe(b"\x00\x10" * 160, initial_prompt=None)
-    assert (
-        text
-        == "Deferred until you're at the bench ADS-B, AIS, FRS, GMRS, corpus mentioned in the issue"
-    )
+    assert text == "...affecting all your Cloud Code sessions. Next: decide whether to merge."
     assert "  " not in text
 
 
-def test_transcribe_preserves_a_last_segment_that_strips_to_empty_raw_text(tmp_path):
-    """A raw trailing segment that strips to empty text (e.g. Faster-Whisper
-    emitting a blank/whitespace-only segment right at the end of a call)
-    must not be mistaken for "the real last segment" -- the real last
-    non-empty segment must still keep its own trailing punctuation."""
+def test_transcribe_collapses_malformed_trailing_punctuation_run(tmp_path):
+    """A trailing run of 2+ ".!?" characters is malformed regardless of
+    whether the split it sits on is a real boundary or a decoder artifact,
+    so it collapses to the run's last character -- this is 78105c1's own
+    original motivating bug ("deferred until.. you're at the bench"), now
+    fixed by a boundary-agnostic guard instead of the reverted blanket rule.
+    The fixture keeps the whitespace *before* the run (as the pre-#66 test
+    fixture did, verified against the reported bug's real shape): the
+    collapse must not leave a stray " ." behind. The following segment's own
+    leading capital is the decoder's and is left completely alone -- nothing
+    decapitalizes anymore.
+
+    The *last* segment carries a run too ("bench!!"), which the pre-#66 code
+    exempted from all punctuation handling: the guard is position-independent
+    now, so it must fire there as well. Without this, reinstating the old
+    `index != last_index` condition around the collapse (the single most
+    likely way this code regresses, since that is the line #66 removes)
+    would ship a malformed trailing "!!" on every affected utterance with
+    the whole suite still green."""
     transcriber = _transcriber_with_segments(
-        tmp_path, ["Copy that.", "we can proceed.", "   "]
+        tmp_path, ["Deferred until ..", "You're at the bench!!"]
     )
     text, _confidence = transcriber._transcribe(b"\x00\x10" * 160, initial_prompt=None)
-    assert text == "Copy that we can proceed."
+    assert text == "Deferred until. You're at the bench!"
+    assert " ." not in text
+    assert "  " not in text
 
 
-def test_transcribe_decap_guard_does_not_crash_on_non_alpha_leading_char(tmp_path):
-    """A non-alphabetic leading character (a digit or an opening quote) must
-    not crash the decapitalization guard."""
-    transcriber = _transcriber_with_segments(
-        tmp_path, ["First,", '"42 degrees, hold."', "9 o'clock now"]
-    )
+def test_transcribe_returns_empty_text_for_an_all_punctuation_call(tmp_path):
+    """The alnum-content drop guard is position-independent, which changes
+    one observable case versus pre-#66: a call whose only segment is
+    punctuation-only returns "" rather than that punctuation itself (pre-#66
+    a lone segment was always "the last segment" and therefore exempt from
+    the drop, so this returned "..."). _emit_segment's `if not text: return`
+    then publishes no event for such a call at all -- covered end-to-end by
+    test_punctuation_only_transcription_publishes_no_event below."""
+    transcriber = _transcriber_with_segments(tmp_path, ["..."])
     text, _confidence = transcriber._transcribe(b"\x00\x10" * 160, initial_prompt=None)
-    assert text == 'First, "42 degrees, hold." 9 o\'clock now'
+    assert text == ""
 
 
-def test_transcribe_drops_a_punctuation_only_internal_segment(tmp_path):
-    """A middle internal segment that is only punctuation (Faster-Whisper
-    emits bare "..." segments for near-silence under vad_filter=True -- the
-    exact regime this fix targets) must be dropped entirely, not crash on an
-    empty string during decapitalization and not leave a stray double space
-    in the join."""
-    transcriber = _transcriber_with_segments(tmp_path, ["Okay", "...", "we can start"])
+@pytest.mark.parametrize(
+    "texts",
+    [
+        # First, middle, and last position: the drop guard is a single
+        # position-independent alnum-content check, so all three must behave
+        # identically.
+        ["...", "Okay", "we can start"],
+        ["Okay", "...", "we can start"],
+        ["Okay", "we can start", "..."],
+        # The Unicode ellipsis form of the same near-silence artifact (a
+        # single codepoint, never touched by the collapse guard) is dropped
+        # by the alnum check just the same.
+        ["Okay", "…", "we can start"],
+    ],
+)
+def test_transcribe_drops_a_punctuation_only_internal_segment(tmp_path, texts):
+    """An internal segment that is only punctuation (Faster-Whisper emits
+    bare "..." segments for near-silence under vad_filter=True) contributes
+    nothing to the joined text and must be dropped entirely, regardless of
+    its position in the call, without leaving a stray double space."""
+    transcriber = _transcriber_with_segments(tmp_path, texts)
     text, _confidence = transcriber._transcribe(b"\x00\x10" * 160, initial_prompt=None)
     assert text == "Okay we can start"
     assert "  " not in text
 
 
-def test_transcribe_decap_guard_skips_pronoun_i_and_acronyms(tmp_path):
-    """The decapitalization guard must not lowercase a leading "I"/"I'll"
-    pronoun or a multi-char all-uppercase acronym token -- both are
-    legitimately capitalized mid-utterance, and blindly decapitalizing them
-    would replace one artifact with a worse one (this is exactly the
-    plan's own motivating acronym-list example: "ADS-B, AIS, FRS, GMRS,
-    ..."). An ordinary lowercase-eligible continuation in the same call
-    still gets decapitalized, confirming the guard is scoped rather than a
-    blanket skip."""
+def test_transcribe_leaves_acronym_and_pronoun_capitalization_untouched(tmp_path):
+    """Nothing decapitalizes any segment anymore, so the acronym-damage bug
+    class the old guard function existed to prevent ("ADS-B, AIS, FRS,
+    GMRS," getting lowercased mid-list) is moot by construction. Trivially
+    true today -- kept as an explicit regression guard so a future change to
+    this join can't silently reintroduce decapitalization without a test
+    failing."""
     transcriber = _transcriber_with_segments(
         tmp_path,
         ["Copy that.", "I'll check the feed.", "ADS-B, AIS,", "FRS, GMRS", "Corpus mentioned it"],
     )
     text, _confidence = transcriber._transcribe(b"\x00\x10" * 160, initial_prompt=None)
-    assert text == "Copy that I'll check the feed ADS-B, AIS, FRS, GMRS corpus mentioned it"
+    assert text == "Copy that. I'll check the feed. ADS-B, AIS, FRS, GMRS Corpus mentioned it"
+
+
+def test_punctuation_only_transcription_publishes_no_event(monkeypatch, tmp_path):
+    """End-to-end half of olab_code#66's one observable behavior change: a
+    segment whose decode yields nothing but a punctuation-only internal
+    segment must publish no TranscriptEvent at all (pre-#66 it published
+    text="...") and must leave the carried initial_prompt context in place
+    rather than overwriting it with that punctuation -- the same
+    empty-text handling test_empty_transcription_preserves_carried_context
+    covers for a zero-segment decode, exercised here against the new
+    all-punctuation input shape."""
+
+    class _PunctuationThenRecordingModel:
+        def __init__(self):
+            self.calls = 0
+            self.prompts: list[str | None] = []
+
+        def transcribe(self, samples, **kwargs):
+            prompt = kwargs.get("initial_prompt")
+            self.prompts.append(prompt)
+            self.calls += 1
+            if self.calls == 2:
+                # The middle segment decodes to punctuation only.
+                segment = SimpleNamespace(text=" ... ", avg_logprob=-0.1)
+                return iter([segment]), SimpleNamespace()
+            text = f"[{prompt}] said the word" if prompt else "said the word"
+            segment = SimpleNamespace(text=text, avg_logprob=-0.1)
+            return iter([segment]), SimpleNamespace()
+
+    model = _PunctuationThenRecordingModel()
+    _install_fake_faster_whisper(monkeypatch, model=model)
+    model_path = tmp_path / "model"
+    model_path.mkdir()
+
+    async def run():
+        transcriber = FasterWhisperStreamingTranscriber(
+            model_path,
+            target_interval_seconds=100.0,
+            endpoint_silence_seconds=0.005,
+            context_reset_silence_multiplier=4.0,
+        )
+        await transcriber.start()
+        stream = transcriber.events()
+        # First (real) segment.
+        await transcriber.submit_frame(
+            AudioFrame(data=b"\x00\x10" * 160, session_id="service", timestamp=10.0)
+        )
+        await transcriber.submit_frame(
+            AudioFrame(data=b"\x00\x00" * 160, session_id="service", timestamp=10.01)
+        )
+        first = await anext(stream)
+        # Second segment: speech-gated, but decodes to punctuation only.
+        await transcriber.submit_frame(
+            AudioFrame(data=b"\x00\x10" * 160, session_id="service", timestamp=10.015)
+        )
+        await transcriber.submit_frame(
+            AudioFrame(data=b"\x00\x00" * 160, session_id="service", timestamp=10.025)
+        )
+        # Third (real) segment, still within the reset threshold.
+        await transcriber.submit_frame(
+            AudioFrame(data=b"\x00\x10" * 160, session_id="service", timestamp=10.04)
+        )
+        await transcriber.submit_frame(
+            AudioFrame(data=b"\x00\x00" * 160, session_id="service", timestamp=10.05)
+        )
+        third = await anext(stream)
+        await transcriber.stop(flush=False)
+        remaining = [event async for event in stream]
+        return first, third, remaining
+
+    first, third, remaining = asyncio.run(asyncio.wait_for(run(), timeout=5.0))
+
+    # Three decode calls, but only two events: the punctuation-only one
+    # published nothing (pre-#66 it would have published text="...").
+    assert model.calls == 3
+    assert remaining == []
+    assert first.text == "said the word"
+    # The punctuation-only segment left the carried context untouched, so the
+    # third call still receives the *first* segment's text as its prompt --
+    # not "..." and not None.
+    assert model.prompts == [None, "said the word", "said the word"]
+    assert third.text == "[said the word] said the word"
 
 
 # --- olab_code: audio continuity across interval_final cuts (overlap) ------

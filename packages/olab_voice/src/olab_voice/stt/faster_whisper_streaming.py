@@ -20,26 +20,45 @@ class StreamingBackpressureError(RuntimeError):
     """Raised when a live-audio producer outruns the bounded worker queue."""
 
 
-# Full trailing run of these characters (including the Unicode ellipsis, which
-# Faster-Whisper emits as a single codepoint rather than three periods) is
-# stripped from every internal segment except the last when joining one
-# _transcribe() call's segments -- see _transcribe() below.
-_INTERNAL_SEGMENT_TRAILING_PUNCTUATION = ".!?…"
+# A *contiguous* trailing run of 2+ of these characters is collapsed to just
+# the last one when joining one _transcribe() call's internal segments --
+# uniformly, on every segment including the last, since a doubled/malformed
+# punctuation run is never correct English regardless of whether the split
+# it sits on is a real sentence boundary or a decoder artifact. Deliberately
+# excludes the Unicode ellipsis ("…", which Faster-Whisper emits as a single
+# codepoint rather than three periods): that mark is already a single
+# legitimate character and must never be collapsed. See
+# _collapse_malformed_trailing_punctuation() and _transcribe() below.
+_COLLAPSIBLE_TERMINAL_PUNCTUATION = ".!?"
 
 
-def _leading_token_is_guarded(text: str) -> bool:
-    """True if decapitalizing ``text``'s leading letter would damage it.
+def _collapse_malformed_trailing_punctuation(text: str) -> str:
+    """Collapse a trailing run of 2+ ``_COLLAPSIBLE_TERMINAL_PUNCTUATION``
+    (".!?") characters down to just the last one.
 
-    Guards two token classes that a blanket decapitalize-the-leading-letter
-    rule would otherwise corrupt: the first-person pronoun ("I", "I'll",
-    "I'm", ...) and multi-character acronyms ("AIS,", "GMRS", ...).
-    ``str.isupper()`` ignores uncased characters such as a trailing comma,
-    so no extra punctuation-stripping is needed for the acronym check.
+    Such a run is malformed regardless of whether the internal segment it
+    ends is a real sentence boundary or a decoder artifact, so this needs no
+    boundary classification at all (olab_code#66): e.g. "deferred until.."
+    -> "deferred until.", and "Deferred until .." -> "Deferred until."
+    (any whitespace immediately preceding the run is removed too, or the
+    collapse would leave a new malformed " ." shape behind).
+
+    The Unicode ellipsis ("…") is a separate, already-legitimate single
+    codepoint: it is never collapsed, and because it isn't in the character
+    set above it also *terminates* any run it's adjacent to -- so "wait….",
+    "wait..…" and the like are deliberately left exactly as the decoder
+    produced them, not a missed case.
+
+    Only a contiguous trailing run is in scope. The pre-#66 blanket strip
+    additionally re-``.strip()``-ed to squash whitespace between separated
+    marks (e.g. "hello . . ." -> "hello . ."); that concern is knowingly
+    retired here, since trusting the decoder's own punctuation includes
+    trusting shapes like that one.
     """
-    token = text.split(" ", 1)[0]
-    if token == "I" or token.startswith("I'"):
-        return True
-    return len(token) > 1 and token.isupper()
+    stripped_len = len(text) - len(text.rstrip(_COLLAPSIBLE_TERMINAL_PUNCTUATION))
+    if stripped_len < 2:
+        return text
+    return text[: len(text) - stripped_len].rstrip() + text[-1]
 
 
 @dataclass(slots=True)
@@ -475,9 +494,13 @@ class FasterWhisperStreamingTranscriber:
         collected = list(segments)
 
         # Overlap word-trim preprocessing pass (audio continuity across
-        # interval_final cuts), composed *before* PR #64's internal-
-        # segment-join logic below, which is otherwise completely
-        # unchanged. A no-op pass-through when this call carries no overlap.
+        # interval_final cuts), composed *before* the internal-segment-join
+        # logic below: this pass only decides which per-segment texts exist
+        # and how each is trimmed, and the join below only decides how those
+        # texts are combined and which are dropped, so the two compose
+        # independently (the join was reworked by olab_code#66 without
+        # touching this pass). A no-op pass-through when this call carries
+        # no overlap.
         texts: list[str] = []
         trimmed_by_overlap: list[bool] = []
         for segment in collected:
@@ -518,49 +541,56 @@ class FasterWhisperStreamingTranscriber:
         # By the time _transcribe() is called, the caller (_emit_segment) has
         # already decided this whole buffer is one continuous utterance --
         # via endpoint_silence_seconds or the target_interval_seconds
-        # backstop. So any re-segmentation Faster-Whisper's own internal VAD
-        # does *within* this one call is never a real sentence boundary from
-        # the caller's perspective, and the per-internal-segment
-        # capitalization/terminal punctuation the decoder assigns at each
-        # split is spurious. Strip it out before joining -- but never for the
-        # last segment (the real end of this call's utterance, whose own
-        # trailing punctuation/capitalization is legitimate).
+        # backstop. That does *not* mean an internal split Faster-Whisper's
+        # own decoder makes within this one call is never a real sentence
+        # boundary, which is what the earlier (78105c1) version of this block
+        # assumed: Faster-Whisper's decode-time <|timestamp|> segmentation
+        # usually reflects a genuine acoustic break, so blanket-stripping the
+        # trailing punctuation of every non-last segment and decapitalizing
+        # every non-first one corrupted real sentence boundaries that
+        # happened to fall inside one buffer -- confirmed on live hardware
+        # (olab_code#66: "...sessions. Next: decide whether..." came out as
+        # "...sessions next, decide whether...").
+        #
+        # So: join trusting the decoder's own punctuation and capitalization,
+        # applying only two guards that hold regardless of whether a given
+        # split is real or an artifact, uniformly on every segment including
+        # the last (neither guard depends on position):
+        #   1. drop a segment with no alphanumeric content at all;
+        #   2. collapse a malformed trailing punctuation run (see
+        #      _collapse_malformed_trailing_punctuation).
+        #
+        # NOTE, one observable consequence of guard 1 now being
+        # position-independent: a call whose only contributing segment is
+        # punctuation-only (a bare "...") returns "" rather than that
+        # punctuation, so _emit_segment's `if not text: return` publishes no
+        # event at all for it and leaves the carried initial_prompt context
+        # in place -- where pre-#66 such a call published text="..." (that
+        # lone segment was always "the last segment", hence exempt from the
+        # drop) and overwrote the carried context with it.
         raw_texts = [text.strip() for text in texts if text.strip()]
-        last_index = len(raw_texts) - 1
         pieces: list[str] = []
-        for index, raw_text in enumerate(raw_texts):
-            piece = raw_text
-            if index != last_index:
-                # Full trailing run, not just one char -- a single-char strip
-                # does not fully resolve real examples like "deferred
-                # until..": stripping only the last char still leaves
-                # "deferred until.", the same artifact class. Re-.strip()
-                # afterward: rstrip() alone can leave interior whitespace
-                # behind (e.g. "hello . . ." -> "hello . .").
-                piece = piece.rstrip(_INTERNAL_SEGMENT_TRAILING_PUNCTUATION).strip()
-                if not piece:
-                    # A segment that was only punctuation (Faster-Whisper
-                    # emits bare "..." segments for near-silence under
-                    # vad_filter=True) contributes nothing -- drop it rather
-                    # than leaving a stray double space in the join.
-                    continue
-            # Decapitalize every segment except the first surviving one (the
-            # true start of this call's joined text -- not necessarily
-            # raw_texts[0], if that segment was itself all punctuation and
-            # got dropped above). Guarded so this doesn't damage "I"/"I'll"
-            # or multi-char acronyms like "AIS," that a blanket decap would
-            # otherwise corrupt.
-            if pieces and piece[0].isalpha() and not _leading_token_is_guarded(piece):
-                piece = piece[0].lower() + piece[1:]
+        for raw_text in raw_texts:
+            piece = _collapse_malformed_trailing_punctuation(raw_text)
+            if not any(char.isalnum() for char in piece):
+                # No alphanumeric content -- e.g. a bare "..." or "…"
+                # segment, which Faster-Whisper emits for near-silence under
+                # vad_filter=True. Contributes nothing to the joined text
+                # regardless of position, so drop it rather than leaving a
+                # stray double space in the join.
+                continue
             pieces.append(piece)
         text = " ".join(pieces).strip()
         # Excludes only segments the overlap trim dropped entirely (their
         # text isn't in `event.text`, so their confidence shouldn't
         # contribute to `event.confidence`) -- deliberately narrower than
-        # "any segment contributing no output text": a pre-existing
-        # punctuation-only internal segment (PR #64) still contributes here
-        # exactly as it always has, so this stays byte-identical to today
-        # whenever `overlap_cutoff_seconds == 0`.
+        # "any segment contributing no output text": a punctuation-only
+        # internal segment, which the join's alnum guard above drops from the
+        # text, still contributes here exactly as it always has, so this
+        # stays byte-identical to pre-overlap behavior whenever
+        # `overlap_cutoff_seconds == 0`. Harmless for the all-punctuation
+        # call described above: its confidence is computed but never
+        # published, since _emit_segment emits no event on empty text.
         probabilities = [
             segment.avg_logprob
             for segment, dropped in zip(collected, trimmed_by_overlap)
