@@ -26,7 +26,8 @@ a clear `AttributeError` naming the install command, not a confusing
 `ImportError` from deep inside `analysis.py`.
 
 Classes:
-    Mic: Microphone capture -- device-safe enumeration, recording, dB level.
+    Mic: Microphone capture -- device-safe enumeration, recording, dB level,
+        log-binned spectrum (Mic.spectrum()).
     Speaker: Simple playback.
     Recording / Recording_bytes / Recording_np: In-progress recording buffers.
         `.normalize()` peak-normalizes the buffer in place, before save().
@@ -62,7 +63,7 @@ except PackageNotFoundError:
 
 from ._constants import CHANNELS, CHUNK, FORMAT, ONE_OVER_MAX_INT16, SAMPLERATE, SPEAKER_FORMAT
 from ._resample import StreamResampler, resample
-from ._util import bytes2np, convert_to_db, defaultFromNone, np2bytes, np2np
+from ._util import bytes2np, convert_to_db, defaultFromNone, np2bytes, np2np, spectrum_db
 from .device import (
 	audio,
 	get_connected_devices,
@@ -156,6 +157,7 @@ __all__ = [
 	"saveAudio",
 	"set_default_source_port",
 	"Speaker",
+	"spectrum_db",
 	"start_loopback_capture",
 	"StreamResampler",
 	"terminate",

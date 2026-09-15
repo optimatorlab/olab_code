@@ -277,7 +277,8 @@ class Recording():
 					  samplerate=self.samplerateRec, frmt=self.frmt, channels=self.channels,
 					  bitrate=bitrate)
 		else:
-			print('No filename given.  Not saving recorded audio.')
+			print('save() called with no filename; skipping this save call. '
+				  'Recorded audio is still in memory -- call save() again with a filename to write it out.')
 
 	def make_wave(self):
 		'''Build an olab_audio.analysis.Wave from this recording.

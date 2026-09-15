@@ -55,6 +55,20 @@ request -- it does not configure the board's own output mode, which must
 already be set (Windows GUI or SBUS/PWM -- see `docs/usage_guide.md`'s
 CameraBosonDual section and issue #60) before starting.
 
+`CameraBosonThermal` (RHP-BOS-USBC-IF FLIR Boson+ thermal board, direct
+over USB-C) has its own guided form too, simpler than CameraBosonDual's --
+there is no Resolution field at all, since this board has exactly one
+supported/tested target (640x512 YU12 @ 30fps, shown read-only). Its
+discovery endpoint (`/api/discover-boson-thermal`) is shaped differently
+from every other backend's scan: this board's real FLIR VID:PID and stable
+sysfs card name are specific enough that the scan returns exactly one
+confirmed device or an error (zero or more than one match), never a
+candidate list. It also excludes whatever device the current session
+already has active from the scan, so re-scanning while
+`CameraBosonThermal` is already streaming can't open/read that same node
+concurrently -- unlike the default `/api/discover` scan, which doesn't need
+(or get) that exclusion for most backends beyond `CameraBosonDual`.
+
 ## Explicit local YOLO provisioning
 
 Before starting the browser UI, activate the `olab_code` virtual environment,

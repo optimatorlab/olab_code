@@ -195,6 +195,59 @@ def test_mic_stop_is_idempotent(monkeypatch):
     assert mic.stream is None
 
 
+def test_mic_spectrum_delegates_to_spectrum_db_with_np_data_and_samplerate(monkeypatch):
+    """Mic.spectrum() (see .pairwork/rig-mic-spectrogram/plan.md in the ofm
+    repo) is a thin wrapper -- the real binning/dB logic lives in and is
+    covered by test_util.py's spectrum_db tests. This just confirms the
+    delegation itself: self.np_data/self.samplerate/n_bins/fmin/fmax all
+    reach spectrum_db unchanged."""
+    fake_audio = _FakePyAudio(default_rate=48000.0)
+    monkeypatch.setattr("olab_audio.mic.audio", fake_audio)
+
+    calls = []
+
+    def fake_spectrum_db(data, samplerate, n_bins, fmin, fmax):
+        calls.append((data, samplerate, n_bins, fmin, fmax))
+        return [-42.0] * n_bins
+
+    monkeypatch.setattr("olab_audio.mic.spectrum_db", fake_spectrum_db)
+
+    mic = Mic(deviceID=3)
+    mic.start()
+    mic.np_data = np.array([0.1, 0.2, 0.3], dtype=np.float32)
+
+    result = mic.spectrum(n_bins=16, fmin=100.0, fmax=4000.0)
+
+    assert result == [-42.0] * 16
+    assert len(calls) == 1
+    data_arg, samplerate_arg, n_bins_arg, fmin_arg, fmax_arg = calls[0]
+    assert np.array_equal(data_arg, mic.np_data)
+    assert samplerate_arg == 48000
+    assert (n_bins_arg, fmin_arg, fmax_arg) == (16, 100.0, 4000.0)
+
+
+def test_mic_spectrum_uses_centralized_defaults(monkeypatch):
+    """Mic.spectrum()'s defaults are sourced from _util.py (N4 -- avoids
+    re-declaring the same three literals in a second file) rather than
+    hardcoded a second time in mic.py."""
+    from olab_audio._util import _DEFAULT_FMAX, _DEFAULT_FMIN, _DEFAULT_N_BINS
+
+    fake_audio = _FakePyAudio(default_rate=44100.0)
+    monkeypatch.setattr("olab_audio.mic.audio", fake_audio)
+
+    calls = []
+    monkeypatch.setattr(
+        "olab_audio.mic.spectrum_db",
+        lambda data, samplerate, n_bins, fmin, fmax: calls.append((n_bins, fmin, fmax)),
+    )
+
+    mic = Mic(deviceID=3)
+    mic.start()
+    mic.spectrum()
+
+    assert calls == [(_DEFAULT_N_BINS, _DEFAULT_FMIN, _DEFAULT_FMAX)]
+
+
 def test_mic_record_start_returns_true_on_success(monkeypatch):
     fake_audio = _FakePyAudio(default_rate=44100.0)
     monkeypatch.setattr("olab_audio.mic.audio", fake_audio)

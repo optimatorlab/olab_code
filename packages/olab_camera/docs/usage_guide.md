@@ -656,6 +656,63 @@ Notes:
   output -- there is no radiometric (per-pixel temperature) data available
   over this interface.
 
+### 8.  CameraBosonThermal (RHP-BOS-USBC-IF FLIR Boson+ thermal board)
+
+`CameraBosonThermal` is a thin `CameraUSB` subclass for the RHP-BOS-USBC-IF,
+a board carrying a FLIR Boson+ 320x256 thermal core on FLIR's official
+USB-C VPC Kit profile. Unlike `CameraBosonDual`, the host talks to the
+board directly over USB-C -- it enumerates as a genuine FLIR VID:PID
+(`09cb:4007`), not a generic UVC bridge chip, and there is no external
+capture dongle involved. Full investigation and findings in
+`.pairwork/camera-boson-thermal.md`.
+
+**Video-only in this release.** The board also exposes a CDC serial port
+(`/dev/ttyACM0` on Linux) implementing the documented FLIR Boson Serial
+Command protocol -- but this class never opens or references it at all.
+`CameraBosonThermal` has no FFC/palette/gain-mode/telemetry-toggle methods,
+not even stubs; live control-plane support (over that serial protocol) is
+a deliberately deferred follow-up, to be scoped in its own future session.
+The 2-pin JST sync connector present on the board is likewise unused/
+unexposed by this class.
+
+```python
+import olab_camera
+
+# Exactly one Boson thermal board attached -- let it discover automatically.
+camera = olab_camera.CameraBosonThermal()
+camera.start(startStream=True, port=8005)
+# Visit https://localhost:8005/stream.mjpg
+
+assert (camera.res_rows, camera.res_cols, camera.fps_target) == (512, 640, 30)
+
+camera.shutdown()
+```
+
+Notes:
+- There is no `resolution=` parameter -- this board has exactly one
+  supported/tested video target: **640x512 YU12 @ 30fps**, the board's own
+  AGC-processed 8-bit display output. It is **not radiometric** -- no
+  per-pixel temperature data is available over this interface. The board
+  also exposes a 320x256 Y16 native/raw mode and 640x514/320x258 "+2 row"
+  telemetry variants of the above; neither is implemented (Y16 needs
+  explicit 16-bit frame handling, and the telemetry-row variants have no
+  V4L2 control to select them) -- both are known-but-unreachable through
+  this class, not bugs.
+- **`device=None` auto-discovers the board.** Unlike `CameraBosonDual`,
+  this device enumerates with a distinctive, stable sysfs card name
+  (`'Boson: FLIR Video'`) and VID:PID, so `device=None` (the default) calls
+  `discover_boson_thermal()` to locate it automatically. That function
+  raises `RuntimeError` if it finds zero or more than one confirmed capture
+  node -- pass `device=` explicitly (e.g. when more than one board is
+  attached) to skip discovery. A `device` key inside `paramDict` also skips
+  discovery (and wins over any `device=` argument), matching `CameraUSB`'s
+  own `paramDict`-as-escape-hatch precedent.
+- `fourcc` defaults to `None` and `apiPref` to `cv2.CAP_V4L2` -- this board
+  has no MJPG capability at all (only raw YU12/NV12/Y16), and its own
+  default format is already the target 640x512 YU12, so there is no
+  FOURCC to negotiate and no FOURCC-after-framesize hazard to worry about
+  (contrast with `CameraBosonDual`'s notes above).
+
 ---
 
 # Additional Tools
