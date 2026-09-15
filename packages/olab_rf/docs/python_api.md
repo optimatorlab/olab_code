@@ -286,6 +286,120 @@ The `rtl_sdr_iq` backend uses NumPy (a base dependency, always installed)
 plus the system `rtl_sdr` command-line recorder. It is slower and
 channelized; it is not a broad sweep replacement for `rtl_power`.
 
+## IQ Recording And Replay
+
+Record raw IQ once at the bench, then replay that file through the exact same
+detector code path a live receiver would feed — no hardware needed to
+exercise or regression-test IQ-based detectors like `estimate_iq_peak()`.
+
+### Recording
+
+```python
+from olab_rf import RecordingRequest
+
+request = RecordingRequest(
+    kind="iq",
+    path="corpus/adsb_pass",
+    frequency_hz=1_090_000_000,
+    sample_rate_hz=2_400_000,
+)
+status = manager.start_recording(request)
+# ... let it run, e.g. while an event is in progress ...
+final = manager.stop_recording()
+```
+
+`start_recording()` launches a continuous, unbounded `rtl_sdr` capture that
+writes raw `cu8` samples directly to disk — there's no `duration_sec` to
+guess up front. `path` is a base name: it produces `<path>.sigmf-meta` (JSON
+metadata) and `<path>.sigmf-data` (raw `cu8` bytes) — the
+[SigMF](https://github.com/sigmf/SigMF) format, so files are readable by
+other SigMF tooling (`sigmf-python`, inspectrum), not just olab_rf. Parent
+directories are created automatically; `start_recording()` raises
+`RuntimeError` rather than overwriting either target file if it already
+exists.
+
+`RecordingRequest` fields for `kind="iq"`:
+
+- `frequency_hz: int`, `sample_rate_hz: int`: required, must be `> 0`.
+- `gain_db: float | None = None`: receiver gain; resolved the same way scans
+  resolve gain (`None` means auto/default).
+- `device_index: int = 0`: RTL-SDR device index (`-d`). Serial-based device
+  selection isn't wired up for recording yet.
+- `rotate_seconds`, `max_bytes`: accepted and round-trip through
+  `to_dict()`/`from_dict()`, but `start_recording()` raises
+  `NotImplementedError` if either is set — file rotation isn't implemented
+  yet.
+- `format`: accepted but ignored for `kind="iq"` (the on-disk format is
+  always the SigMF pair).
+
+A recording is tracked independently of `SessionManager`'s scan/listen/
+digital/voice/ADS-B/AIS state — it doesn't create a `RadioSession` and
+doesn't appear in `manager.status`. Poll it explicitly:
+
+```python
+manager.poll()  # advances every active mode, recording included
+recording = manager.current_recording()
+print(recording.status, recording.bytes_written)
+```
+
+Starting a recording while another mode (scan/listen/digital/voice) is
+active raises `RuntimeError`; conversely, starting another mode while a
+recording is active also raises, unless you mean to end the recording as
+part of the mode switch:
+
+```python
+manager.stop(stop_active_recording=True)  # ends a live recording too
+```
+
+A plain `manager.stop()` (the default `stop_active_recording=False`) raises
+instead of silently discarding a live recording.
+
+### Replaying a recorded file
+
+```python
+scan = manager.start_iq_replay_scan(replay_path="corpus/adsb_pass.sigmf-meta")
+```
+
+`start_iq_replay_scan(...)` reads a `.sigmf-meta`/`.sigmf-data` pair and
+evaluates it as a single `FrequencyCandidate` at the file's own recorded
+center frequency — a captured file can't be re-hopped across a channel list
+the way a live scan retunes. Parameters:
+
+- `replay_path: str`: required. Base path or either SigMF file for a
+  previously recorded capture.
+- `channel_width_hz: int | None = None`: match tolerance against the
+  catalog, same meaning as a live scan; defaults to 2.5 kHz.
+- `replay_max_samples: int | None = None`: cap on samples read from the
+  file. Defaults to 5 seconds' worth at the file's own recorded sample rate
+  — pass this explicitly to read more of a long capture.
+
+Returns a `FrequencyScanStatus` like any other scan; poll it the normal way.
+`iq_replay` is a `FrequencyScanBackend` value, but it is *not* accepted by
+`start_range_scan(...)`, `start_frequency_scan(...)`,
+`find_active_channels(...)`, `capture_range_baseline(...)`, or
+`capture_frequency_baseline(...)` — those build a live scan plan that
+doesn't apply to a fixed recorded file, so they raise `ValueError` if given
+`backend="iq_replay"`. Replaying a file touches
+no hardware and no shared scan/recording state beyond one "one scan at a
+time" slot, so it can run concurrently with a live recording.
+
+### Reading a SigMF file directly
+
+```python
+from olab_rf import read_sigmf_iq
+
+recording = read_sigmf_iq("corpus/adsb_pass.sigmf-meta")
+print(recording.frequency_hz, recording.sample_rate_hz)
+samples = recording.samples  # decoded complex64 IQ samples
+```
+
+`read_sigmf_iq(path, *, sample_start=0, max_samples=None) -> SigMFIqRecording`
+decodes the requested `[sample_start, sample_start + max_samples)` window of
+I/Q pairs (the same `cu8` → complex64 conversion a live capture goes
+through) plus `frequency_hz`/`sample_rate_hz`/`datatype` from the sidecar and
+`total_sample_count` for the whole file. Useful standalone, e.g. in a demo
+script that doesn't go through `SessionManager` at all.
+
 ## Frequency Catalog
 
 `FrequencyCatalog` contains named ranges, known channels, and favorites. The
@@ -392,8 +506,60 @@ The iterator exposes the same capture and segmentation controls as
 - `min_segment_ms=400`: discard shorter completed transmissions.
 - `max_segment_sec=20.0`: force-close longer transmissions so one stuck signal
   does not produce an unbounded payload.
-- `rtl_fm_squelch_db=None`: optional decoder-side `rtl_fm -l` squelch. Leave it
-  unset for the default Python-side gating.
+- Squelch is handled by the Python carrier gate, not by `rtl_fm`. There is no
+  `rtl_fm_squelch_db` parameter: the gate detects FM *quieting* -- the drop in
+  hiss when a signal appears -- so `rtl_fm -l` would remove the very signal the
+  gate measures against. Gate-side squelch is also live-tunable, which an
+  exec-time flag cannot be. `rtl_fm_command()` still accepts `squelch_db` for
+  scan-mode callers, since `rtl_fm`'s multi-`-f` scanning requires `-l`.
+- `detector_mode="hf_ratio"`: carrier detector. `hf_ratio` (the default) uses
+  2-6 kHz over 300-2000 Hz band energy, which separates hiss from voice where
+  level alone does not, plus an absolute-level term so silence is not mistaken
+  for voice. `rms_quieting` compares frame level against a learned floor;
+  it cannot open on a transmission *louder* than that floor -- that is what
+  quieting means -- and on hardware where the radio's voice audio exceeds the
+  idle hiss it captures nothing at all, which is why the mode is selectable and
+  why it is no longer the default. `hybrid` is the **union**: either detector may
+  open the gate.
+- `max_floor_drift_db_per_sec=6.0`: how fast the learned floor may move, in **dB
+  per second**. It bounds speed, not destination, so a floor learned in the wrong
+  conditions can still recover to a correct value.
+- `silence_floor_db=-60.0`: frames quieter than this are never treated as a
+  carrier. Band-energy ratio alone is a "not hissy" test rather than a "signal
+  present" one, and digital silence scores 0.0.
+- `audio_spectrum_bins=0`: publish an audio-domain spectrum of the demodulated
+  stream on the status payload, for displaying what conditioning is doing. `0`
+  disables it; otherwise `8` up to the transform's own resolution
+  (`min(256, frame_samples // 2 + 1)`), which depends on sample rate and frame
+  length. Where that limit falls below 8, only `0` is accepted.
+
+  Disabled by default because two float arrays on every `rf.voice.status`
+  message is real growth on a frequently published subject. The three keys —
+  `audio_spectrum_bin_hz`, `audio_spectrum_raw_db`,
+  `audio_spectrum_conditioned_db` — are always present and `null` when disabled,
+  so payload shape never depends on a server-side setting.
+
+  Named `audio_*` to stay distinct from the RF spectrum subsystem
+  (`start_spectrum()`, `SpectrumSnapshot`), which is a different measurement of
+  a different signal. Raw is measured pre-conditioning and conditioned
+  post-conditioning, so toggling de-emphasis moves the conditioned curve and
+  leaves the raw one alone — the chain-order rule, made visible.
+
+  A stored value that is illegal at a new sample rate is **clamped** on respawn
+  rather than rejected, since the caller did not pass it to that call; the
+  stored value keeps what was requested, so respawning back restores it. A value
+  passed explicitly to a respawn is still rejected.
+- `dc_block=True`, `deemphasis_us=75.0`, `normalize=False`: audio conditioning,
+  applied in Python to emitted audio only. The detector always measures raw PCM,
+  so changing conditioning cannot move a detector threshold.
+- `fir_size=None`, `atan_math=None`, `extra_args=None`: startup-only `rtl_fm`
+  settings (`-F`, `-A`, and a validated passthrough). Values configured under
+  `decoders.rtl_fm` in `olab_rf.yaml` supply the defaults; explicit arguments win.
+
+Wideband FM is refused below 32 kHz: `-M wbfm` is an `rtl_fm` preset carrying an
+implied `-r 32k`, and a lower `-s` makes its resampler divide by zero and abort
+the process with SIGFPE. `rtl_fm_command()` raises rather than emitting a command
+that kills the receiver.
 
 For an initial live test, use the defaults and save debug WAVs. If a weak
 carrier is missed, lower `threshold_db` in 2–3 dB steps. If static alone opens
@@ -424,9 +590,138 @@ manager.reset_voice_segment_calibration()
 ```
 
 `threshold_db`, `min_active_ms`, `hang_time_ms`, `min_segment_ms`,
-`max_segment_sec`, and `pre_roll_ms` are live-adjustable. Frequency,
-modulation, gain, sample rate, and backend changes require a new SDR session.
-Live speaker tee playback is future work.
+`max_segment_sec`, `pre_roll_ms`, `detector_mode`, `hf_ratio_threshold`,
+`max_floor_drift_db_per_sec`, `silence_floor_db`, `dc_block`, `deemphasis_us`,
+`normalize`, and `normalize_target_dbfs` are live-adjustable.
+
+Gain, ppm, frequency and sample rate are fixed when `rtl_fm` execs. Change them
+with `manager.restart_voice_capture(**overrides)`, which refuses during an active
+segment, preserves completed-but-unpopped segments and events, and carries run
+counters across the respawn. A `sample_rate_hz` change additionally rebuilds the
+segmenter and so discards the learned noise floor. Backend changes still require
+a new session. Live speaker tee playback is future work.
+
+### Priority Scan (Multi-Channel)
+
+**v1 is non-preemptive round-robin, not true priority scanning.** Given a
+list of catalog channels, `priority_scan()` visits them in order, dwells on
+each briefly waiting for a carrier, follows an active transmission to
+completion once one appears, then moves on -- there is no mechanism for one
+channel to interrupt another mid-transmission. "Priority" in the name
+describes the feature's intent for a future version, not v1's behavior.
+
+```python
+for segment in manager.priority_scan(
+    channel_ids=["erie_fire_vhf.buffalo_fd_f1", "noaa_wx_1", "kbuf_tower"],
+    dwell_ms=2_000,
+):
+    print(segment.metadata["channel_label"], segment.duration_sec)
+```
+
+No `poll()`, no manual loop, no sleep-interval tuning -- `priority_scan()`
+calls `start_priority_scan()` internally, polls on a fixed 10ms interval, and
+always stops the scan on exit (normal completion, an early `break`/`return`,
+or a `KeyboardInterrupt`/`GeneratorExit` raised while iterating). This is the
+primary entry point for a script author (`import olab_rf`). A caller that
+needs to integrate scanning into its own request/response cycle without
+blocking (e.g. a GUI) should drive the lower-level primitives directly:
+
+```python
+manager.start_priority_scan(channel_ids=["erie_fire_vhf.buffalo_fd_f1", "noaa_wx_1"])
+# ... elsewhere, on whatever cadence the caller already polls on:
+manager.poll()
+for segment in manager.pop_voice_segments():
+    ...
+status = manager.current_priority_scan_status()
+```
+
+Each entry in `channel_ids` is a catalog channel id -- either a bare id (must
+be unique across every range in the merged catalog) or a qualified
+`"range_id.channel_id"` form to disambiguate a bare id that collides across
+ranges. Duplicate entries are de-duplicated, keeping the first occurrence's
+position. An unresolvable or ambiguous id raises `ValueError` before any
+receiver is touched.
+
+Every completed `RadioVoiceSegment` carries `channel_id`, `channel_label`,
+`range_id`, and `range_label` in `.metadata`, taken from the channel id that
+was actually resolved and tuned to -- not re-derived from the segment's
+frequency via `FrequencyCatalog.match_frequency()`, which can resolve to the
+wrong (wider, overlapping) catalog range for a frequency that also matches a
+more specific one.
+
+Tuning knobs:
+
+- `dwell_ms=2_000`: how long to wait on a silent channel before moving to the
+  next one. The dwell clock starts at the first PCM frame actually received
+  for this visit, not at process spawn, so `rtl_fm` startup/USB retune
+  latency does not eat into the budget. An informed default pending bench
+  tuning, like every other threshold in this library -- not a validated
+  constant.
+- `max_segment_sec=20.0`, `hang_time_ms=600`: same meaning as
+  `start_voice_segments()`'s parameters of the same name, applied to every
+  channel.
+- `max_lock_ms`: hard cap on how long the scanner will stay locked onto one
+  channel before being forced to check on the others, regardless of whether
+  that channel is still active. Without this, a continuously-modulated
+  channel (e.g. a 24/7 weather broadcast) can capture the scanner
+  indefinitely, since its "no carrier" gap between transmissions may never
+  be long enough to register. Defaults to
+  `int(max_segment_sec * 1000) + hang_time_ms + 1_000` when not given, so a
+  default-length transmission can complete before being forced off --
+  changing `max_segment_sec`/`hang_time_ms` moves this default with them.
+  Pass an explicit value to override. **Accepted tradeoff:** hitting this cap
+  truncates whatever transmission is in progress; the partial audio is
+  discarded, the same as manually stopping mid-segment.
+- `detector_overrides={"channel_id": {"detector_mode": ..., "hf_ratio_threshold": ...}}`:
+  per-channel overrides for the carrier detector, keyed the same way as
+  `channel_ids` (bare or qualified). Without an override, a channel uses the
+  scan's global `hf_ratio`/`1.2` defaults. A key that doesn't resolve to a
+  channel present in `channel_ids`, an unrecognised key inside an override
+  dict, an invalid `detector_mode`, or a non-positive `hf_ratio_threshold`
+  all raise `ValueError` from `start_priority_scan` itself, before any
+  receiver is touched -- none of these mistakes is deferred to wherever the
+  affected channel's visit happens to land.
+- `dc_block=True`, `normalize=False`, `normalize_target_dbfs=-20.0`: same
+  meaning as `start_voice_segments()`, applied to every channel.
+- `deemphasis_us`: same meaning as `start_voice_segments()`, with one
+  addition -- **AM channels are unvalidated for carrier detection in v1**
+  (the `hf_ratio` gate was tuned on NFM captures; AM's band split at a 12kHz
+  sample rate is a materially different measurement, not yet bench-tested),
+  but they do get `deemphasis_us=None` automatically, since AM audio was
+  never FM pre-emphasised and applying a 75us de-emphasis lowpass to it would
+  audibly muffle the captured speech. This automatic override only applies
+  when `deemphasis_us` is left unset; an explicit value (including a literal
+  `75.0` or `None`) always wins, for every channel regardless of modulation.
+- `gain_db`, `frame_ms=40`: same meaning as `start_voice_segments()`, applied
+  to every channel.
+
+`completed_segments`/`dropped_segments`/`capped_closes` on
+`current_priority_scan_status()`/`priority_scan_dict()` are scan-lifetime
+totals: each channel visit rebuilds both the `rtl_fm` process and the
+segmenter from scratch (a new subprocess is required per frequency change
+anyway), which would otherwise reset these counters to 0 on every channel
+hop. They are carried forward across every rebuild instead, the same way
+`restart_voice_capture()` already carries them across a respawn.
+
+Wideband FM (`wbfm`/`wfm`) channels are rejected with a clear `ValueError`
+before any backend starts: `RtlFmAudioBackend` cannot express `wbfm` at an
+explicit sample rate without producing a broken `rtl_fm` command (see the
+wideband-FM note above).
+
+Known limitation: a channel that is already mid-transmission the moment the
+scanner tunes to it can have its noise floor bootstrapped from voice level
+rather than hiss, since there is no protected calibration window -- the gate
+is live and the floor bootstraps from whatever the very first frame measures.
+This is harmless under the default `hf_ratio` detector (which never consults
+the floor) and only affects `rms_quieting`/`hybrid`, where it can delay that
+detector's carrier-absent branch until the floor's rate-limited drift
+recovers. Because every visit gets a fresh segmenter, this cannot compound
+across repeat visits to the same channel -- each one is an independent shot
+at a clean bootstrap. A segment captured this way also reports a
+voice-level `noise_floor_db`/`threshold_db` in its own fields, which is
+correct-but-misleading if read back for threshold tuning (the issue #3
+workflow) -- it played no role in gating that particular segment under
+`hf_ratio`.
 
 ### Automated Capture And Status
 
@@ -629,7 +924,9 @@ Scan known catalog channels in a range.
 Parameters:
 
 - `range_id: str`: required catalog range id. The range must define channels.
-- `backend: "rtl_power" | "rtl_sdr_iq" = "rtl_power"`: scan backend.
+- `backend: "rtl_power" | "rtl_sdr_iq" = "rtl_power"`: scan backend. `iq_replay`
+  is not accepted here (raises `ValueError`); use `start_iq_replay_scan(...)`
+  to replay a recorded SigMF capture instead.
 - `path: str | None = None`: optional decoder path override. When omitted,
   the manager uses configured decoder paths, then command-name defaults.
 - `duration_sec: float = 10.0`: scan duration.
@@ -660,7 +957,8 @@ Parameters:
 - `step_hz`: grid spacing for arbitrary ranges or catalog ranges without channels.
 - `channel_frequencies_hz`: optional manual channel list in Hz.
 - `channel_width_hz`: match/search width in Hz.
-- `backend`: `rtl_power` or `rtl_sdr_iq`.
+- `backend`: `rtl_power` or `rtl_sdr_iq`. `iq_replay` is not accepted here
+  either (raises `ValueError`); use `start_iq_replay_scan(...)`.
 - `path`, `duration_sec`, `gain_db`, `sample_rate_hz`, `baseline`,
   `resume_previous`: same meaning as `find_active_channels(...)`.
 
@@ -730,6 +1028,41 @@ Important fields:
 - `margin_db`: active power minus baseline power, if available.
 - `label`, `range_id`, `channel_id`, `modulation`: catalog match metadata.
 - `source`: candidate source, such as `bin`, `channel`, or `iq_peak`.
+
+### `start_priority_scan(channel_ids, ...) -> RadioSession`
+
+Start a non-preemptive round-robin scan over a caller-supplied list of
+catalog channels (see "Priority Scan (Multi-Channel)" above for the full
+parameter reference and tuning guidance). Advance with `poll()`, drain
+segments with `pop_voice_segments()`, inspect state with
+`current_priority_scan_status()`/`priority_scan_dict()`.
+
+### `priority_scan(channel_ids, ...) -> Iterator[RadioVoiceSegment]`
+
+Blocking generator wrapper over `start_priority_scan()`, mirroring
+`iter_voice_segments()`'s shape: calls `start_priority_scan()`, polls on a
+fixed interval, yields each completed segment, and always stops the scan on
+exit (normal completion, an early `break`/`return`, or
+`KeyboardInterrupt`/`GeneratorExit`). The primary entry point for a script
+author; `start_priority_scan()`/`poll()` remain for callers (e.g. a GUI)
+needing non-blocking integration.
+
+### `PriorityScanStatus`
+
+Important fields:
+
+- `state`: `scanning`, `locked`, `stopped`, or `error`.
+- `current_channel_id`, `current_channel_label`, `current_range_id`,
+  `current_range_label`: the channel currently tuned to.
+- `cycle_count`: number of full passes through `channel_ids` completed.
+- `completed_segments`, `dropped_segments`, `capped_closes`: scan-lifetime
+  totals, not reset by a channel hop (see above).
+- `noise_floor_db`, `last_frame_band_ratio`, `active`, `recalibrating`: a
+  live view of the currently-tuned channel's segmenter.
+- `error`: set when a mid-scan backend failure aborted the scan to IDLE.
+
+`to_dict()` includes the same fields; web/API adapters should use it rather
+than inspecting dataclass internals.
 
 ### `start_adsb(...) -> RadioSession`
 

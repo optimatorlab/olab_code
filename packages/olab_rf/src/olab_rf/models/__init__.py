@@ -15,6 +15,7 @@ from olab_rf.models.scanning import (
     FrequencyScanBackend,
     FrequencyScanRequest,
     FrequencyScanStatus,
+    PriorityScanStatus,
 )
 from olab_rf.models.sessions import RadioSession
 from olab_rf.models.status import SensorStatus
@@ -43,6 +44,7 @@ __all__ = [
     "FrequencyScanStatus",
     "Observation",
     "PcmAudioFrame",
+    "PriorityScanStatus",
     "RadioSession",
     "RadioVoiceSegment",
     "ReceiverConfig",

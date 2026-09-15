@@ -77,7 +77,7 @@ def run_main(argv: Sequence[str] | None = None) -> int:
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
-        manager.stop()
+        manager.stop(stop_active_recording=True)
     return 0
 
 

@@ -322,7 +322,7 @@ def create_app(
 
     @app.post("/api/session/stop")
     def stop() -> dict[str, object]:
-        manager.stop()
+        manager.stop(stop_active_recording=True)
         return manager.status_dict()
 
     async def track_stream(websocket: WebSocket) -> None:
