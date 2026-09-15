@@ -29,6 +29,7 @@ Classes:
     CameraROS: ROS camera topic subscriber/publisher
     CameraUSB: USB camera and RTSP stream implementation
     CameraBosonDual: RHP-BOS-DS-IF dual thermal+visible board, via HDMI capture dongle (video-only)
+    CameraBosonThermal: RHP-BOS-USBC-IF FLIR Boson+ thermal board, via USB-C (video-only)
     CameraRealSense: Intel RealSense camera (color + optional depth + optional IMU)
     CameraWebSocket: Virtual camera — accepts pushed JPEG frames via WSS (sim/Cesium use)
     CameraOpenMV: OpenMV camera, GENX320 histogram pixels, optional movement
@@ -110,6 +111,7 @@ from .camera_gazebo import CameraGazebo
 from .camera_ros import CameraROS
 from .camera_usb import CameraUSB
 from .camera_boson_dual import CameraBosonDual
+from .camera_boson_thermal import CameraBosonThermal, discover_boson_thermal
 from .camera_realsense import CameraRealSense
 from .camera_websocket import CameraWebSocket, _WebSocketReceiveServer
 from .camera_openmv import CameraOpenMV

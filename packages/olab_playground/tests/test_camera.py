@@ -511,3 +511,23 @@ def test_backend_renderer_dispatches_to_guided_bosondual_card():
 def test_bosondual_guide_exposes_resolution_presets(tmp_path: Path):
     guide = _session(tmp_path).schema()["guidedBackends"]["bosonDual"]
     assert guide["resolutions"] == ("720p60", "1080p60")
+
+
+def test_camera_boson_thermal_registered_with_guide(tmp_path: Path):
+    assert camera_module.BACKENDS["CameraBosonThermal"] is camera_module.CameraBosonThermal
+    backend_schema = _session(tmp_path).schema()["backends"]["CameraBosonThermal"]
+    assert backend_schema["available"] is True
+    assert backend_schema["hint"] is None
+    guide = _session(tmp_path).schema()["guidedBackends"]["bosonThermal"]
+    assert guide == camera_module.BOSONTHERMAL_GUIDE
+
+
+def test_backend_renderer_dispatches_to_guided_bosonthermal_card():
+    source = (Path(__file__).parents[1] / "src" / "olab_playground" / "static" / "app.js").read_text()
+    assert "function cameraBosonThermalForm()" in source
+    assert "name === 'CameraBosonThermal'" in source
+    # The render-dispatch string alone would not catch cameraInit()/cameraStart() silently
+    # falling through to the generic path -- assert the actual serialization calls too.
+    assert "if (name === 'CameraBosonThermal') return bosonThermalInit(requireSource);" in source
+    assert "name === 'CameraBosonThermal' ? bosonThermalStart()" in source
+    assert 'id="bt-source"' in source

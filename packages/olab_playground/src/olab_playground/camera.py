@@ -35,6 +35,7 @@ import cv2
 from olab_camera import (
     AVWebcam,
     CameraBosonDual,
+    CameraBosonThermal,
     CameraGazebo,
     CameraOpenMV,
     CameraPi,
@@ -43,6 +44,7 @@ from olab_camera import (
     CameraRealSense,
     CameraUSB,
     CameraWebSocket,
+    discover_boson_thermal as _discover_boson_thermal_device,
 )
 from olab_camera.tls import ensure_local_cert, generate_self_signed_cert
 
@@ -50,6 +52,7 @@ from olab_camera.tls import ensure_local_cert, generate_self_signed_cert
 BACKENDS = {
     "CameraUSB": CameraUSB,
     "CameraBosonDual": CameraBosonDual,
+    "CameraBosonThermal": CameraBosonThermal,
     "CameraPi": CameraPi,
     "CameraPi2": CameraPi2,
     "CameraGazebo": CameraGazebo,
@@ -71,6 +74,9 @@ BOSONDUAL_GUIDE = {
 # domain knowledge (REALSENSE_GUIDE/OPENMV_GUIDE) -- update by hand if those defaults change.
 _BOSONDUAL_PROBE_RESOLUTION = (720, 1280, 60)  # (res_rows, res_cols, fps)
 _BOSONDUAL_PROBE_FOURCC = ("M", "J", "P", "G")
+BOSONTHERMAL_GUIDE = {
+    "resolution": {"res_rows": 512, "res_cols": 640, "fps_target": 30},
+}
 REALSENSE_GUIDE = {
     "color": {"res_rows": 480, "res_cols": 640, "fps_target": 30},
     "depth": {"res_rows": None, "res_cols": None, "framerate": None},
@@ -400,7 +406,7 @@ class PlaygroundSession:
             "rfdetr": rfdetr_models,
             "face": ["face_detection_yunet_2023mar.onnx", "face_detection_yunet_2023mar_int8.onnx"],
         }
-        payload["guidedBackends"] = {"realsense": REALSENSE_GUIDE, "openmv": OPENMV_GUIDE, "bosonDual": BOSONDUAL_GUIDE}
+        payload["guidedBackends"] = {"realsense": REALSENSE_GUIDE, "openmv": OPENMV_GUIDE, "bosonDual": BOSONDUAL_GUIDE, "bosonThermal": BOSONTHERMAL_GUIDE}
         payload["callbacks"] = {"detector": sorted(GUIDED_CALLBACKS)}
         payload["stream"] = _schema(CameraUSB.startStream)
         payload["protocols"] = {name: {"available": importlib.util.find_spec(module) is not None, "hint": f'pip install "olab-camera[{extra}]"'} for name, (module, extra) in OPTIONAL_HINTS.items() if name in {"websocket", "webrtc"}}
@@ -1085,6 +1091,40 @@ class PlaygroundSession:
         )
         return {"v4l2": v4l2, "otherV4L2": other_v4l2}
 
+    def discover_boson_thermal(self) -> dict[str, Any]:
+        """Guided-form scan for CameraBosonThermal's device-source dropdown.
+
+        Thin wrapper around olab_camera.discover_boson_thermal() -- unlike
+        discover_boson_dual() (which duplicates open/probe config because
+        its HDMI capture dongle needs a specifically-configured, patient
+        open), this board's real capture node already opens correctly with
+        a bare cv2.VideoCapture(path, cv2.CAP_V4L2): its own default format
+        is already 640x512 YU12, so there is no bespoke probe config to
+        duplicate here.
+
+        Passes the session's already-active camera device (if any) as
+        `exclude=` so a rescan never opens/reads the node the current
+        session is already streaming from (mirrors discover_boson_dual()'s
+        own use of `active` via `_discover_v4l2`). One consequence of that
+        exclusion: if the only board attached is the one already in use,
+        the scan legitimately finds zero *remaining* candidates and raises
+        the same plain "no Boson thermal device found" error as the true
+        no-hardware case. An earlier revision tried to add a clarifying
+        suffix here ("...already excluded because it's in use") whenever
+        `active` was non-empty, but `active` (`_active_identifiers_locked()`)
+        contains *every* active identifier across every backend -- a
+        RealSense serial number, an OpenMV serial path, an AVWebcam mic
+        ID -- almost none of which is ever a `/dev/videoN` path that could
+        plausibly have been excluded here. That made the suffix wrong far
+        more often than right (any other camera backend running at all
+        would trigger it, even with zero Boson boards ever attached), so
+        it was removed rather than gated on something more precise -- the
+        plain error is correct more often than a clever-but-wrong one.
+        """
+        with self._lock:
+            active = self._active_identifiers_locked()
+        return {"device": _discover_boson_thermal_device(exclude=active)}
+
     @staticmethod
     def _v4l2_is_monochrome(path: Path) -> bool:
         """Return whether V4L2 reports a single-channel capture format."""
@@ -1119,6 +1159,12 @@ class PlaygroundSession:
         Default `retry_seconds=0` preserves the original single-shot
         behavior exactly (one attempt, whether it raises or returns
         ok=False, and no `time.sleep` call).
+
+        `olab_camera.camera_boson_thermal.discover_boson_thermal()` re-
+        implements this same attempt-then-check-deadline/tolerate-raises
+        shape independently (it can't import from `olab_playground` --
+        the dependency only runs the other direction) -- see that
+        function's docstring for the cross-reference back here.
         """
         deadline = time.monotonic() + retry_seconds
         while True:
@@ -1255,6 +1301,8 @@ def make_handler(session: PlaygroundSession, csrf_token: str) -> type[BaseHTTPRe
                     return self._json(session.discover())
                 if route == "/api/discover-boson-dual":
                     return self._json(session.discover_boson_dual())
+                if route == "/api/discover-boson-thermal":
+                    return self._json(session.discover_boson_thermal())
                 if route == "/api/browse":
                     return self._json(session.browse(body["kind"], body.get("path", ".")))
                 if route == "/api/certificates/browse":
