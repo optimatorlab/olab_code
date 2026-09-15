@@ -6,7 +6,7 @@ import numpy as np
 import pyaudio
 
 from ._constants import CHANNELS, CHUNK, FORMAT, ONE_OVER_MAX_INT16, SAMPLERATE
-from ._util import convert_to_db, defaultFromNone
+from ._util import _DEFAULT_FMAX, _DEFAULT_FMIN, _DEFAULT_N_BINS, convert_to_db, defaultFromNone, spectrum_db
 from .device import audio
 from .device import terminate as _terminate_all
 from .recording import Recording_bytes, Recording_np
@@ -127,6 +127,18 @@ class Mic():
 	@property
 	def db(self):
 		return convert_to_db(self.np_data)
+
+	def spectrum(self, n_bins=_DEFAULT_N_BINS, fmin=_DEFAULT_FMIN, fmax=_DEFAULT_FMAX):
+		'''
+		Live mic spectrogram support (see .pairwork/rig-mic-spectrogram/plan.md
+		in the ofm repo) -- a method rather than a property (mirroring .db
+		above) since it takes parameters. Computes a log-frequency-binned
+		dB-scale spectrum from the mic's current buffer (self.np_data) --
+		see spectrum_db()'s own docstring for the exact behavior/degrade
+		paths. Defaults are sourced from _util.py rather than re-declared
+		here, so there is one place that owns them.
+		'''
+		return spectrum_db(self.np_data, self.samplerate, n_bins, fmin, fmax)
 
 	def subscribe(self, callback):
 		'''
