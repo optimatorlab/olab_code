@@ -18,6 +18,7 @@ from olab_camera.openmv_profiles.contract import (
 from olab_camera.openmv_profiles.genx_histogram_preview import (
     FIXED_RESOLUTION, GenxHistogramPreviewConfig, render_profile_body, render_script,
 )
+from olab_camera.openmv_profiles.mt9v034 import MT9V034Config, render_script as render_mt9v034_script
 
 
 # ---- config validation --------------------------------------------------
@@ -230,6 +231,27 @@ def test_profile_registry_binds_config_and_render_script():
     profile = PROFILES['genx_histogram_preview'](histogram_rate_hz=20)
     assert profile.config.histogram_rate_hz == 20
     assert profile.render_script() == render_script(profile.config)
+
+
+def test_mt9v034_profile_renders_documented_primary_csi_controls():
+    config = MT9V034Config(resolution=(320, 240), framerate=80, exposure_us=5000, gain_db=-3.0)
+    script = render_mt9v034_script(config)
+
+    assert 'csi0 = csi.CSI()' in script
+    assert 'csi0.pixformat(csi.GRAYSCALE)' in script
+    assert 'csi0.framesize((320, 240))' in script
+    assert 'csi0.framerate(80)' in script
+    assert 'csi0.auto_exposure(False, exposure_us=5000)' in script
+    assert 'csi0.auto_gain(False, gain_db=-3.0)' in script
+
+
+def test_mt9v034_max_rate_omits_rate_limiter_and_rejects_unknown_resolution():
+    script = render_mt9v034_script(MT9V034Config(framerate='max'))
+    assert 'csi0.framerate(' not in script
+    with pytest.raises(ValueError, match='resolution'):
+        MT9V034Config(resolution=(320, 320))
+    with pytest.raises(ValueError, match='integer'):
+        MT9V034Config(resolution=(320.0, 240.0))
 
 
 # ---- envelope contract ---------------------------------------------------

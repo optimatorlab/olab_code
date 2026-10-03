@@ -104,7 +104,22 @@ class CameraOpenMV(Camera):
 		if isinstance(profile, str):
 			if profile not in PROFILES:
 				raise ValueError(f'unknown profile {profile!r}; available: {sorted(PROFILES)}')
-			self._profile = PROFILES[profile](**(profile_kwargs or {}))
+			profile_config = dict(profile_kwargs or {})
+			if profile == 'mt9v034':
+				# The inherited, unmodified OpenMV default is GENX-specific 320x320.
+				# Preserve it for callers that select the new named profile without a
+				# paramDict; any caller-supplied dimensions are profile input and must
+				# validate instead of being silently reinterpreted as QVGA.
+				rows = paramDict.get('res_rows')
+				cols = paramDict.get('res_cols')
+				uses_inherited_default = paramDict is CameraOpenMV.__init__.__defaults__[0]
+				if rows is not None or cols is not None:
+					if rows is None or cols is None:
+						raise ValueError('mt9v034 paramDict must provide both res_rows and res_cols')
+					if not uses_inherited_default:
+						profile_config.setdefault('resolution', (cols, rows))
+				profile_config.setdefault('framerate', paramDict.get('fps_target', 30))
+			self._profile = PROFILES[profile](**profile_config)
 		else:
 			self._profile = profile
 
@@ -141,6 +156,9 @@ class CameraOpenMV(Camera):
 
 	def _hasMovementRegions(self):
 		return 'movement_regions' in getattr(self._profile, 'capabilities', ())
+
+	def _isMT9V034Profile(self):
+		return getattr(self._profile, 'profile_id', None) == 'mt9v034'
 
 
 	def addEventCallback(self, callback):
@@ -208,8 +226,9 @@ class CameraOpenMV(Camera):
 
 		Raises:
 			ValueError: an explicit `res_rows`/`res_cols`/`framerate`
-				doesn't match the profile's fixed configuration. Raised
-				synchronously, before any device interaction.
+				doesn't match the fixed configuration, or is not an allowed
+				MT9V034 height/width/rate request. Raised synchronously,
+				before any device interaction.
 			RuntimeError: called while a previous stop() is still completing
 				its deferred cleanup (see stop()) -- retry once that
 				finishes rather than racing a new capture thread against it.
@@ -231,20 +250,35 @@ class CameraOpenMV(Camera):
 
 		config = self._profile.config
 		resolution = getattr(config, 'resolution', (320, 320))
-		if res_rows is not None and int(res_rows) != resolution[0]:
-			raise ValueError(f'res_rows must be {resolution[0]} for profile {self._profile.profile_id!r}, got {res_rows!r}')
-		if res_cols is not None and int(res_cols) != resolution[1]:
-			raise ValueError(f'res_cols must be {resolution[1]} for profile {self._profile.profile_id!r}, got {res_cols!r}')
-		if self._isRawEventsProfile():
+		if self._isMT9V034Profile():
+			# Profile resolution is (width, height); Camera's public API is
+			# (res_rows=height, res_cols=width).
+			width = resolution[0] if res_cols is None else res_cols
+			height = resolution[1] if res_rows is None else res_rows
+			framerate = config.framerate if framerate is None else framerate
+			self._profile.config = replace(config, resolution=(width, height), framerate=framerate)
+			config = self._profile.config
+			resolution = config.resolution
+			self.framerate = config.framerate
+			self.res_rows, self.res_cols = resolution[1], resolution[0]
+		elif self._isRawEventsProfile():
+			if res_rows is not None and int(res_rows) != resolution[0]:
+				raise ValueError(f'res_rows must be {resolution[0]} for profile {self._profile.profile_id!r}, got {res_rows!r}')
+			if res_cols is not None and int(res_cols) != resolution[1]:
+				raise ValueError(f'res_cols must be {resolution[1]} for profile {self._profile.profile_id!r}, got {res_cols!r}')
 			if framerate is not None:
 				raise ValueError('framerate is not supported by raw-event profiles; use preview_rate_hz')
 			self.framerate = config.preview_rate_hz
 		else:
+			if res_rows is not None and int(res_rows) != resolution[0]:
+				raise ValueError(f'res_rows must be {resolution[0]} for profile {self._profile.profile_id!r}, got {res_rows!r}')
+			if res_cols is not None and int(res_cols) != resolution[1]:
+				raise ValueError(f'res_cols must be {resolution[1]} for profile {self._profile.profile_id!r}, got {res_cols!r}')
 			if framerate is not None and int(framerate) != config.histogram_rate_hz:
 				raise ValueError(f'framerate must be {config.histogram_rate_hz} for profile {self._profile.profile_id!r}, got {framerate!r}')
 			self.framerate = config.histogram_rate_hz
-
-		self.res_rows, self.res_cols = resolution
+		if not self._isMT9V034Profile():
+			self.res_rows, self.res_cols = resolution
 		self.port      = self.defaultFromNone(port, self.outputPort)
 
 		self._captureThreadDone.clear()
@@ -641,22 +675,45 @@ class CameraOpenMV(Camera):
 
 
 	def changeResolutionFramerate(self, res_rows=None, res_cols=None, framerate=None):
-		"""Change the profile's histogram rate via a stop/re-render/start
+		"""Change profile settings via the existing stop/re-render/start
 		cycle -- the same restart-based approach CameraRealSense uses.
 
-		Resolution cannot be changed in this phase: the profile's
-		resolution is fixed and validated at construction/replace time.
+		MT9V034 accepts an allowed resolution and a positive numeric rate or
+		`'max'`; the GENX profiles retain their fixed-resolution/rate rules.
 
 		Args:
-			res_rows/res_cols (int, optional): Must equal the profile's
-				current fixed resolution if given, or ValueError is raised.
-			framerate (int, optional): New histogram rate. If None, keeps
-				the current value. Re-validated against the profile
-				config's own range via `dataclasses.replace()` (so an
-				out-of-range value still raises ValueError, not just a
-				silent clamp).
+			res_rows/res_cols (int, optional): An allowed MT9V034 height/width
+				pair, or the fixed current resolution for GENX profiles.
+			framerate (int or 'max', optional): An allowed MT9V034 rate, or a
+				new GENX histogram rate. If None, keeps the current value.
 		"""
 		config = self._profile.config
+		if self._isMT9V034Profile():
+			# MT9V034 profile resolution is (width, height), while this public
+			# Camera API consistently accepts rows then columns.
+			width = config.resolution[0] if res_cols is None else res_cols
+			height = config.resolution[1] if res_rows is None else res_rows
+			rate = config.framerate if framerate is None else framerate
+			candidate = replace(config, resolution=(width, height), framerate=rate)
+			try:
+				if candidate != config:
+					self.stop(stopStream=False)
+					if self._stopping:
+						self.logger.log(
+							'CameraOpenMV: resolution/rate change deferred while prior capture cleanup completes',
+							severity=olab_utils.SEVERITY_WARNING)
+						return
+					time.sleep(1)
+					self._profile.config = candidate
+					self.start(res_rows=height, res_cols=width, framerate=rate)
+				self.logger.log(
+					f'rows: {self.res_rows}, cols: {self.res_cols}, framerate: {self.framerate}',
+					severity=olab_utils.SEVERITY_DEBUG)
+			except Exception as e:
+				self.logger.log(
+					f'Failed to change to {res_rows} rows, {res_cols} cols, {framerate} framerate: {e}',
+					severity=olab_utils.SEVERITY_ERROR)
+			return
 		if self._isRawEventsProfile():
 			if framerate is not None:
 				raise ValueError('raw-event profiles use preview_rate_hz, not changeResolutionFramerate()')
