@@ -69,6 +69,10 @@ already has active from the scan, so re-scanning while
 concurrently -- unlike the default `/api/discover` scan, which doesn't need
 (or get) that exclusion for most backends beyond `CameraBosonDual`.
 
+The OpenMV guided form includes the maintained H7 Plus MT9V034 profile. It
+offers only its explicit sensor modes and a positive numeric or `max` frame
+rate; initial exposure and gain remain automatic in the playground.
+
 ## Explicit local YOLO provisioning
 
 Before starting the browser UI, activate the `olab_code` virtual environment,

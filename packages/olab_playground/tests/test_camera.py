@@ -420,11 +420,18 @@ def test_realsense_guide_defaults_and_cross_field_preflight(tmp_path: Path):
 def test_openmv_guide_only_accepts_matching_profile_configuration(tmp_path: Path):
     session = _session(tmp_path)
     guide = session.schema()["guidedBackends"]["openmv"]
-    assert set(guide) == {"genx_histogram_preview", "genx_histogram_regions", "genx_raw_events"}
+    assert set(guide) == {"genx_histogram_preview", "genx_histogram_regions", "genx_raw_events", "mt9v034"}
     init, start = session._prepare_openmv({"devicePort": " /dev/ttyACM0 ", "profile": "genx_histogram_regions", "profile_kwargs": {"histogram_rate_hz": 100, "report_rate_hz": 25}}, {"res_rows": 320, "res_cols": 320})
     assert init["devicePort"] == "/dev/ttyACM0"
     assert init["profile_kwargs"] == {"histogram_rate_hz": 100, "report_rate_hz": 25}
     assert start == {"res_rows": 320, "res_cols": 320}
+    mt9_init, mt9_start = session._prepare_openmv({"devicePort": "/dev/ttyACM0", "profile": "mt9v034", "profile_kwargs": {"resolution": [160, 120], "framerate": "max"}}, {})
+    assert mt9_init["profile_kwargs"] == {"resolution": (160, 120), "framerate": "max"}
+    assert mt9_start == {}
+    with pytest.raises(ValueError, match="MT9V034 resolution"):
+        session._prepare_openmv({"devicePort": "/dev/ttyACM0", "profile": "mt9v034", "profile_kwargs": {"resolution": [320, 320], "framerate": 30}}, {})
+    with pytest.raises(ValueError, match="framerate"):
+        session._prepare_openmv({"devicePort": "/dev/ttyACM0", "profile": "mt9v034", "profile_kwargs": {"resolution": [320, 240], "framerate": False}}, {})
     with pytest.raises(ValueError, match="supported OpenMV profile"):
         session._prepare_openmv({"devicePort": "/dev/ttyACM0", "profile": "other", "profile_kwargs": {}}, {})
     with pytest.raises(ValueError, match="profile settings are invalid"):
