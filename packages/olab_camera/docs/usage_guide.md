@@ -1,5 +1,21 @@
 # olab_camera Usage Guide
 
+## OpenMV MT9V034 on H7 Plus
+
+`CameraOpenMV` supports the maintained `mt9v034` grayscale frame profile for
+an OpenMV Cam H7 Plus. Use the ordinary `paramDict`, `start()`, and
+`changeResolutionFramerate()` camera API; `res_rows` is height and `res_cols`
+is width. Pass a positive numeric `framerate`, or `'max'` to omit the device
+rate limiter. `fps_target` remains a numeric host-feature rate, while
+`camera.fps['capture']['actual']` reports achieved host capture FPS.
+
+Initial `profile_kwargs` may select automatic exposure/gain with `None` or
+manual values verified for the attached hardware. Validate the camera first in
+OpenMV IDE or an equivalent diagnostic, then use
+`examples/camera_mt9v034_h7_plus.py` to test capture, browser streaming, and
+AprilTags. The documented modes and rates are not a USB or detection-rate
+guarantee.
+
 # Introduction to the `olab_camera.py` module
 
 This document describes some basic functionality of the `olab_camera` module.

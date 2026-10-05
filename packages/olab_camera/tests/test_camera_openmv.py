@@ -528,3 +528,51 @@ def test_change_resolution_framerate_rejects_mismatched_resolution():
         cam.changeResolutionFramerate(res_rows=160)
     assert cam._profile.config.resolution == FIXED_RESOLUTION
     cam.stop()
+
+
+def test_mt9v034_uses_camera_rows_columns_and_keeps_fps_target_numeric(monkeypatch):
+    param_dict = {'res_rows': 240, 'res_cols': 320, 'fps_target': 30, 'outputPort': 8000}
+    cam = _make_camera(
+        profile='mt9v034', paramDict=param_dict,
+        device_kwargs={'frames': [_make_frame(width=320, height=240)]})
+    cam.start(res_rows=240, res_cols=320, framerate='max')
+
+    assert _wait_until(lambda: len(cam.frameDeque) > 0)
+    assert cam.frameDeque[0].shape == (240, 320, 3)
+    assert (cam.res_rows, cam.res_cols, cam.framerate) == (240, 320, 'max')
+    assert isinstance(cam.fps_target, int)
+
+    monkeypatch.setattr(camera_openmv_module.time, 'sleep', lambda _seconds: None)
+    cam.changeResolutionFramerate(res_rows=120, res_cols=160, framerate=60)
+    assert cam._profile.config.resolution == (160, 120)
+    assert cam._profile.config.framerate == 60
+    assert (cam.res_rows, cam.res_cols, cam.framerate) == (120, 160, 60)
+    cam.stop()
+
+
+def test_mt9v034_param_dict_uses_profile_default_or_rejects_explicit_unsupported_dimensions():
+    cam = CameraOpenMV(
+        '/dev/ttyFAKE', profile='mt9v034',
+        paramDict={'fps_target': 30, 'outputPort': 8000}, device_class=FakeDevice)
+    assert cam._profile.config.resolution == (320, 240)
+    with pytest.raises(ValueError, match='resolution'):
+        CameraOpenMV(
+            '/dev/ttyFAKE', profile='mt9v034',
+            paramDict={'res_rows': 320, 'res_cols': 320, 'fps_target': 30, 'outputPort': 8000},
+            device_class=FakeDevice)
+
+
+def test_mt9v034_change_does_not_install_candidate_during_deferred_cleanup(monkeypatch):
+    block_event = threading.Event()
+    cam = _make_camera(
+        profile='mt9v034', paramDict={'res_rows': 240, 'res_cols': 320, 'fps_target': 30, 'outputPort': 8000},
+        device_kwargs={'timeout': 0.05, 'block_event': block_event})
+    cam.start()
+    time.sleep(0.05)
+    monkeypatch.setattr(camera_openmv_module.time, 'sleep', lambda _seconds: None)
+    cam.changeResolutionFramerate(res_rows=120, res_cols=160, framerate=60)
+    assert cam._stopping is True
+    assert cam._profile.config.resolution == (320, 240)
+    assert cam._profile.config.framerate == 30
+    block_event.set()
+    assert _wait_until(lambda: not cam._stopping, timeout=2.0)

@@ -128,6 +128,16 @@ OPENMV_GUIDE = {
             "callback_queue_size": {"default": 8, "minimum": 1},
         },
     },
+    "mt9v034": {
+        "label": "MT9V034 global-shutter frame camera",
+        "capabilities": ("frame preview",),
+        "resolution": (240, 320),
+        "resolutions": ((752, 480), (320, 240), (160, 120), (80, 60)),
+        "settings": {
+            "resolution": {"type": "resolution", "default": (320, 240)},
+            "framerate": {"type": "framerate", "default": 30},
+        },
+    },
 }
 FEATURES = (
     "addAruco", "addQR", "addBarcode", "addCalibrate", "addFaceDetect",
@@ -499,7 +509,17 @@ class PlaygroundSession:
         cleaned = {}
         for name, value in kwargs.items():
             spec = profile["settings"][name]
-            if spec.get("type") == "boolean":
+            if profile_name == "mt9v034" and name == "resolution":
+                if (not isinstance(value, (list, tuple)) or len(value) != 2
+                        or any(isinstance(dimension, bool) or not isinstance(dimension, int) for dimension in value)):
+                    raise ValueError("MT9V034 resolution must be a width, height integer pair")
+                value = tuple(value)
+                if value not in profile["resolutions"]:
+                    raise ValueError("MT9V034 resolution is not supported")
+            elif profile_name == "mt9v034" and name == "framerate":
+                if value != "max":
+                    self._positive_int(value, name, required=True)
+            elif spec.get("type") == "boolean":
                 if not isinstance(value, bool):
                     raise ValueError(f"{name} must be true or false")
             elif "choices" in spec:
