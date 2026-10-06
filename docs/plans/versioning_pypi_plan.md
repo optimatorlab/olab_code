@@ -142,8 +142,11 @@ Keep the format minimal (Keep-a-Changelog-style headings).
 - For each of the six names, on **both** TestPyPI and PyPI, register a
   **pending trusted publisher**: owner `optimatorlab`, repo `olab_code`,
   workflow `release.yml`, environment `testpypi` / `pypi` respectively.
-  (Pending publishers reserve the name until the first upload creates the
-  project.)
+  Pending publishers do **not** reserve the name: per PyPI's docs, a
+  pending publisher "does not create a project or reserve a project's
+  name until it is actually used to publish", and is invalidated if
+  someone else registers the name first. Register them immediately
+  before the rehearsal/release, not days ahead.
 - Create GitHub Environments `testpypi` and `pypi` in the repo; `pypi`
   gets the maintainer as required reviewer and is restricted to tags
   matching `olab-*-v*`.
