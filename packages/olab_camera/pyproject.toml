@@ -6,12 +6,13 @@ build-backend = "hatchling.build"
 name = "olab-camera"
 version = "0.1.0"
 description = "Camera capture, local recording, and network streaming (MJPEG/WebSocket/WebRTC) for lab robotics projects."
-# TODO(open item #5): requires-python not yet decided workspace-wide;
-# ub_rf needs >=3.11, ub_camera's old (unverified) claim was >=3.7. Resolve before release.
 requires-python = ">=3.10"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Optimator Lab" }]
 dependencies = [
-    "olab-utils",
+    "olab-utils>=0.1.0",
     "numpy>=1.21.0",
     "opencv-contrib-python>=4.10.0",
     "pyzbar>=0.1.9",
@@ -21,13 +22,25 @@ dependencies = [
     # shipping a shared private key as package data.
     "cryptography>=42",
 ]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Operating System :: POSIX :: Linux",
+]
+
+[project.urls]
+Homepage = "https://github.com/optimatorlab/olab_code/tree/main/packages/olab_camera"
+Source = "https://github.com/optimatorlab/olab_code/tree/main/packages/olab_camera"
+Issues = "https://github.com/optimatorlab/olab_code/issues"
+Changelog = "https://github.com/optimatorlab/olab_code/blob/main/packages/olab_camera/CHANGELOG.md"
 
 [project.optional-dependencies]
 # Extras carried over from ub_code's existing, already-proven convention.
 yolo = ["ultralytics>=8.3.0"]
 tracking = ["trackers==2.6.0"]
 rfdetr = ["rfdetr==1.9.0", "trackers==2.6.0"]
-ros = ["rospy", "cv-bridge", "sensor-msgs"]
 websocket = ["websockets>=12.0"]
 webrtc = ["aiortc>=1.9.0", "aiohttp>=3.9.0"]
 realsense = ["pyrealsense2>=2.55"]
@@ -45,8 +58,8 @@ openmv = ["openmv==1.0.7"]
 # AVWebcam composes a CameraUSB with an olab_audio.Mic -- olab_camera does
 # not depend on olab_audio otherwise, so this stays an extra, guarded the
 # same way as the others (see av_webcam.py's try/except import).
-av = ["olab-audio"]
-all = ["olab-camera[yolo,tracking,rfdetr,ros,websocket,webrtc,realsense,openmv,av]"]
+av = ["olab-audio>=0.1.0"]
+all = ["olab-camera[yolo,tracking,rfdetr,websocket,webrtc,realsense,openmv,av]"]
 
 [project.scripts]
 olab-camera-generate-cert = "olab_camera.tls:generate_cert_main"

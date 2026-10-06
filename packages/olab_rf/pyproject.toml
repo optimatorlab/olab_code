@@ -8,10 +8,25 @@ version = "0.1.0"
 description = "Local-first RF telemetry package for ADS-B, AIS, scanner, and future Remote ID workflows."
 readme = "README.md"
 requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Optimator Lab" }]
 dependencies = [
     "numpy>=1.26",
     "pyyaml>=6.0",
 ]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Operating System :: POSIX :: Linux",
+]
+
+[project.urls]
+Homepage = "https://github.com/optimatorlab/olab_code/tree/main/packages/olab_rf"
+Source = "https://github.com/optimatorlab/olab_code/tree/main/packages/olab_rf"
+Issues = "https://github.com/optimatorlab/olab_code/issues"
+Changelog = "https://github.com/optimatorlab/olab_code/blob/main/packages/olab_rf/CHANGELOG.md"
 
 [project.optional-dependencies]
 dev = [

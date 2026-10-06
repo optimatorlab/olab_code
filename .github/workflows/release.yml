@@ -1,61 +1,281 @@
 name: Release
 
-# Tag-triggered only. Never runs as a side effect of an ordinary merge to
-# main. Tags are package-namespaced, e.g. olab-voice-v0.1.0 — a bare
-# vX.Y.Z would collide across packages in this repo.
+# Tag push publishes a package to real PyPI (plus a GitHub Release).
+# workflow_dispatch rehearses the same build/smoke-test pipeline against
+# TestPyPI instead, for packages that haven't had their first real release
+# yet (or to re-rehearse after a packaging change) -- no GitHub Release is
+# created on that path. Tags are package-namespaced, e.g. olab-voice-v0.1.0
+# -- a bare vX.Y.Z would collide across packages in this repo.
 on:
   push:
     tags:
       - 'olab-*-v*'
+  workflow_dispatch:
+    inputs:
+      package:
+        description: Package to rehearse a release for (TestPyPI only)
+        required: true
+        type: choice
+        options:
+          - olab_utils
+          - olab_camera
+          - olab_audio
+          - olab_voice
+          - olab_rf
+          - olab_playground
+      ref:
+        description: Git ref to build from (defaults to the ref this workflow was dispatched on)
+        required: false
+        type: string
+
+# Least privilege: nothing here needs to write to the repo except the final
+# GitHub Release step, and nothing needs id-token except the two publish
+# steps. Without this, every job would inherit this repo's default
+# `write` GITHUB_TOKEN -- a real supply-chain risk given smoke-test installs
+# arbitrary third-party code from PyPI/TestPyPI.
+permissions:
+  contents: read
 
 jobs:
-  release:
+  build:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
+    outputs:
+      package: ${{ steps.info.outputs.package }}
+      version: ${{ steps.info.outputs.version }}
+      floor-python: ${{ steps.info.outputs.floor-python }}
     steps:
       - uses: actions/checkout@v4
-
-      - name: Derive package name and version from tag
-        id: tag
-        run: |
-          # olab-<pkg>-v<version> -> pkg=<pkg>, version=<version>
-          tag="${GITHUB_REF_NAME}"
-          pkg="$(echo "$tag" | sed -E 's/^olab-(.+)-v[0-9].*$/\1/')"
-          version="$(echo "$tag" | sed -E 's/^olab-.+-v//')"
-          echo "package=olab_$pkg" >> "$GITHUB_OUTPUT"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
+        with:
+          ref: ${{ inputs.ref || github.ref }}
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Verify package metadata matches tag
+      - name: Derive package, version, and floor Python
+        id: info
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DISPATCH_PACKAGE: ${{ inputs.package }}
+          TAG: ${{ github.ref_name }}
         run: |
-          python -m pip install --upgrade pip tomli 2>/dev/null || pip install tomli
-          python - <<'EOF'
-          import sys
-          try:
-              import tomllib
-          except ImportError:
-              import tomli as tomllib
-          pkg = "${{ steps.tag.outputs.package }}"
-          expected = "${{ steps.tag.outputs.version }}"
-          with open(f"packages/{pkg}/pyproject.toml", "rb") as f:
-              data = tomllib.load(f)
-          actual = data["project"]["version"]
-          if actual != expected:
-              print(f"pyproject.toml version {actual!r} does not match tag version {expected!r}")
+          python3 - <<'EOF'
+          import os, re, sys
+
+          event = os.environ["EVENT_NAME"]
+          if event == "workflow_dispatch":
+              pkg = os.environ["DISPATCH_PACKAGE"]
+              tag_version = None
+          else:
+              tag = os.environ["TAG"]
+              m = re.match(r"^olab-(.+)-v([0-9].*)$", tag)
+              if not m:
+                  print(f"::error::tag {tag!r} doesn't match olab-<pkg>-v<version>", file=sys.stderr)
+                  sys.exit(1)
+              pkg = f"olab_{m.group(1)}"
+              tag_version = m.group(2)
+
+          pyproject_path = f"packages/{pkg}/pyproject.toml"
+          with open(pyproject_path) as f:
+              content = f.read()
+
+          pm = re.search(r'requires-python\s*=\s*">=(\d+\.\d+)"', content)
+          if not pm:
+              print(f"::error::could not parse requires-python in {pyproject_path}", file=sys.stderr)
               sys.exit(1)
+          floor_python = pm.group(1)
+
+          vm = re.search(r'(?m)^version\s*=\s*"([^"]+)"', content)
+          if not vm:
+              print(f"::error::could not parse version in {pyproject_path}", file=sys.stderr)
+              sys.exit(1)
+          pyproject_version = vm.group(1)
+
+          if tag_version is None:
+              version = pyproject_version
+          else:
+              version = tag_version
+              if version != pyproject_version:
+                  print(
+                      f"::error::pyproject.toml version {pyproject_version!r} "
+                      f"does not match tag version {version!r}",
+                      file=sys.stderr,
+                  )
+                  sys.exit(1)
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write(f"package={pkg}\n")
+              out.write(f"version={version}\n")
+              out.write(f"floor-python={floor_python}\n")
+          EOF
+
+      - name: Validate CHANGELOG section and extract release notes
+        env:
+          PKG: ${{ steps.info.outputs.package }}
+          VERSION: ${{ steps.info.outputs.version }}
+        run: |
+          python3 - <<'EOF'
+          import os, sys
+
+          pkg = os.environ["PKG"]
+          version = os.environ["VERSION"]
+          path = f"packages/{pkg}/CHANGELOG.md"
+          heading = f"## [{version}]"
+
+          with open(path) as f:
+              lines = f.readlines()
+
+          start = None
+          for i, line in enumerate(lines):
+              if line.startswith(heading):
+                  start = i
+                  break
+          if start is None:
+              print(f"::error::no {heading!r} section found in {path}", file=sys.stderr)
+              sys.exit(1)
+
+          end = len(lines)
+          for i in range(start + 1, len(lines)):
+              if lines[i].startswith("## ["):
+                  end = i
+                  break
+
+          body = "".join(lines[start + 1:end]).strip()
+          if not body:
+              print(f"::error::{heading!r} section in {path} is empty", file=sys.stderr)
+              sys.exit(1)
+
+          with open("release-notes.md", "w") as f:
+              f.write(body + "\n")
           EOF
 
       - name: Build wheel and sdist
         run: |
           pip install build
-          python -m build "packages/${{ steps.tag.outputs.package }}"
+          python -m build "packages/${{ steps.info.outputs.package }}"
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+      # Two separate artifacts: `dist/` is exactly what gets uploaded to
+      # Py/TestPyPI -- a stray release-notes.md inside it breaks
+      # twine/gh-action-pypi-publish outright.
+      - uses: actions/upload-artifact@v4
         with:
-          files: packages/${{ steps.tag.outputs.package }}/dist/*
-          generate_release_notes: true
+          name: dist
+          path: packages/${{ steps.info.outputs.package }}/dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-notes
+          path: release-notes.md
+
+  smoke-test:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ needs.build.outputs.floor-python }}
+
+      # Create a clean venv for the actual install/import check, rather than
+      # installing into setup-python's own interpreter -- matches decision
+      # 14's "clean venv" and CONTRIBUTING.md's description of this step.
+      # Putting it first on PATH means every later `pip`/`python3` call in
+      # this job (no step here needs anything outside it) transparently
+      # targets the venv without each step having to spell out its path.
+      - name: Create clean venv for the smoke test
+        run: |
+          python3 -m venv "$RUNNER_TEMP/smoke"
+          echo "$RUNNER_TEMP/smoke/bin" >> "$GITHUB_PATH"
+
+      # Same system prerequisites ci.yml installs for these packages -- see
+      # its "Install system prerequisites" steps' comments for why each is
+      # needed.
+      - name: Install system prerequisites for olab_audio
+        if: needs.build.outputs.package == 'olab_audio'
+        run: sudo apt-get update && sudo apt-get install -y portaudio19-dev
+
+      - name: Install system prerequisites for olab_camera
+        if: needs.build.outputs.package == 'olab_camera' || needs.build.outputs.package == 'olab_playground'
+        run: sudo apt-get update && sudo apt-get install -y libzbar0
+
+      - name: Install the built wheel (from PyPI)
+        if: github.event_name == 'push'
+        run: |
+          python -m pip install --upgrade pip
+          pip install dist/*.whl
+
+      # TestPyPI doesn't mirror heavy deps like numpy/opencv -- resolve
+      # those (and any workspace-internal olab-* dependency not yet
+      # rehearsed) from real PyPI as a fallback index.
+      - name: Install the built wheel (from TestPyPI)
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          python -m pip install --upgrade pip
+          pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ dist/*.whl
+
+      - name: Import and verify __version__
+        env:
+          PKG: ${{ needs.build.outputs.package }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          python3 -c "
+          import importlib, os
+          pkg = os.environ['PKG']
+          version = os.environ['VERSION']
+          mod = importlib.import_module(pkg)
+          assert mod.__version__ == version, f'{pkg}.__version__={mod.__version__!r} != tag version {version!r}'
+          "
+
+  publish-pypi:
+    needs: smoke-test
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  publish-testpypi:
+    needs: smoke-test
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    environment: testpypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+
+  github-release:
+    needs: publish-pypi
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-notes
+          path: .
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          body_path: release-notes.md

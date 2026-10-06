@@ -6,14 +6,29 @@ build-backend = "hatchling.build"
 name = "olab-utils"
 version = "0.1.0"
 description = "Shared utility helpers for lab robotics projects."
-# TODO(open item #5): requires-python not yet decided workspace-wide.
 requires-python = ">=3.10"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Optimator Lab" }]
 dependencies = [
     "numpy>=1.21.0",
     "opencv-contrib-python>=4.10.0",
     "qrcode[pil]>=7.4.2",
 ]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Operating System :: OS Independent",
+]
+
+[project.urls]
+Homepage = "https://github.com/optimatorlab/olab_code/tree/main/packages/olab_utils"
+Source = "https://github.com/optimatorlab/olab_code/tree/main/packages/olab_utils"
+Issues = "https://github.com/optimatorlab/olab_code/issues"
+Changelog = "https://github.com/optimatorlab/olab_code/blob/main/packages/olab_utils/CHANGELOG.md"
 
 [project.optional-dependencies]
 all = []

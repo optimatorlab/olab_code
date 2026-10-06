@@ -12,8 +12,8 @@ integration.
 ## Install
 
 Install `olab-rf` with the `nats` extra in the environment that publishes or
-consumes NATS messages — see [`docs/install.md`](install.md) for the normal
-(pinned git tag/SHA, or release wheel once available) installation command;
+consumes NATS messages — `pip install "olab-rf[nats]"` (see
+[`docs/install.md`](install.md) for the full installation walkthrough);
 add `nats` to whatever extras list you use there. For local development
 against an `olab_code` checkout: `pip install -e "packages/olab_rf[nats]"`.
 

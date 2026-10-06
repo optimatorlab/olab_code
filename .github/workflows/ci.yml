@@ -30,6 +30,13 @@ jobs:
               - 'packages/olab_voice/**'
             olab_audio:
               - 'packages/olab_audio/**'
+            olab_playground:
+              - 'packages/olab_playground/**'
+              # olab_playground depends on olab_camera (which itself depends
+              # on olab_utils) — same workspace-dependency reasoning as
+              # olab_camera's filter above.
+              - 'packages/olab_camera/**'
+              - 'packages/olab_utils/**'
 
   test:
     needs: detect-changes
@@ -38,12 +45,17 @@ jobs:
     strategy:
       matrix:
         package: ${{ fromJSON(needs.detect-changes.outputs.packages) }}
+        python-version: ["3.10", "3.11"]
+        exclude:
+          # olab-rf's requires-python floor is >=3.11, not >=3.10.
+          - package: olab_rf
+            python-version: "3.10"
       fail-fast: false
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
       # olab_audio's base dependencies (pyaudio, pulsectl) are intentionally
       # core, not an opt-in extra — the plan's v1 scope treats device I/O as
       # the default install; only the DSP/teaching toolkit (`analysis`) is
@@ -55,16 +67,24 @@ jobs:
       # dependency, not an opt-in extra, but it only wraps the native ZBar
       # library -- it needs libzbar0 present at runtime, or decoding raises
       # "Unable to find zbar shared library" (not caught by pip installing
-      # the pyzbar wheel itself).
+      # the pyzbar wheel itself). olab_playground depends on olab_camera, so
+      # it needs the same system library.
       - name: Install system prerequisites for olab_camera
-        if: matrix.package == 'olab_camera'
+        if: matrix.package == 'olab_camera' || matrix.package == 'olab_playground'
         run: sudo apt-get update && sudo apt-get install -y libzbar0
-      # olab_camera depends on olab_utils (a workspace-internal package, not
-      # published anywhere pip can resolve it from by name) — install it
-      # from its local path first so olab_camera's own install can find it.
+      # olab_camera depends on olab_utils (a workspace-internal package) —
+      # install it from its local path first, rather than resolving it from
+      # PyPI, so CI exercises the dependency's *current* working-tree state
+      # (including an uncommitted/unreleased change), not whatever's already
+      # published.
       - name: Install olab_utils (olab_camera's workspace dependency)
-        if: matrix.package == 'olab_camera'
+        if: matrix.package == 'olab_camera' || matrix.package == 'olab_playground'
         run: pip install "./packages/olab_utils"
+      # olab_playground depends on olab_camera — same reasoning as above,
+      # installed after olab_utils so olab_camera's own install can find it.
+      - name: Install olab_camera (olab_playground's workspace dependency)
+        if: matrix.package == 'olab_playground'
+        run: pip install "./packages/olab_camera"
       - name: Install package (base dependencies only)
         run: |
           python -m pip install --upgrade pip

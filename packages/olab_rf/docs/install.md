@@ -3,16 +3,11 @@
 Use a virtual environment for all Python work. Do not install into system
 Python.
 
-Normal installation (no `olab_code` checkout required):
-
 ```bash
 python3 -m venv venv
 source venv/bin/activate
-pip install "olab-rf[web,ais,pyrtlsdr,nats] @ git+https://github.com/optimatorlab/olab_code.git@<tag-or-sha>#subdirectory=packages/olab_rf"
+pip install "olab-rf[web,ais,pyrtlsdr,nats]"
 ```
-
-Once release wheels exist, prefer pinning the release's exact URL and
-SHA-256 hash instead of a git reference.
 
 **Local development**, against an `olab_code` checkout, to run the test
 suite or make changes:

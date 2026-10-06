@@ -7,9 +7,15 @@ without changing the package boundary. It is a
 pure-Python process: it does not require NATS, Node.js, npm, or a web framework.
 
 ```bash
-pip install -e packages/olab_camera -e packages/olab_playground
+pip install olab-playground
 olab-playground
 olab-playground --port 8765 --stream-port-range 8000:8099
+```
+
+**Local development**, against an `olab_code` checkout:
+
+```bash
+pip install -e packages/olab_utils -e packages/olab_camera -e packages/olab_playground
 ```
 
 The control page is permanently loopback-only at `https://127.0.0.1:8765`.

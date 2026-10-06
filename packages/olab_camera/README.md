@@ -2,32 +2,21 @@
 
 Camera capture, local recording, and network streaming (MJPEG/WebSocket/WebRTC)
 for lab robotics projects, plus ArUco, barcode/QR, face-detection, and YOLO
-computer-vision helpers. Requires [`olab_utils`](../olab_utils/). Unlike a
-normal PyPI dependency, `olab-utils` isn't published anywhere `pip` can
-resolve it from by name — **install both together explicitly**, as shown
-below; `pip install olab-camera` alone will fail to resolve `olab-utils`.
+computer-vision helpers. Requires [`olab_utils`](https://github.com/optimatorlab/olab_code/tree/main/packages/olab_utils),
+resolved automatically from PyPI as a regular dependency.
 
 Migrated from `~/Projects/ub_code/ub_camera` (a flat, non-`src/`-layout
 single-file module — `ub_code` never had automated tests) per
-[`docs/plans/olab_packages_reorg_plan.md`](../../docs/plans/olab_packages_reorg_plan.md),
+[`docs/plans/olab_packages_reorg_plan.md`](https://github.com/optimatorlab/olab_code/blob/main/docs/plans/olab_packages_reorg_plan.md),
 Migration sequence step 4.
 
 ## Installing
 
-Normal installation (no `olab_code` checkout required) — base `olab-camera`
-plus its required `olab-utils` dependency:
-
 ```bash
 python3 -m venv venv
 source venv/bin/activate
-pip install \
-  "olab-utils @ git+https://github.com/optimatorlab/olab_code.git@<tag-or-sha>#subdirectory=packages/olab_utils" \
-  "olab-camera @ git+https://github.com/optimatorlab/olab_code.git@<tag-or-sha>#subdirectory=packages/olab_camera"
+pip install olab-camera
 ```
-
-Once release wheels exist, prefer pinning each release's exact URL and
-SHA-256 hash instead of a git reference — both `olab-utils`'s and
-`olab-camera`'s.
 
 Add extras as needed by appending `[...]` to the `olab-camera` line above,
 one at a time:
@@ -39,18 +28,19 @@ one at a time:
 | `rfdetr` | local RF-DETR detection/segmentation plus Roboflow ByteTrack | Supply an existing local checkpoint. Relative names resolve in `~/Projects/olab_models/`; absolute paths also work. The usage guide documents an explicit, one-time optional provisioning download. This feature never downloads weights or uses hosted inference at runtime. Keep `opencv-contrib-python` active using the recovery process below if a dependency installs plain OpenCV. |
 | `websocket` | `websockets` | WebSocket + JPEG streaming. |
 | `webrtc` | `aiortc`, `aiohttp` | WebRTC streaming. |
-| `ros` | `rospy`, `cv-bridge`, `sensor-msgs` | **Not installable via plain `pip`** — these packages aren't on PyPI. Only add this extra inside an existing ROS-configured environment (e.g. `apt`-installed ROS packages already on the Python path); untested/undocumented outside that setup. |
+| `ros` | — | **Dropped as a pip extra** (`rospy`/`sensor-msgs` aren't on PyPI). To use `CameraROS`, install ROS via `apt`/`rosdep` and source your ROS environment — `olab-camera` then picks up `rospy` from that environment's Python path on its own. |
 
-`all` bundles `yolo`, `rfdetr`, `ros`, `websocket`, and `webrtc` together — since
-`ros` isn't plain-pip-installable, only use `all` inside a ROS environment;
-otherwise request extras individually.
+`all` bundles every extra above (`yolo`, `tracking`, `rfdetr`,
+`websocket`, `webrtc`, `realsense`, `openmv`, `av`) together. Note that
+`av`'s `olab-audio` dependency needs PortAudio's headers
+(`portaudio19-dev` on Ubuntu/Debian) to build `pyaudio` from source.
 
 **Local development**, against an `olab_code` checkout:
 
 ```bash
 pip install -e "packages/olab_utils"
 pip install -e "packages/olab_camera"                       # base
-pip install -e "packages/olab_camera[yolo,websocket,webrtc]" # + extras (ros needs a ROS env, see above)
+pip install -e "packages/olab_camera[yolo,websocket,webrtc]" # + extras
 ```
 
 **Watch the install order if you separately install `ultralytics`** (the
@@ -105,7 +95,7 @@ certificate the first time you actually start a stream (not when you
 construct a `Camera`) at `~/.olab_camera/ssl/` (owner-only permissions),
 via the `cryptography` library — no bundled/shared private key, no
 platform-specific tooling. Capture-only use of a `Camera` never touches
-the filesystem for TLS. See [`docs/deployment.md`](docs/deployment.md)
+the filesystem for TLS. See [`docs/deployment.md`](https://github.com/optimatorlab/olab_code/blob/main/packages/olab_camera/docs/deployment.md)
 for custom certificates, fleet deployment via a lab-private CA and
 per-device leaf certs (zero browser TLS warnings without a shared private
 key), and reverse-proxy deployment.
@@ -115,7 +105,7 @@ key), and reverse-proxy deployment.
 | Protocol | Extra install | Typical latency | Browser endpoint | Multi-client |
 |---|---|---|---|---|
 | **MJPEG** (default) | None | 200–500 ms | `https://host:PORT/stream.mjpg` | Yes |
-| **WebSocket + JPEG** | `olab-camera[websocket]` | 100–300 ms | see [`docs/deployment.md`](docs/deployment.md) | Yes |
+| **WebSocket + JPEG** | `olab-camera[websocket]` | 100–300 ms | see [`docs/deployment.md`](https://github.com/optimatorlab/olab_code/blob/main/packages/olab_camera/docs/deployment.md) | Yes |
 | **WebRTC** | `olab-camera[webrtc]` | 50–150 ms | `https://host:PORT/webrtc` | Yes |
 
 ```python
@@ -127,10 +117,10 @@ camera.startStream(port=8002, protocol='webrtc')
 ## Further reading
 
 - Usage tutorial (camera init, ArUco, barcode/QR, face detection, YOLO
-  variants, tracking, frame decoration): [`docs/usage_guide.md`](docs/usage_guide.md)
-- Streaming protocols, custom TLS certs, reverse-proxy deployment: [`docs/deployment.md`](docs/deployment.md)
+  variants, tracking, frame decoration): [`docs/usage_guide.md`](https://github.com/optimatorlab/olab_code/blob/main/packages/olab_camera/docs/usage_guide.md)
+- Streaming protocols, custom TLS certs, reverse-proxy deployment: [`docs/deployment.md`](https://github.com/optimatorlab/olab_code/blob/main/packages/olab_camera/docs/deployment.md)
 - Local HTTPS camera/feature browser playground: install `olab-playground`
   alongside this package; see `packages/olab_playground/README.md` in the
   olab_code checkout.
 - Extending the package (adding a camera class or feature class, code
-  organization, testing your changes): [`docs/developer_guide.md`](docs/developer_guide.md)
+  organization, testing your changes): [`docs/developer_guide.md`](https://github.com/optimatorlab/olab_code/blob/main/packages/olab_camera/docs/developer_guide.md)

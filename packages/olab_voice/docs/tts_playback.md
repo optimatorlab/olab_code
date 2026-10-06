@@ -12,7 +12,7 @@ from their own process (see optimatorlab/ofm#41 for that follow-up work).
 ## Installing
 
 ```bash
-pip install "olab-voice[tts-piper,models] @ git+https://github.com/optimatorlab/olab_code.git@<tag-or-sha>#subdirectory=packages/olab_voice"
+pip install "olab-voice[tts-piper,models]"
 ```
 
 For local development against a checkout:
@@ -40,7 +40,7 @@ Piper synthesis requires an explicit local `.onnx` model plus its paired
 default voice is `en_US-lessac-medium`, matching `soar_rover`.
 
 ```bash
-pip install "olab-voice[models] @ git+https://github.com/optimatorlab/olab_code.git@<tag-or-sha>#subdirectory=packages/olab_voice"
+pip install "olab-voice[models]"
 olab-voice-download-models --only piper
 ```
 
