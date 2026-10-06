@@ -8,21 +8,16 @@ image-stitching and file-listing utilities, simple frame-drawing helpers
 
 Migrated from `~/Projects/ub_code/ub_utils` (a flat, non-`src/`-layout
 single-file module — `ub_code` never had automated tests) per
-[`docs/plans/olab_packages_reorg_plan.md`](../../docs/plans/olab_packages_reorg_plan.md),
-Migration sequence step 4. [`olab_camera`](../olab_camera/) depends on this
-package (`import olab_utils`); it is not `olab_camera`-specific and can be
-used standalone.
+[`docs/plans/olab_packages_reorg_plan.md`](https://github.com/optimatorlab/olab_code/blob/main/docs/plans/olab_packages_reorg_plan.md),
+Migration sequence step 4. [`olab_camera`](https://github.com/optimatorlab/olab_code/tree/main/packages/olab_camera)
+depends on this package (`import olab_utils`); it is not
+`olab_camera`-specific and can be used standalone.
 
 ## Installing
 
-Normal installation (no `olab_code` checkout required):
-
 ```bash
-pip install "olab-utils @ git+https://github.com/optimatorlab/olab_code.git@<tag-or-sha>#subdirectory=packages/olab_utils"
+pip install olab-utils
 ```
-
-Once release wheels exist, prefer pinning the release's exact URL and
-SHA-256 hash instead of a git reference.
 
 **Local development**, against an `olab_code` checkout:
 

@@ -11,14 +11,14 @@ depend on `olab_audio`.
 
 Migrated from `~/Projects/CoG/tts_practice_migration/src/ub_voice` (the
 canonical copy — see
-[`docs/plans/olab_packages_reorg_plan.md`](../../docs/plans/olab_packages_reorg_plan.md)'s
+[`docs/plans/olab_packages_reorg_plan.md`](https://github.com/optimatorlab/olab_code/blob/main/docs/plans/olab_packages_reorg_plan.md)'s
 "The `ub_voice` fork" section for why). `tts_practice`'s competing in-tree
 copy was retired, not migrated.
 
 ## Installing
 
 ```bash
-pip install "olab-voice[dev,stt-faster-whisper,tts-piper] @ git+https://github.com/optimatorlab/olab_code.git@<tag-or-sha>#subdirectory=packages/olab_voice"
+pip install "olab-voice[dev,stt-faster-whisper,tts-piper]"
 ```
 
 For local development against a checkout of this repo:
@@ -50,7 +50,7 @@ export OLAB_VOICE_PIPER_MODEL="$OLAB_VOICE_MODEL_DIR/piper/en_US-lessac-medium.o
 ### Download Local Models
 
 ```bash
-pip install "olab-voice[models,stt-faster-whisper,tts-piper] @ git+https://github.com/optimatorlab/olab_code.git@<tag-or-sha>#subdirectory=packages/olab_voice"
+pip install "olab-voice[models,stt-faster-whisper,tts-piper]"
 olab-voice-download-models
 ```
 
@@ -58,7 +58,7 @@ The command downloads Faster-Whisper `Systran/faster-whisper-base.en` and
 Piper `en_US-lessac-medium` (from `rhasspy/piper-voices`) into
 `models/olab_voice/`. After it completes, export the printed paths and run
 the full backend test suite — see
-[`docs/user_guide.md`](docs/user_guide.md) for the manual-download fallback
+[`docs/user_guide.md`](https://github.com/optimatorlab/olab_code/blob/main/packages/olab_voice/docs/user_guide.md) for the manual-download fallback
 and further detail.
 
 ## OFM Compatibility Adapter
@@ -127,7 +127,7 @@ result = service.speak_and_wait(TtsRequest(text="107 is listening"))
 service.close()
 ```
 
-See [`docs/tts_playback.md`](docs/tts_playback.md) for Piper/ALSA setup,
+See [`docs/tts_playback.md`](https://github.com/optimatorlab/olab_code/blob/main/packages/olab_voice/docs/tts_playback.md) for Piper/ALSA setup,
 preemption semantics, and troubleshooting.
 
 ## CLI Smoke Tools

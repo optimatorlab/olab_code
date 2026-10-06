@@ -8,17 +8,13 @@ workflow at a time; starting a new workflow stops the previous one.
 
 ## Setup
 
-Normal installation (no `olab_code` checkout required):
-
 ```bash
 python3 -m venv venv
 source venv/bin/activate
-pip install "olab-rf[web,ais,pyrtlsdr,nats] @ git+https://github.com/optimatorlab/olab_code.git@<tag-or-sha>#subdirectory=packages/olab_rf"
+pip install "olab-rf[web,ais,pyrtlsdr,nats]"
 ```
 
-Once release wheels exist, prefer pinning the release's exact URL and
-SHA-256 hash instead of a git reference. That installs the Python
-dependencies for:
+That installs the Python dependencies for:
 
 - web demo: `fastapi`, `uvicorn`
 - AIS parsing: `pyais`

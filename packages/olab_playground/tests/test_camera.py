@@ -90,7 +90,7 @@ def test_schema_reports_missing_ros_extra(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(camera_module.importlib.util, "find_spec", lambda _name: None)
     spec = _session(tmp_path).schema()["backends"]["CameraROS"]
     assert spec["available"] is False
-    assert spec["hint"] == 'pip install "olab-camera[ros]"'
+    assert spec["hint"] == "install ROS via apt/rosdep and source your ROS environment"
 
 
 def test_status_serializes_numpy_and_generated_cleanup(tmp_path: Path):
@@ -257,7 +257,8 @@ def test_read_frame_with_retry_tolerates_a_read_exception(tmp_path: Path):
     assert session._read_frame_with_retry(FlakyCapture(raises_first=2), retry_seconds=0.0) == (False, None)
 
 
-def test_guided_detector_rejects_model_outside_local_root(tmp_path: Path):
+def test_guided_detector_rejects_model_outside_local_root(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(camera_module.importlib.util, "find_spec", lambda _name: object())
     session = _session(tmp_path)
     session._camera = object()
     with pytest.raises(ValueError, match="existing file"):

@@ -8,7 +8,23 @@ version = "0.1.0"
 description = "Local-first HTTPS playground for olab_code packages."
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = ["olab-camera"]
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Optimator Lab" }]
+dependencies = ["olab-camera>=0.1.0"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Operating System :: POSIX :: Linux",
+]
+
+[project.urls]
+Homepage = "https://github.com/optimatorlab/olab_code/tree/main/packages/olab_playground"
+Source = "https://github.com/optimatorlab/olab_code/tree/main/packages/olab_playground"
+Issues = "https://github.com/optimatorlab/olab_code/issues"
+Changelog = "https://github.com/optimatorlab/olab_code/blob/main/packages/olab_playground/CHANGELOG.md"
 
 [project.scripts]
 olab-playground = "olab_playground.camera:main"

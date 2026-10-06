@@ -328,10 +328,18 @@ need everything installed."
   GitHub Release instead — pin the **exact release URL and SHA-256 hash**
   in the consuming project's requirements/deployment configuration. No
   package index, no checkout on the target, no editable install.
+  **Superseded 2026-10-06**: public PyPI (see next bullet) replaces this
+  as the normal install path — `pip install olab-<pkg>` resolves the
+  package (and its workspace-internal dependencies, via lower bounds) by
+  name, same as any other PyPI package.
 - **Deferred**: a real package index (public PyPI or self-hosted
   `pypiserver`/`devpi`). Not needed now — genuine infra investment with no
   current concrete need; revisit only if broader-than-lab distribution
   becomes an actual goal.
+  **Resolved 2026-10-06**: the trigger named above — broader-than-lab
+  distribution — now applies (students are the audience). See
+  [`docs/plans/versioning_pypi_plan.md`](versioning_pypi_plan.md), which
+  reverses this deferral: all six packages publish to public PyPI.
 - `scripts/gcs/deploy_vehicle.py` gets updated to use the "now" mechanism
   as soon as `olab_camera` exists in the new repo, then switches to the
   "soon" mechanism (with a `pip check` + import verification step) once
@@ -583,12 +591,19 @@ v1 scope item 5 above for the first two; item 3 below for the third).
 4. Decide repository visibility and, if private, configure target-machine
    credentials for GitHub Release downloads without embedding a personal
    token.
-5. Reconcile the Python-version-support policy per package — `ub_rf`
-   already requires `>=3.11`; don't silently lower it to match `ub_camera`'s
-   older `>=3.7` claim without a decision.
-6. Confirm whether OFM's deployment should pin release URLs directly, or a
-   deployment-owned constraints/requirements file should hold the
-   URLs+hashes (the latter is usually cleaner for deployment-only pins).
+5. ~~Reconcile the Python-version-support policy per package~~ —
+   **Resolved 2026-10-06**: kept as-is, `>=3.10` everywhere except
+   `olab-rf` `>=3.11` — see
+   [`docs/plans/versioning_pypi_plan.md`](versioning_pypi_plan.md)
+   decision 10 (and its `ci.yml` 3.10-floor matrix addition).
+6. ~~Confirm whether OFM's deployment should pin release URLs directly, or
+   a deployment-owned constraints/requirements file should hold the
+   URLs+hashes~~ — **Superseded 2026-10-06**: release-URL pinning is
+   replaced by PyPI installs (same reversal as "Install mechanism"
+   above); migrating OFM and the other lab consumers to PyPI pins is a
+   tracked follow-up in
+   [`docs/plans/versioning_pypi_plan.md`](versioning_pypi_plan.md),
+   not resolved by that plan itself.
 7. Inventory any consumers outside the projects already investigated in
    this plan before archiving `ub_code`, `tts_practice`'s in-tree package,
    or `cuas_practice`'s in-tree package.

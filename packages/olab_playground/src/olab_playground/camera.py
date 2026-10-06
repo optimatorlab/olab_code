@@ -175,6 +175,13 @@ OPTIONAL_HINTS = {
     "websocket": ("websockets", "websocket"),
     "webrtc": ("aiortc", "webrtc"),
 }
+# `ros` is not an installable pip extra (versioning_pypi_plan.md decision 6
+# dropped it from olab-camera's packaging -- rospy/sensor-msgs aren't on
+# PyPI) -- unlike the other OPTIONAL_HINTS entries, its hint can't be a
+# `pip install "olab-camera[...]"` command.
+_EXTRA_HINT_OVERRIDES = {
+    "ros": "install ROS via apt/rosdep and source your ROS environment",
+}
 CAMERA_USB_HELP = {
     "device": "Video source path or URL. Common local values: /dev/video0 or /dev/video1; RTSP/HTTP URLs also work.",
     "res_rows": "Optional processing height. Leave blank to use the camera's current resolution.",
@@ -388,7 +395,7 @@ class PlaygroundSession:
             dependency = OPTIONAL_HINTS.get(name)
             disabled = name in DISABLED_PLAYGROUND_BACKENDS
             available = not disabled and (dependency is None or importlib.util.find_spec(dependency[0]) is not None)
-            hint = "disabled in this playground" if disabled else (None if available else f'pip install "olab-camera[{dependency[1]}]"')
+            hint = "disabled in this playground" if disabled else (None if available else _EXTRA_HINT_OVERRIDES.get(dependency[1], f'pip install "olab-camera[{dependency[1]}]"'))
             payload["backends"][name] = {"constructor": _schema(cls, exclude_choices=BACKEND_SCHEMA_EXCLUDED_CHOICES), "start": _schema(getattr(cls, "start", lambda: None), exclude_choices=BACKEND_SCHEMA_EXCLUDED_CHOICES), "available": available, "hint": hint}
         for name in FEATURES:
             payload["features"][name] = _schema(getattr(CameraUSB, name))

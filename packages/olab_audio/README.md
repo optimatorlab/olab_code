@@ -8,24 +8,19 @@ cross-rate PCM conversion) and `analysis` (a DSP/teaching/research toolkit:
 `normalize`, matplotlib plotting).
 
 Extracted from `~/Projects/ofm/ofm/sensor/ub_audio.py` per
-[`docs/plans/olab_packages_reorg_plan.md`](../../docs/plans/olab_packages_reorg_plan.md)'s
+[`docs/plans/olab_packages_reorg_plan.md`](https://github.com/optimatorlab/olab_code/blob/main/docs/plans/olab_packages_reorg_plan.md)'s
 "`olab_audio` v1 scope" section and Migration sequence step 5.
 
 ## Installing
 
-Normal installation (no `olab_code` checkout required):
-
 ```bash
 python3 -m venv venv
 source venv/bin/activate
-pip install "olab-audio @ git+https://github.com/optimatorlab/olab_code.git@<tag-or-sha>#subdirectory=packages/olab_audio"
+pip install olab-audio
 ```
 
 Add `resample`, `analysis`, and/or `mp3` as needed:
-`pip install "olab-audio[analysis,mp3] @ git+...#subdirectory=packages/olab_audio"`.
-
-Once release wheels exist, prefer pinning the release's exact URL and
-SHA-256 hash instead of a git reference.
+`pip install "olab-audio[analysis,mp3]"`.
 
 **Local development**, against an `olab_code` checkout:
 

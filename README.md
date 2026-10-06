@@ -5,12 +5,26 @@ A monorepo for packages developed, and used, by the lab. Each package under
 installable — there is no umbrella runtime distribution. See
 [`CONTRIBUTING.md`](CONTRIBUTING.md) for release/development conventions
 and [`docs/plans/olab_packages_reorg_plan.md`](docs/plans/olab_packages_reorg_plan.md)
-for the full design rationale.
+for the full design rationale, plus
+[`docs/plans/versioning_pypi_plan.md`](docs/plans/versioning_pypi_plan.md)
+for the PyPI publishing plan.
+
+## Installing
+
+```bash
+pip install olab-<pkg>   # e.g. pip install olab-camera
+```
+
+Each package's own README documents its extras (e.g.
+`pip install "olab-camera[yolo,websocket]"`). Workspace-internal
+dependencies (e.g. `olab-camera` needing `olab-utils`) resolve
+automatically from PyPI once published — no separate install step.
 
 | Package | Distribution | Status |
 |---|---|---|
-| [`olab_camera`](packages/olab_camera/) | `olab-camera` | scaffold only, not yet migrated |
-| [`olab_utils`](packages/olab_utils/) | `olab-utils` | scaffold only, not yet migrated |
-| [`olab_rf`](packages/olab_rf/) | `olab-rf` | scaffold only, not yet migrated |
-| [`olab_voice`](packages/olab_voice/) | `olab-voice` | scaffold only, not yet migrated |
-| [`olab_audio`](packages/olab_audio/) | `olab-audio` | scaffold only, not yet migrated |
+| [`olab_camera`](packages/olab_camera/) | `olab-camera` | migrated; PyPI release pending |
+| [`olab_utils`](packages/olab_utils/) | `olab-utils` | migrated; PyPI release pending |
+| [`olab_rf`](packages/olab_rf/) | `olab-rf` | migrated; PyPI release pending |
+| [`olab_voice`](packages/olab_voice/) | `olab-voice` | migrated; PyPI release pending |
+| [`olab_audio`](packages/olab_audio/) | `olab-audio` | migrated; PyPI release pending |
+| [`olab_playground`](packages/olab_playground/) | `olab-playground` | migrated; PyPI release pending |

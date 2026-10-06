@@ -18,8 +18,12 @@ Read it before making structural changes to the workspace.
 - **Extras split**: keep `[project].dependencies` light; put
   heavy/specialized dependencies behind
   `[project.optional-dependencies]`, plus an `all` convenience bundle.
-  Follow `olab_camera`'s pattern (`yolo`, `ros`, `websocket`, `webrtc`,
-  `all`).
+  Follow `olab_camera`'s pattern (`yolo`, `websocket`, `webrtc`, `all`).
+  An extra must actually be installable via plain `pip` from PyPI — if a
+  dependency isn't published there (e.g. `olab_camera`'s old `ros` extra,
+  dropped per `docs/plans/versioning_pypi_plan.md` decision 6), it isn't
+  an extra; document the real install path (system package manager,
+  vendor instructions) in the package's own README instead.
 - **Self-contained docs**: each package owns its own `README.md`/`docs/`/
   `examples/`/`tests/`. The repo-root `README.md` is a short catalogue
   only — it must not become a second full manual.
@@ -31,62 +35,90 @@ Read it before making structural changes to the workspace.
 
 ## Versioning and releases
 
+Packages are published to public PyPI — see
+[`docs/plans/versioning_pypi_plan.md`](docs/plans/versioning_pypi_plan.md)
+for the full design (this reverses the reorg plan's earlier "no package
+index" decision; broader-than-lab distribution, students installing with
+plain `pip`, is now the actual goal).
+
 - Bump a package's own version (PEP 440, starting at `0.1.0` for each
   new/renamed distribution) in its `pyproject.toml` as part of a normal
-  PR. This does **not** trigger a release by itself.
+  PR, **and add a matching section to that package's own
+  `CHANGELOG.md`** (Keep-a-Changelog-style — see any package's
+  `CHANGELOG.md` for the format). This does **not** trigger a release by
+  itself. If the change needs a newer sibling package, raise that
+  sibling's lower bound in `dependencies`/`optional-dependencies` — and
+  release the sibling first.
 - Releasing is a separate, deliberate act: after `ci.yml` has passed on a
   commit, a maintainer creates an immutable, package-namespaced git tag —
   e.g. `olab-voice-v0.1.0` (never a bare `v0.1.0`, which would collide
   across packages in this repo). The tag push triggers `release.yml`,
-  which rebuilds the package and attaches the wheel + sdist to a GitHub
-  Release.
+  which builds the package, smoke-tests the wheel in a clean venv, then
+  **publishes to PyPI behind a manual-approval `pypi` environment
+  gate**, and only then creates a GitHub Release (wheel + sdist attached,
+  release notes taken from the CHANGELOG section for that version).
 - No commit-message parsing, no auto-computed version numbers, no
   CI-triggered auto-release on merge to `main`.
 
-**Do not tag/release any package still at its scaffold `0.1.0`** (no
-migrated source yet — see each package's `README.md` for status). The
-release workflow does not check for this; tagging a scaffold package would
-publish an empty distribution.
+**PyPI versions are permanent** — once a version number is uploaded to
+PyPI, it can never be re-uploaded (even after deletion), even if the
+release turns out to be broken. If a release is bad, **yank it** on PyPI
+(which keeps it resolvable for anyone already pinned to it, but hides it
+from new installs) and ship a new patch version — don't delete and reuse
+the number; PyPI permits deleting a release, but the freed-up filename
+still can't be re-uploaded. `release.yml`'s CHANGELOG-section check still fails a tag push
+that forgot to bump the version or add a changelog section, but nothing
+stops a working-but-unwanted release once it's live; yanking is the
+recovery path, not prevention.
+
+### Ongoing release checklist
+
+1. PR: bump `version` in `packages/<pkg>/pyproject.toml` and add the
+   matching `CHANGELOG.md` section.
+2. Merge; confirm `ci.yml` is green on that `main` commit.
+3. `git tag olab-<pkg>-v<ver> <sha> && git push origin olab-<pkg>-v<ver>`.
+4. Approve the `pypi` environment gate once build + smoke-test pass.
+5. Broken release? **Yank** it on PyPI and release a new patch version;
+   never try to re-upload the same number.
+
+`release.yml` also has a `workflow_dispatch` path (inputs: package, git
+ref) for rehearsing a release against TestPyPI instead of real PyPI,
+skipping the GitHub Release step — useful before a package's first real
+publish. A TestPyPI rehearsal at a non-`0.1.0` version (e.g. a
+`0.1.0.devN`-style version, since TestPyPI versions are just as permanent
+as PyPI's — never reuse one either) needs its own matching `##
+[0.1.0.devN]` `CHANGELOG.md` section on the dispatched ref, same as a real
+tag push.
 
 ## Installing a package
 
-Until per-package release CI produces tagged GitHub Releases, install
-directly from a subdirectory of this repo:
+```
+pip install olab-<pkg>
+```
+
+For a pre-release/dev checkout instead, install directly from a
+subdirectory of this repo:
 
 ```
 pip install "git+https://github.com/optimatorlab/olab_code.git@<tag-or-sha>#subdirectory=packages/<pkg>"
 ```
 
-Once a package has a tagged release, prefer pinning the release wheel's
-exact URL and SHA-256 hash instead.
-
 ### Workspace-internal dependencies (e.g. `olab_camera` → `olab_utils`)
 
-**Deliberate policy decision**, not just a migration-specific workaround:
-if a package depends on another package in this workspace, that dependency
-is not published anywhere `pip` can resolve it from by name — there is no
-package index for this workspace (see "Deferred: a real package index" in
-the plan doc), and none is planned unless broader-than-lab distribution
-becomes an actual goal. `pip install <dependent-package>` alone will
-therefore fail to resolve its workspace-internal dependency.
-
-**The chosen mechanism: consumers/deployment manifests install every
-workspace-internal dependency explicitly, pinned, alongside the package
-that needs it, in the same `pip install` invocation** (see
-[`packages/olab_camera/README.md`](packages/olab_camera/README.md) for a
-worked example — `olab-utils` and `olab-camera` are both listed in one
-command). This applies to both the git+subdirectory mechanism above and to
-pinned release wheels once they exist. The alternatives considered and
-rejected: encoding a pinned direct-reference to the matching dependency
-artifact inside each release's own metadata (real release-automation work,
-not yet built, and not clearly worth it for one dependency edge), and
-standing up a real package index now (explicitly deferred elsewhere in
-this doc as unneeded infra investment).
+Workspace-internal dependencies (e.g. `olab_camera` depending on
+`olab_utils`) are declared as ordinary PyPI dependencies with a **lower
+bound**, e.g. `olab-utils>=0.1.0` — once both packages are published,
+`pip install olab-camera` resolves `olab-utils` from PyPI by name on its
+own, the same as any other dependency. Raise the lower bound only when
+the dependent package starts needing a newer sibling feature, and release
+the sibling first (see the release checklist above).
 
 **CI implication**: a package's path filter in `ci.yml` must also include
 its workspace-internal dependencies' paths — see the `olab_camera` filter
-entry, which also watches `packages/olab_utils/**` — so a dependency-only
-change still exercises the dependent package's install/test/build job.
+entry, which also watches `packages/olab_utils/**`, and the
+`olab_playground` entry, which watches both `packages/olab_camera/**` and
+`packages/olab_utils/**` — so a dependency-only change still exercises
+the dependent package's install/test/build job.
 
 ## Testing
 

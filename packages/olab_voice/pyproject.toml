@@ -8,9 +8,25 @@ version = "0.1.0"
 description = "Local-first voice capture, STT, TTS, wake phrase, and transport adapters."
 readme = "README.md"
 requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Optimator Lab" }]
 dependencies = [
     "numpy>=1.24,<3",
 ]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Operating System :: POSIX :: Linux",
+]
+
+[project.urls]
+Homepage = "https://github.com/optimatorlab/olab_code/tree/main/packages/olab_voice"
+Source = "https://github.com/optimatorlab/olab_code/tree/main/packages/olab_voice"
+Issues = "https://github.com/optimatorlab/olab_code/issues"
+Changelog = "https://github.com/optimatorlab/olab_code/blob/main/packages/olab_voice/CHANGELOG.md"
 
 [project.optional-dependencies]
 dev = [

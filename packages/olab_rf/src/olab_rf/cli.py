@@ -128,7 +128,7 @@ def demo_server_main(argv: Sequence[str] | None = None) -> int:
     except ImportError as exc:
         raise SystemExit(
             "Reinstall olab-rf with the web extra, e.g. "
-            "pip install --upgrade 'olab-rf[web] @ git+https://github.com/optimatorlab/olab_code.git@<tag-or-sha>#subdirectory=packages/olab_rf'"
+            "pip install --upgrade 'olab-rf[web]'"
         ) from exc
     config_path = _default_config_path(args.config)
     config = load_config(config_path)
