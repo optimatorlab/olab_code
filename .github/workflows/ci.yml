@@ -63,14 +63,13 @@ jobs:
       - name: Install system prerequisites for olab_audio
         if: matrix.package == 'olab_audio'
         run: sudo apt-get update && sudo apt-get install -y portaudio19-dev
-      # pyzbar (olab_camera's default QR/barcode decoder) is a base
-      # dependency, not an opt-in extra, but it only wraps the native ZBar
-      # library -- it needs libzbar0 present at runtime, or decoding raises
-      # "Unable to find zbar shared library" (not caught by pip installing
-      # the pyzbar wheel itself). olab_playground depends on olab_camera, so
-      # it needs the same system library.
+      # pyzbar (addBarcode() / addQR(decoder='pyzbar')) is olab_camera's
+      # opt-in `barcode` extra, and it only wraps the native ZBar library --
+      # it needs libzbar0 at runtime, or importing it raises "Unable to find
+      # zbar shared library". It's tiny, so olab_camera's job installs the
+      # extra (see below) to keep the pyzbar tests running instead of skipping.
       - name: Install system prerequisites for olab_camera
-        if: matrix.package == 'olab_camera' || matrix.package == 'olab_playground'
+        if: matrix.package == 'olab_camera'
         run: sudo apt-get update && sudo apt-get install -y libzbar0
       # olab_camera depends on olab_utils (a workspace-internal package) —
       # install it from its local path first, rather than resolving it from
@@ -90,6 +89,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install "./packages/${{ matrix.package }}"
           pip install pytest
+      - name: Install olab_camera's barcode extra (pyzbar)
+        if: matrix.package == 'olab_camera'
+        run: pip install "./packages/olab_camera[barcode]"
       # Only base-dependency tests run here, deliberately — hardware/model
       # *extras* (ROS, STT/TTS models, etc.) are opt-in per CONTRIBUTING.md's
       # Testing section and must not be installed on every PR. Packages

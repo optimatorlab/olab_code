@@ -1502,7 +1502,11 @@ class _ROI():
 		Args:
 			camObject: Parent Camera instance.
 			idName (str): Unique identifier for this ROI tracker.
-			roiTrackerName (str): Name of OpenCV tracker algorithm to use.
+			roiTrackerName (str): Name (case-insensitive) of the OpenCV tracker
+				algorithm to use -- must be a key of olab_utils.OPENCV_OBJECT_TRACKERS
+				(after lowercasing). Normally validated and normalized by the caller
+				(Camera.addROI()) before this runs; the lookup here is a safety net
+				for direct construction.
 			roiBB (tuple): Initial bounding box as (x, y, width, height).
 			fps_target (float): Target tracking rate in Hz.
 			postFunction (callable): Callback executed after each tracking update.
@@ -1518,7 +1522,17 @@ class _ROI():
 			self.decorationID = None
 
 			self.roiBB      = roiBB  #  (x, y, w, h)
-			self.roiTracker = olab_utils.OPENCV_OBJECT_TRACKERS[roiTrackerName]()
+			# Safety net: Camera.addROI() already validates/normalizes roiTrackerName
+			# and returns before constructing _ROI for an unavailable name -- this
+			# only matters for direct construction, which real callers shouldn't do.
+			trackerFactory = olab_utils.OPENCV_OBJECT_TRACKERS.get(str(roiTrackerName).lower())
+			if (trackerFactory is None):
+				raise ValueError(
+					f"tracker '{roiTrackerName}' is not available in the installed OpenCV "
+					f"build (available: {sorted(olab_utils.OPENCV_OBJECT_TRACKERS)}). "
+					"Trackers other than 'mil' require opencv-contrib-python; 'mil' "
+					"(any case) is always available on a clean opencv-python install.")
+			self.roiTracker = trackerFactory()
 			self.roiTracker.init(self.camObject.getFrameCopy(), self.roiBB)
 
 			# We must maintain same resolution as the camera feed.

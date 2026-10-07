@@ -823,6 +823,18 @@ camera.aruco[ARUCO_DICTIONARY].stop()
 
 ### Detect Barcodes and QR Codes
 
+`addBarcode()` uses pyzbar, which is **not** part of the base install. Install
+the `barcode` extra plus the ZBar system library first:
+
+```bash
+pip install "olab-camera[barcode]"
+sudo apt install libzbar0   # Linux/Raspberry Pi; on macOS: brew install zbar
+                            # (Windows: nothing extra, pyzbar's wheel bundles ZBar)
+```
+
+Without them, `addBarcode()` logs one error explaining this and starts nothing.
+(For QR codes alone, `addQR()`'s default `decoder='cv2'` needs neither.)
+
 ```python
 # Create a function that will be called each time a barcode or QR code is detected:
 def postBarcode(argsDict):
@@ -1126,17 +1138,16 @@ native-tracked results into this API. RF-DETR's existing
 
 All four initial algorithms run locally and this API downloads neither models
 nor tracker assets. McByte is intentionally deferred; its mask mode will need
-explicit pre-provisioned local assets. The `trackers` dependency may install
-plain OpenCV; if that displaces this package's required contrib runtime, use
-the README's existing OpenCV recovery command.
+explicit pre-provisioned local assets. The `trackers` dependency requires
+plain `opencv-python`, same as the base package -- no conflicting install.
 
 ### RF-DETR (local detection and segmentation)
 
 RF-DETR is optional: install `olab-camera[rfdetr]` and provision model
 checkpoints in `~/Projects/olab_models/` before starting the program. Relative
 `weights_path` names resolve in that shared user directory; absolute paths are
-also accepted. Keep the project's
-`opencv-contrib-python` runtime active. `addRFDETR()` never downloads weights
+also accepted. `rfdetr` requires plain `opencv-python`, same as the base
+package -- no conflicting install. `addRFDETR()` never downloads weights
 and never uses a hosted Roboflow service.
 
 #### One-time model provisioning

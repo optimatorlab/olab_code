@@ -104,8 +104,16 @@ Those are the YOLO11/YOLO26 detect, segment, classify, pose, and OBB small
 filenames. `track` uses the same plain detect checkpoint as `detect`; there is
 no `-track` filename family. Browser startup never downloads a model.
 
-If a manual Ultralytics installation replaces the contrib OpenCV build, recover
-CSRT support with the existing `olab_camera` procedure:
+`olab-camera` (and Ultralytics) both depend on plain `opencv-python`, so
+installing YOLO support here doesn't conflict with anything (closes #70).
+ArUco, QR, and face detection all work on plain `opencv-python`; only
+`Camera.addROI()`'s classic object trackers other than `'MIL'` need
+`opencv-contrib-python` installed separately (not used by this playground's
+UI today). If you want those trackers, uninstall both `opencv-python` and
+`opencv-contrib-python` first, then install only `opencv-contrib-python` --
+installing it on top of an existing plain install instead leaves two
+distributions sharing the same `cv2/` files, which a later reinstall or
+uninstall can then clobber or delete entirely:
 
 ```bash
 python -m pip uninstall -y opencv-python opencv-contrib-python

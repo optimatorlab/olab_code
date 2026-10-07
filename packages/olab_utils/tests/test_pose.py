@@ -174,7 +174,7 @@ def test_arucoFindCameraPoseGlobal_deprecated_alias_still_works_and_warns():
 def _synthetic_qr_image(payload, skew_frac=0.0):
     '''
     Render `payload` as a QR bitmap via cv2.QRCodeEncoder (already a transitive
-    dependency via opencv-contrib-python -- no need for the separate `qrcode`
+    dependency via opencv-python -- no need for the separate `qrcode`
     PyPI package), scale it up, add a quiet-zone border, and optionally warp it
     perspective-wise to simulate a skewed/oblique viewing angle. Produces a
     square canvas (when skew_frac=0) so np.rot90() can be used directly for
@@ -244,7 +244,10 @@ def test_pyzbar_qr_polygon_order_verification_documents_limitation():
     independently confirm the limitation still holds if zbar's algorithm
     ever changes.
     '''
-    pyzbar = pytest.importorskip('pyzbar.pyzbar')
+    # exc_type=ImportError: with pyzbar installed but the ZBar system library
+    # missing, the import raises a plain ImportError, which pytest>=9's
+    # importorskip no longer skips on by default (only ModuleNotFoundError).
+    pyzbar = pytest.importorskip('pyzbar.pyzbar', exc_type=ImportError)
     base = _synthetic_qr_image('OLAB_TEST_PAYLOAD')
 
     for k in [0, 1, 2, 3]:

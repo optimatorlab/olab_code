@@ -12,10 +12,9 @@ license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Optimator Lab" }]
 dependencies = [
-    "olab-utils>=0.1.0",
+    "olab-utils>=0.2.0",
     "numpy>=1.21.0",
-    "opencv-contrib-python>=4.10.0",
-    "pyzbar>=0.1.9",
+    "opencv-python>=4.10.0",
     # TLS is not optional: every streaming mode (including the MJPEG
     # default) serves over HTTPS/WSS. cryptography auto-generates a local
     # self-signed cert on first use (see olab_camera.tls) instead of
@@ -44,6 +43,12 @@ rfdetr = ["rfdetr==1.9.0", "trackers==2.6.0"]
 websocket = ["websockets>=12.0"]
 webrtc = ["aiortc>=1.9.0", "aiohttp>=3.9.0"]
 realsense = ["pyrealsense2>=2.55"]
+# addBarcode() and addQR(decoder='pyzbar'). pyzbar only wraps the ZBar C
+# library: its Windows wheels bundle it, but on Linux/Raspberry Pi/macOS it
+# also needs the system package (libzbar0 / `brew install zbar`), which pip
+# can't install -- so it's opt-in rather than a half-working base dependency.
+# addQR()'s default decoder='cv2' needs neither.
+barcode = ["pyzbar>=0.1.9"]
 # openmv itself only requires Python >=3.8 (confirmed against the published
 # 1.0.7 wheel metadata) -- it follows the base package's own >=3.10 floor,
 # no separate/stricter version requirement.
@@ -59,7 +64,7 @@ openmv = ["openmv==1.0.7"]
 # not depend on olab_audio otherwise, so this stays an extra, guarded the
 # same way as the others (see av_webcam.py's try/except import).
 av = ["olab-audio>=0.1.0"]
-all = ["olab-camera[yolo,tracking,rfdetr,websocket,webrtc,realsense,openmv,av]"]
+all = ["olab-camera[yolo,tracking,rfdetr,websocket,webrtc,realsense,barcode,openmv,av]"]
 
 [project.scripts]
 olab-camera-generate-cert = "olab_camera.tls:generate_cert_main"

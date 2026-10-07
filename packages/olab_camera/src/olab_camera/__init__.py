@@ -14,7 +14,8 @@ Main Features:
     - ROS topic publishing (compressed and raw images)
     - ArUco marker detection and tracking
     - QR code detection (skew-robust, selectable decoder)
-    - Barcode/QR code detection (generic pyzbar-based scanning)
+    - Barcode/QR code detection (generic pyzbar-based scanning; needs the
+      `barcode` extra plus the ZBar system library)
     - Face detection
     - Camera calibration tools
     - Timelapse capture
@@ -39,7 +40,9 @@ Classes:
 
 Dependencies:
     - numpy
-    - opencv-contrib-python (for ArUco support)
+    - opencv-python (ArUco, QR, and face detection all work on the plain build;
+      only classic object trackers other than MIL need opencv-contrib-python
+      instead -- see Camera.addROI())
     - websockets>=12.0          (optional, for WebSocket streaming)
     - aiortc>=1.9.0, aiohttp>=3.9.0  (optional, for WebRTC streaming)
     - rospy, cv_bridge, sensor_msgs  (optional, for ROS support)

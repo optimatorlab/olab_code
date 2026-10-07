@@ -191,16 +191,13 @@ jobs:
           python3 -m venv "$RUNNER_TEMP/smoke"
           echo "$RUNNER_TEMP/smoke/bin" >> "$GITHUB_PATH"
 
-      # Same system prerequisites ci.yml installs for these packages -- see
-      # its "Install system prerequisites" steps' comments for why each is
-      # needed.
+      # Same system prerequisite ci.yml installs for olab_audio -- see its
+      # "Install system prerequisites" step's comment for why. (olab_camera's
+      # libzbar0 isn't needed here: the smoke test installs the base wheel,
+      # and pyzbar is only in its opt-in `barcode` extra.)
       - name: Install system prerequisites for olab_audio
         if: needs.build.outputs.package == 'olab_audio'
         run: sudo apt-get update && sudo apt-get install -y portaudio19-dev
-
-      - name: Install system prerequisites for olab_camera
-        if: needs.build.outputs.package == 'olab_camera' || needs.build.outputs.package == 'olab_playground'
-        run: sudo apt-get update && sudo apt-get install -y libzbar0
 
       - name: Install the built wheel (from PyPI)
         if: github.event_name == 'push'
