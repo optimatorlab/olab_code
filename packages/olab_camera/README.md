@@ -23,9 +23,9 @@ one at a time:
 
 | Extra | Adds | Notes |
 |---|---|---|
-| `yolo` | `ultralytics` (YOLO object detection) | Handles the `opencv-contrib-python`/`opencv-python` conflict below correctly on its own. |
+| `yolo` | `ultralytics` (YOLO object detection) | Both this extra and the base package depend on plain `opencv-python` -- no conflicting install. |
 | `tracking` | local SORT, ByteTrack, OC-SORT, and BoT-SORT | Detector-agnostic comparison API; no models, hosted inference, or automatic downloads. |
-| `rfdetr` | local RF-DETR detection/segmentation plus Roboflow ByteTrack | Supply an existing local checkpoint. Relative names resolve in `~/Projects/olab_models/`; absolute paths also work. The usage guide documents an explicit, one-time optional provisioning download. This feature never downloads weights or uses hosted inference at runtime. Keep `opencv-contrib-python` active using the recovery process below if a dependency installs plain OpenCV. |
+| `rfdetr` | local RF-DETR detection/segmentation plus Roboflow ByteTrack | Supply an existing local checkpoint. Relative names resolve in `~/Projects/olab_models/`; absolute paths also work. The usage guide documents an explicit, one-time optional provisioning download. This feature never downloads weights or uses hosted inference at runtime. |
 | `websocket` | `websockets` | WebSocket + JPEG streaming. |
 | `webrtc` | `aiortc`, `aiohttp` | WebRTC streaming. |
 | `ros` | — | **Dropped as a pip extra** (`rospy`/`sensor-msgs` aren't on PyPI). To use `CameraROS`, install ROS via `apt`/`rosdep` and source your ROS environment — `olab-camera` then picks up `rospy` from that environment's Python path on its own. |
@@ -43,15 +43,35 @@ pip install -e "packages/olab_camera"                       # base
 pip install -e "packages/olab_camera[yolo,websocket,webrtc]" # + extras
 ```
 
-**Watch the install order if you separately install `ultralytics`** (the
-`yolo` extra already handles this correctly): `ultralytics` pulls in
-`opencv-python`, which conflicts with `opencv-contrib-python` (required here
-for ArUco/face-detection support) — both cannot be installed at once. If you
-hit ArUco/DNN import errors after installing extra packages by hand:
+**`olab-camera` depends on plain `opencv-python`**, the same package
+`ultralytics`/`trackers`/`rfdetr` already require -- installing `[yolo]`,
+`[tracking]`, `[rfdetr]`, or `[all]` no longer installs a second, conflicting
+`cv2` distribution (closes #70). ArUco, QR, and face-detection all work on
+plain `opencv-python`; only `Camera.addROI()`'s classic object trackers other
+than `'MIL'` (any case) still need `opencv-contrib-python`. If you want those:
 
 ```bash
 pip uninstall -y opencv-python opencv-contrib-python
 pip install "opencv-contrib-python>=4.10.0"
+```
+
+Installing `opencv-contrib-python` **on top of** an existing plain
+`opencv-python` install (instead of uninstalling both first) does make the
+extra trackers available, but leaves two distributions sharing the same
+`cv2/` files -- a later `[yolo]`/`[tracking]`/`[rfdetr]` install, reinstall,
+or uninstall can then clobber or delete `cv2` entirely. Uninstall both first,
+as above, for a clean result. Note this re-creates the plain-vs-contrib
+conflict for any of those three extras, since they require plain
+`opencv-python` themselves.
+
+**Upgrading from an install that predates this change** (when `olab-utils`
+depended on `opencv-contrib-python`): the same clean-swap commands apply --
+uninstall both `opencv-python` and `opencv-contrib-python`, then install
+`opencv-python`:
+
+```bash
+pip uninstall -y opencv-python opencv-contrib-python
+pip install "opencv-python>=4.10.0"
 ```
 
 After installation:

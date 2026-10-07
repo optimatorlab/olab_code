@@ -39,7 +39,9 @@ Classes:
 
 Dependencies:
     - numpy
-    - opencv-contrib-python (for ArUco support)
+    - opencv-python (ArUco, QR, and face detection all work on the plain build;
+      only classic object trackers other than MIL need opencv-contrib-python
+      instead -- see Camera.addROI())
     - websockets>=12.0          (optional, for WebSocket streaming)
     - aiortc>=1.9.0, aiohttp>=3.9.0  (optional, for WebRTC streaming)
     - rospy, cv_bridge, sensor_msgs  (optional, for ROS support)

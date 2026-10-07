@@ -1126,17 +1126,16 @@ native-tracked results into this API. RF-DETR's existing
 
 All four initial algorithms run locally and this API downloads neither models
 nor tracker assets. McByte is intentionally deferred; its mask mode will need
-explicit pre-provisioned local assets. The `trackers` dependency may install
-plain OpenCV; if that displaces this package's required contrib runtime, use
-the README's existing OpenCV recovery command.
+explicit pre-provisioned local assets. The `trackers` dependency requires
+plain `opencv-python`, same as the base package -- no conflicting install.
 
 ### RF-DETR (local detection and segmentation)
 
 RF-DETR is optional: install `olab-camera[rfdetr]` and provision model
 checkpoints in `~/Projects/olab_models/` before starting the program. Relative
 `weights_path` names resolve in that shared user directory; absolute paths are
-also accepted. Keep the project's
-`opencv-contrib-python` runtime active. `addRFDETR()` never downloads weights
+also accepted. `rfdetr` requires plain `opencv-python`, same as the base
+package -- no conflicting install. `addRFDETR()` never downloads weights
 and never uses a hosted Roboflow service.
 
 #### One-time model provisioning

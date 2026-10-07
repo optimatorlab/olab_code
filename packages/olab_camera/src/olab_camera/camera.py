@@ -709,8 +709,13 @@ class Camera():
 		using OpenCV's tracking algorithms (e.g., KCF, CSRT, MedianFlow).
 
 		Args:
-			roiTrackerName (str): OpenCV tracker algorithm name. Examples: 'KCF', 'CSRT',
-				'MedianFlow', 'MOSSE'.
+			roiTrackerName (str): OpenCV tracker algorithm name, case-insensitive.
+				'MIL' is always available on a clean `opencv-python` install.
+				'KCF', 'CSRT', 'Boosting', 'TLD', 'MedianFlow', 'MOSSE' additionally
+				require `opencv-contrib-python` to be installed (see olab_utils.
+				OPENCV_OBJECT_TRACKERS) -- requesting one that isn't available logs
+				a clear error naming the missing dependency and returns without
+				starting tracking.
 			roiBB (tuple): Initial bounding box as (x, y, width, height) in pixels.
 			fps_target (int): Target tracking framerate. Default 5.
 			postFunction (callable, optional): Callback function executed after each tracking
@@ -738,9 +743,25 @@ class Camera():
 				self.logger.log('Error in addROI: bb is None', severity=olab_utils.SEVERITY_ERROR)
 				return
 
+			# Validate the tracker name BEFORE constructing/starting _ROI. A
+			# half-built _ROI (missing self.deque etc.) would otherwise get
+			# stored in self.roi and have its broken _decorate() registered,
+			# breaking every later frame's decorateFrame() call -- not just
+			# this one addROI() call. See issue #70.
+			trackerKey = str(roiTrackerName).lower()
+			if (trackerKey not in olab_utils.OPENCV_OBJECT_TRACKERS):
+				available = sorted(k.upper() for k in olab_utils.OPENCV_OBJECT_TRACKERS)
+				self.logger.log(
+					f"Error in addROI: tracker '{roiTrackerName}' is not available in the "
+					f"installed OpenCV build (available: {available}). Trackers other than "
+					"'MIL' require opencv-contrib-python; 'MIL' (any case) is always "
+					"available on a clean opencv-python install.",
+					severity=olab_utils.SEVERITY_ERROR)
+				return
+
 			# self.roi is a dictionary.  We'll limit ourselves to just 1 ROI thread. though.
 			idName = 'default'
-			self.roi[idName] = _ROI(self, idName, roiTrackerName, roiBB, int(fps_target), postFunction, color, decorate)
+			self.roi[idName] = _ROI(self, idName, trackerKey, roiBB, int(fps_target), postFunction, color, decorate)
 			self.roi[idName].start()
 
 		except Exception as e:

@@ -12,9 +12,9 @@ license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Optimator Lab" }]
 dependencies = [
-    "olab-utils>=0.1.0",
+    "olab-utils>=0.2.0",
     "numpy>=1.21.0",
-    "opencv-contrib-python>=4.10.0",
+    "opencv-python>=4.10.0",
     "pyzbar>=0.1.9",
     # TLS is not optional: every streaming mode (including the MJPEG
     # default) serves over HTTPS/WSS. cryptography auto-generates a local

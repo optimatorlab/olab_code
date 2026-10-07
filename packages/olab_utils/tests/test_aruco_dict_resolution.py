@@ -1,7 +1,7 @@
 """Covers olab_utils._resolveArucoDictAndParams()/arucoDetectMarkers()'s
 OpenCV-5-compatible design (issue #9) -- requires the modern cv2.aruco API
 (getPredefinedDictionary()/DetectorParameters()/ArucoDetector), since
-opencv-contrib-python>=4.10.0 is already both packages' declared minimum
+opencv-python>=4.10.0 is already both packages' declared minimum
 and the deprecated Dictionary_get()/DetectorParameters_create()/
 detectMarkers() free-function API no longer exists at all on OpenCV 5.x."""
 
@@ -32,7 +32,7 @@ def test_resolve_aruco_dict_and_params_raises_when_cv2_lacks_modern_api():
     OpenCV <4.7-style cv2.aruco (only the removed-in-5.x
     Dictionary_get()/DetectorParameters_create() API) must fail loud
     (AttributeError), not silently fall back to the wrong API shape --
-    opencv-contrib-python>=4.10.0 is the declared minimum, so this should
+    opencv-python>=4.10.0 is the declared minimum, so this should
     never happen for a correctly-installed environment.
     """
     cv2_module = types.SimpleNamespace(

@@ -12,11 +12,12 @@ _Calibrate and _Timelapse are explicitly out of scope for issue #19 -- see
 
 _Barcode, _ROI, and _Ultralytics each depend on something not guaranteed
 present on a clean core install / offline CI (native libzbar via pyzbar,
-an OpenCV-contrib legacy tracker, and the optional `ultralytics` extra +
-network access to download a model, respectively) -- `ultralytics` is
-confirmed not installed in this repo's own dev venv. Each of those three
-gets its dependency-construction boundary monkeypatched before the real
-add*() call, so these tests run deterministically everywhere.
+a real OpenCV tracker (whose behavior on a synthetic frame isn't under
+test), and the optional `ultralytics` extra + network access to download a
+model, respectively) -- `ultralytics` is confirmed not installed in this
+repo's own dev venv. Each of those three gets its dependency-construction
+boundary monkeypatched before the real add*() call, so these tests run
+deterministically everywhere.
 """
 
 import sys
@@ -239,6 +240,54 @@ def test_addROI_decorate_false_skips_registration(img, fake_roi_tracker):
 def test_addROI_decorate_true_preserves_registration(img, fake_roi_tracker, decorate_kwargs):
     cam = _make_camera_with_frame(img)
     cam.addROI(roiTrackerName='faketracker', roiBB=(10, 10, 20, 20), fps_target=10, **decorate_kwargs)
+    cam.manageDecorationsDeque()
+
+    feature = cam.roi['default']
+    assert isinstance(feature.decorationID, int)
+    assert feature.decorationID in _active_ids(cam)
+    assert len(cam.dec['active']) == 1
+
+    _stop_feature_and_drain_decorations(cam, cam.roi, 'default')
+    assert not cam.dec['active']
+
+
+def test_addROI_unavailable_tracker_logs_one_error_and_does_not_register(img, capsys):
+    """issue #70 regression: on plain opencv-python, OPENCV_OBJECT_TRACKERS only
+    has 'mil' -- requesting any other name must produce exactly one clear logged
+    error (naming opencv-contrib-python and 'MIL') and must NOT create a
+    cam.roi['default'] entry or register any decoration. Before this fix, a bad
+    name reached _ROI.__init__'s bare dict lookup, got swallowed, and left a
+    half-built _ROI that broke decorateFrame() on every subsequent frame (see
+    plan.md's Approach item 3) -- so this checks the absence of that fallout, not
+    just the log message.
+
+    'nosuchtracker' is used (not e.g. 'csrt') so this test is deterministic
+    regardless of whether opencv-contrib-python happens to be installed in
+    whatever environment runs it.
+    """
+    cam = _make_camera_with_frame(img)
+    cam.addROI(roiTrackerName='nosuchtracker', roiBB=(10, 10, 20, 20), fps_target=10)
+    cam.manageDecorationsDeque()
+
+    out = capsys.readouterr().out
+    assert out.count('Error in addROI') == 1
+    assert 'nosuchtracker' in out
+    assert 'opencv-contrib-python' in out
+    assert 'MIL' in out
+
+    assert 'default' not in cam.roi
+    assert not cam.dec['dequeAdd']
+    assert not cam.dec['active']
+
+
+def test_addROI_tracker_name_is_case_insensitive(img, fake_roi_tracker):
+    """Reviewer round-1 blocking finding: OPENCV_OBJECT_TRACKERS keys are
+    lowercase, and nothing normalized a caller's name against them before this
+    task -- so addROI(roiTrackerName='MIL', ...) (the plan's own error-message
+    suggestion, and the kind of name a user would naturally type) must actually
+    work, not fail."""
+    cam = _make_camera_with_frame(img)
+    cam.addROI(roiTrackerName='FAKETRACKER', roiBB=(10, 10, 20, 20), fps_target=10)
     cam.manageDecorationsDeque()
 
     feature = cam.roi['default']

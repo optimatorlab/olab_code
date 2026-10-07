@@ -49,6 +49,16 @@ def test_resolve_tracker_factory_falls_back_when_legacy_lacks_the_tracker():
     assert olab_utils._resolveTrackerFactory("CSRT", cv2_module=cv2_module)() == "top-level-csrt"
 
 
+def test_resolve_tracker_factory_returns_none_when_neither_shape_has_it():
+    """issue #70: plain opencv-python has no cv2.legacy at all and lacks the
+    classic-tracker factories other than MIL -- this must return None (so
+    _buildOpenCvObjectTrackers can omit the tracker) instead of raising
+    AttributeError and crashing `import olab_utils` outright."""
+    cv2_module = types.SimpleNamespace()  # no legacy, no top-level factory at all
+
+    assert olab_utils._resolveTrackerFactory("CSRT", cv2_module=cv2_module) is None
+
+
 def test_build_opencv_object_trackers_covers_all_known_trackers():
     cv2_module = types.SimpleNamespace(
         TrackerCSRT_create=_sentinel("csrt"),
@@ -69,10 +79,28 @@ def test_build_opencv_object_trackers_covers_all_known_trackers():
         assert factory() == key
 
 
+def test_build_opencv_object_trackers_skips_unavailable_trackers():
+    """issue #70's actual fix: on plain opencv-python (no cv2.legacy, only
+    TrackerMIL_create at the top level), OPENCV_OBJECT_TRACKERS must end up
+    with only 'mil' -- not raise, and not include keys for the 6 missing
+    trackers."""
+    cv2_module = types.SimpleNamespace(TrackerMIL_create=_sentinel("mil"))
+
+    trackers = olab_utils._buildOpenCvObjectTrackers(cv2_module=cv2_module)
+
+    assert set(trackers.keys()) == {"mil"}
+    assert trackers["mil"]() == "mil"
+
+
 def test_real_opencv_object_trackers_resolve_without_error():
-    """Sanity check against whatever OpenCV is actually installed in this environment."""
-    assert set(olab_utils.OPENCV_OBJECT_TRACKERS.keys()) == {
-        "csrt", "kcf", "boosting", "mil", "tld", "medianflow", "mosse",
-    }
+    """Sanity check against whatever OpenCV is actually installed in this
+    environment -- tolerant of either flavor (issue #70): 'mil' must always be
+    present, every key must be one of the 7 known trackers, and every value
+    must be callable. (Previously asserted all 7 were always present, which
+    only held for opencv-contrib-python; plain opencv-python only has MIL.)"""
+    known = {"csrt", "kcf", "boosting", "mil", "tld", "medianflow", "mosse"}
+
+    assert "mil" in olab_utils.OPENCV_OBJECT_TRACKERS
+    assert set(olab_utils.OPENCV_OBJECT_TRACKERS.keys()) <= known
     for factory in olab_utils.OPENCV_OBJECT_TRACKERS.values():
         assert callable(factory)

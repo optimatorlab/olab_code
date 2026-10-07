@@ -22,7 +22,7 @@ from olab_camera.camera import Camera
 
 def _synthetic_qr_image(payload, skew_frac=0.0):
     '''Render `payload` as a QR image via cv2.QRCodeEncoder (already a
-    transitive dependency via opencv-contrib-python), optionally warped to
+    transitive dependency via opencv-python), optionally warped to
     simulate a skewed/oblique viewing angle.'''
     encoder = cv2.QRCodeEncoder.create()
     small = encoder.encode(payload)

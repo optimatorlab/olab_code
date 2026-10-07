@@ -101,8 +101,12 @@ def _resolveTrackerFactory(name, cv2_module=cv2):
 	at the top level in both API shapes. Detecting capability directly
 	(rather than guessing from `cv2.__version__`, which broke outright on
 	OpenCV 5.x) is robust to any future OpenCV release that keeps either
-	shape -- and raises a clear AttributeError, rather than silently
-	picking the wrong shape, for one that has neither.
+	shape -- and returns None, rather than silently picking the wrong shape
+	or raising, for one that has neither (e.g. every tracker but MIL on
+	plain opencv-python, which lacks `cv2.legacy` entirely -- see issue
+	#70). _buildOpenCvObjectTrackers() then omits that tracker from
+	OPENCV_OBJECT_TRACKERS instead of letting the whole module fail to
+	import.
 
 	`cv2_module` is injectable for testing (see tests/test_trackers.py) --
 	real callers should never pass it.
@@ -111,13 +115,18 @@ def _resolveTrackerFactory(name, cv2_module=cv2):
 	factory_name = f'Tracker{name}_create'
 	if (legacy is not None) and hasattr(legacy, factory_name):
 		return getattr(legacy, factory_name)
-	return getattr(cv2_module, factory_name)
+	return getattr(cv2_module, factory_name, None)
 
 
 def _buildOpenCvObjectTrackers(cv2_module=cv2):
-	'''Build the {name: factory} dict for OPENCV_OBJECT_TRACKERS. See _resolveTrackerFactory().'''
+	'''
+	Build the {name: factory} dict for OPENCV_OBJECT_TRACKERS, containing
+	only the trackers `cv2_module` actually provides (see
+	_resolveTrackerFactory()). On plain opencv-python this is just
+	{'mil': ...}; on opencv-contrib-python, all 7 keys as before.
+	'''
 	return {
-		key: _resolveTrackerFactory(name, cv2_module=cv2_module)
+		key: factory
 		for key, name in (
 			('csrt', 'CSRT'),
 			('kcf', 'KCF'),
@@ -127,6 +136,7 @@ def _buildOpenCvObjectTrackers(cv2_module=cv2):
 			('medianflow', 'MedianFlow'),
 			('mosse', 'MOSSE'),
 		)
+		if (factory := _resolveTrackerFactory(name, cv2_module=cv2_module)) is not None
 	}
 
 
@@ -166,7 +176,7 @@ def _resolveArucoDictAndParams(dictID, cv2_module=cv2):
 	cv2_module.aruco.getPredefinedDictionary()/DetectorParameters().
 
 	Requires OpenCV >=4.7 (the modern cv2.aruco dict/params API) -- both
-	packages' pyproject.toml already declare opencv-contrib-python>=4.10.0,
+	packages' pyproject.toml already declare opencv-python>=4.10.0,
 	well past that boundary, and the deprecated Dictionary_get()/
 	DetectorParameters_create() API this used to fall back to no longer
 	exists at all on OpenCV 5.x. Raises AttributeError (via cv2_module.aruco)
