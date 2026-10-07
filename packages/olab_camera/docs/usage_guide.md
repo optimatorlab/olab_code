@@ -823,6 +823,18 @@ camera.aruco[ARUCO_DICTIONARY].stop()
 
 ### Detect Barcodes and QR Codes
 
+`addBarcode()` uses pyzbar, which is **not** part of the base install. Install
+the `barcode` extra plus the ZBar system library first:
+
+```bash
+pip install "olab-camera[barcode]"
+sudo apt install libzbar0   # Linux/Raspberry Pi; on macOS: brew install zbar
+                            # (Windows: nothing extra, pyzbar's wheel bundles ZBar)
+```
+
+Without them, `addBarcode()` logs one error explaining this and starts nothing.
+(For QR codes alone, `addQR()`'s default `decoder='cv2'` needs neither.)
+
 ```python
 # Create a function that will be called each time a barcode or QR code is detected:
 def postBarcode(argsDict):

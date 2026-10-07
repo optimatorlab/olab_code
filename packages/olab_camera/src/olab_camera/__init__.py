@@ -14,7 +14,8 @@ Main Features:
     - ROS topic publishing (compressed and raw images)
     - ArUco marker detection and tracking
     - QR code detection (skew-robust, selectable decoder)
-    - Barcode/QR code detection (generic pyzbar-based scanning)
+    - Barcode/QR code detection (generic pyzbar-based scanning; needs the
+      `barcode` extra plus the ZBar system library)
     - Face detection
     - Camera calibration tools
     - Timelapse capture

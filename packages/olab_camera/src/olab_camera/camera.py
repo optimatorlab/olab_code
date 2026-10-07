@@ -39,6 +39,26 @@ except Exception as e:
 	CompressedImage = None
 
 
+def _pyzbarUnavailableReason():
+	'''
+	Return None if pyzbar and its ZBar system library both load, else a
+	user-facing explanation of how to get them.
+
+	pyzbar is the opt-in `barcode` extra. Even when the Python package is
+	installed, importing it raises a plain ImportError if the ZBar shared
+	library is missing (Linux/Raspberry Pi/macOS need it from the OS), so
+	this checks the import itself rather than just whether pyzbar exists.
+	'''
+	try:
+		from pyzbar import pyzbar  # noqa: F401
+	except ImportError as e:
+		return (f"pyzbar is unavailable ({e}). Install the olab-camera[barcode] extra "
+				"(pip install \"olab-camera[barcode]\") plus the ZBar system library: "
+				"'sudo apt install libzbar0' on Linux/Raspberry Pi, 'brew install zbar' "
+				"on macOS (Windows pyzbar wheels already include it).")
+	return None
+
+
 class Camera():
 	"""Base class for all camera implementations in the UB camera framework.
 
@@ -486,7 +506,8 @@ class Camera():
 				symbol's own finder-pattern structure -- safe to use for pose. 'pyzbar'
 				uses the pyzbar library; its corner order is not reliably anchored to the
 				symbol's frame, so if you compute pose from its corners, only
-				distance/position are meaningful, not orientation -- see _QRCode's
+				distance/position are meaningful, not orientation ('pyzbar' also needs the
+				`barcode` extra plus the ZBar system library -- see addBarcode()) -- see _QRCode's
 				docstring.
 			ids_of_interest (list, optional): If given, only these decoded payload
 				strings are reported at all -- same parameter name/purpose as
@@ -519,6 +540,12 @@ class Camera():
 			if (decoder not in ('cv2', 'pyzbar')):
 				self.logger.log(f"Error in addQR: unknown decoder '{decoder}'; expected 'cv2' or 'pyzbar'", severity=olab_utils.SEVERITY_ERROR)
 				return
+
+			if (decoder == 'pyzbar'):
+				reason = _pyzbarUnavailableReason()
+				if (reason is not None):
+					self.logger.log(f"Error in addQR: {reason} Or use the default decoder='cv2', which needs neither.", severity=olab_utils.SEVERITY_ERROR)
+					return
 
 			if (idName in self.qr):
 				if (self.qr[idName].isThreadActive):
@@ -590,11 +617,19 @@ class Camera():
 				call addBarcode() again.
 
 		Notes:
+			- Requires the `barcode` extra (`pip install "olab-camera[barcode]"`) plus
+			  the ZBar system library (`libzbar0` on Linux/Raspberry Pi, `brew install
+			  zbar` on macOS); without them this logs one error and starts nothing.
 			- Only one barcode detection instance ('default') is allowed at a time.
 			- Detection results include barcode data, type, and corner coordinates.
 		"""
 		# Start pyzbar to track barcodes/QRcodes
 		try:
+			reason = _pyzbarUnavailableReason()
+			if (reason is not None):
+				self.logger.log(f"Error in addBarcode: {reason}", severity=olab_utils.SEVERITY_ERROR)
+				return
+
 			# self.barcode is a dictionary.  We'll limit ourselves to just 1 barcode thread. though.
 			idName = 'default'
 

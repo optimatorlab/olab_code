@@ -11,6 +11,7 @@ from a user's postFunction, per docs/usage_guide.md). These tests therefore
 only cover the new _QRCode class and the pose-composition helpers.
 """
 
+import sys
 import time
 
 import numpy as np
@@ -163,6 +164,9 @@ def test_addQR_cv2_decoder_corners_usable_for_pose_via_findTagPose():
 
 
 def test_addQR_pyzbar_decoder_also_decodes():
+    # pyzbar is the opt-in `barcode` extra and also needs the ZBar system
+    # library; exc_type=ImportError covers the "installed but no libzbar" case.
+    pytest.importorskip('pyzbar.pyzbar', exc_type=ImportError)
     img = _synthetic_qr_image('PAD_A', skew_frac=0.0)
     cam = _make_camera_with_frame(img)
 
@@ -182,6 +186,21 @@ def test_addQR_unknown_decoder_does_not_raise_and_does_not_register():
 
     cam.addQR(idName='default', decoder='not-a-real-decoder')   # must not raise
     assert 'default' not in cam.qr
+    cam.camOn = False
+
+
+def test_pyzbar_features_do_not_register_when_pyzbar_unavailable(monkeypatch):
+    # Without the `barcode` extra (or without libzbar), addQR(decoder='pyzbar')
+    # and addBarcode() must log one error and register nothing -- previously
+    # each left a half-initialized feature behind (issue #72).
+    monkeypatch.setitem(sys.modules, 'pyzbar', None)   # makes `from pyzbar import ...` raise ImportError
+    monkeypatch.setitem(sys.modules, 'pyzbar.pyzbar', None)
+    cam = _make_camera_with_frame(_synthetic_qr_image('PAD_A'))
+
+    cam.addQR(idName='default', decoder='pyzbar')
+    cam.addBarcode()
+    assert 'default' not in cam.qr
+    assert 'default' not in cam.barcode
     cam.camOn = False
 
 

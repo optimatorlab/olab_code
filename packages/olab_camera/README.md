@@ -26,14 +26,16 @@ one at a time:
 | `yolo` | `ultralytics` (YOLO object detection) | Both this extra and the base package depend on plain `opencv-python` -- no conflicting install. |
 | `tracking` | local SORT, ByteTrack, OC-SORT, and BoT-SORT | Detector-agnostic comparison API; no models, hosted inference, or automatic downloads. |
 | `rfdetr` | local RF-DETR detection/segmentation plus Roboflow ByteTrack | Supply an existing local checkpoint. Relative names resolve in `~/Projects/olab_models/`; absolute paths also work. The usage guide documents an explicit, one-time optional provisioning download. This feature never downloads weights or uses hosted inference at runtime. |
+| `barcode` | `pyzbar` | `addBarcode()` and `addQR(decoder='pyzbar')`. Also needs the ZBar system library, which pip can't install: `sudo apt install libzbar0` (Linux/Raspberry Pi) or `brew install zbar` (macOS); Windows wheels bundle it. `addQR()`'s default `decoder='cv2'` needs neither. |
 | `websocket` | `websockets` | WebSocket + JPEG streaming. |
 | `webrtc` | `aiortc`, `aiohttp` | WebRTC streaming. |
 | `ros` | — | **Dropped as a pip extra** (`rospy`/`sensor-msgs` aren't on PyPI). To use `CameraROS`, install ROS via `apt`/`rosdep` and source your ROS environment — `olab-camera` then picks up `rospy` from that environment's Python path on its own. |
 
 `all` bundles every extra above (`yolo`, `tracking`, `rfdetr`,
-`websocket`, `webrtc`, `realsense`, `openmv`, `av`) together. Note that
-`av`'s `olab-audio` dependency needs PortAudio's headers
-(`portaudio19-dev` on Ubuntu/Debian) to build `pyaudio` from source.
+`websocket`, `webrtc`, `realsense`, `barcode`, `openmv`, `av`) together. Note
+that `av`'s `olab-audio` dependency needs PortAudio's headers
+(`portaudio19-dev` on Ubuntu/Debian) to build `pyaudio` from source, and
+`barcode` needs the ZBar system library at runtime (see its row above).
 
 **Local development**, against an `olab_code` checkout:
 

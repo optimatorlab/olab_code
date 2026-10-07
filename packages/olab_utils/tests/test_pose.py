@@ -244,7 +244,10 @@ def test_pyzbar_qr_polygon_order_verification_documents_limitation():
     independently confirm the limitation still holds if zbar's algorithm
     ever changes.
     '''
-    pyzbar = pytest.importorskip('pyzbar.pyzbar')
+    # exc_type=ImportError: with pyzbar installed but the ZBar system library
+    # missing, the import raises a plain ImportError, which pytest>=9's
+    # importorskip no longer skips on by default (only ModuleNotFoundError).
+    pyzbar = pytest.importorskip('pyzbar.pyzbar', exc_type=ImportError)
     base = _synthetic_qr_image('OLAB_TEST_PAYLOAD')
 
     for k in [0, 1, 2, 3]:

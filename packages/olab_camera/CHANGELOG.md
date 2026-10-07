@@ -17,3 +17,10 @@ still require `opencv-contrib-python` to be installed separately -- a
 request for an unavailable tracker now logs one clear error naming the
 missing dependency instead of crashing or silently breaking later frame
 decorations.
+
+`pyzbar` is an opt-in `barcode` extra, not a base dependency: it also needs
+the ZBar system library (`libzbar0` on Linux/Raspberry Pi, `brew install
+zbar` on macOS), which pip can't install. `addBarcode()` and
+`addQR(decoder='pyzbar')` need `pip install "olab-camera[barcode]"` plus that
+library; without them they log one clear error and start nothing (#72).
+`addQR()`'s default `decoder='cv2'` needs neither.
