@@ -743,6 +743,11 @@ def _pcm_levels(pcm_s16le: bytes) -> tuple[float, float]:
     samples = np.frombuffer(pcm_s16le, dtype="<i2").astype(np.float32) / 32768.0
     if not len(samples):
         return -120.0, -120.0
-    rms = max(float(np.sqrt(np.mean(np.square(samples)))), 1e-6)
+    # rms is measured about the frame mean. FM demodulation turns a carrier that is
+    # off the tuned frequency into DC, and a transmitter a few kHz off is normal.
+    # Left in, that offset masks the very drop in hiss that rms_quieting detects:
+    # on real hardware a ~20 dB quieting read as ~5 dB. Peak stays raw -- it is
+    # reported as clipping headroom, where the offset does consume range.
+    rms = max(float(np.std(samples)), 1e-6)
     peak = max(float(np.max(np.abs(samples))), 1e-6)
     return float(20 * np.log10(rms)), float(20 * np.log10(peak))

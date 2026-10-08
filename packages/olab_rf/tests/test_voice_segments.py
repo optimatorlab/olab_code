@@ -24,7 +24,11 @@ FRAME_SAMPLES = 640
 
 
 def _frame(level: int, index: int) -> PcmAudioFrame:
-    pcm = np.full(FRAME_SAMPLES, level, dtype="<i2").tobytes()
+    # Zero-mean square wave of +/-level (rms == peak == level), ~100 Hz so its
+    # high-band energy stays negligible. Pure DC would read as silence now that
+    # rms is measured about the frame mean.
+    signs = np.where((np.arange(FRAME_SAMPLES) // 80) % 2 == 0, 1, -1)
+    pcm = (signs * level).astype("<i2").tobytes()
     return PcmAudioFrame(
         pcm_s16le=pcm,
         sample_rate_hz=SAMPLE_RATE,
@@ -1039,3 +1043,56 @@ def test_spectrum_is_amplitude_referenced():
         return float(20 * np.log10(frame_spectrum(pcm, SAMPLE_RATE)[0].max()))
 
     assert abs(peak(320) - peak(2560)) < 0.5
+
+
+def _hiss_frame(index: int, rng: np.random.Generator) -> PcmAudioFrame:
+    samples = rng.normal(0, 3_000, FRAME_SAMPLES).astype("<i2")
+    return PcmAudioFrame(
+        pcm_s16le=samples.tobytes(),
+        sample_rate_hz=SAMPLE_RATE,
+        captured_at=utc_now() + timedelta(milliseconds=40 * index),
+    )
+
+
+def _offset_carrier_frame(index: int, dc: int) -> PcmAudioFrame:
+    """Quiet audio riding on a large DC offset, as an off-frequency FM carrier produces."""
+    signs = np.where((np.arange(FRAME_SAMPLES) // 80) % 2 == 0, 1, -1)
+    pcm = (signs * 300 + dc).astype("<i2").tobytes()
+    return PcmAudioFrame(
+        pcm_s16le=pcm,
+        sample_rate_hz=SAMPLE_RATE,
+        captured_at=utc_now() + timedelta(milliseconds=40 * index),
+    )
+
+
+def test_rms_quieting_detects_carrier_with_dc_offset():
+    # Regression, found on live RF (FRS ch 7): a transmission ~20 dB quieter than
+    # the hiss still read only ~5 dB quieter because its DC offset (~-0.1 of full
+    # scale from a carrier a few kHz off tune) was counted as level, so rms_quieting
+    # at the default 10 dB threshold barely opened the gate.
+    rng = np.random.default_rng(7)
+    segmenter = _segmenter(detector_mode="rms_quieting")
+    emitted = []
+    index = 0
+    for _ in range(25):
+        emitted.extend(segmenter.ingest(_hiss_frame(index, rng)))
+        index += 1
+    for _ in range(30):
+        emitted.extend(segmenter.ingest(_offset_carrier_frame(index, dc=-3_400)))
+        index += 1
+    for _ in range(20):
+        emitted.extend(segmenter.ingest(_hiss_frame(index, rng)))
+        index += 1
+
+    assert len(emitted) == 1
+    # The carrier is 1.2 s; pre-roll and hang time add to it, but most of it must be kept.
+    assert len(emitted[0].pcm_s16le) / (SAMPLE_RATE * 2) >= 1.0
+
+
+def test_pcm_levels_measures_rms_about_the_mean_but_peak_raw():
+    from olab_rf.services.voice_segments import _pcm_levels
+
+    dc_only = np.full(FRAME_SAMPLES, -3_400, dtype="<i2").tobytes()
+    rms_db, peak_db = _pcm_levels(dc_only)
+    assert rms_db <= -100.0  # a constant offset carries no audio
+    assert peak_db == pytest.approx(20 * np.log10(3_400 / 32768), abs=0.01)
