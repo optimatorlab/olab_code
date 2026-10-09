@@ -34,11 +34,26 @@ class WebConfig:
 
 @dataclass(slots=True)
 class DecoderConfig:
+    """Decoder invocation settings.
+
+    ``fir_size`` and ``atan_math`` are typed rather than left to ``args`` because
+    they need validation and read-only display in operator UIs. ``args`` remains
+    an escape hatch for the small set of flags that cannot affect pipeline
+    correctness; it is validated at load, never silently dropped.
+    """
+
     path: str
     args: list[str] = field(default_factory=list)
+    fir_size: int | None = None
+    atan_math: str | None = None
 
     def to_dict(self) -> dict[str, object]:
-        return {"path": self.path, "args": self.args}
+        return {
+            "path": self.path,
+            "args": self.args,
+            "fir_size": self.fir_size,
+            "atan_math": self.atan_math,
+        }
 
 
 @dataclass(slots=True)
@@ -121,8 +136,7 @@ def config_from_dict(payload: dict[str, Any]) -> OlabRfConfig:
     sdrtrunk_payload = payload.get("sdrtrunk") or {}
     decoders = dict(default.decoders)
     decoders.update({
-        name: DecoderConfig(path=data.get("path", name), args=list(data.get("args") or []))
-        for name, data in decoder_payload.items()
+        name: _decoder_config(name, data) for name, data in decoder_payload.items()
     })
     return OlabRfConfig(
         receivers=receivers,
@@ -152,4 +166,38 @@ def config_from_dict(payload: dict[str, Any]) -> OlabRfConfig:
         ),
         digital_system_catalog=dict(payload.get("digital_system_catalog") or {}),
         frequency_catalog=dict(payload.get("frequency_catalog") or {}),
+    )
+
+
+def _decoder_config(name: str, data: dict) -> DecoderConfig:
+    """Build one decoder config, validating rtl_fm passthrough at load time.
+
+    Validation happens here so a bad value fails when the config is read, with the
+    offending token named, rather than producing a process that runs and records
+    nothing.
+    """
+    args = list(data.get("args") or [])
+    fir_size = data.get("fir_size")
+    atan_math = data.get("atan_math")
+    if name == "rtl_fm":
+        from olab_rf.decoders.rtl_fm import (
+            ATAN_MATHS,
+            FIR_SIZES,
+            RtlFmArgumentError,
+            validate_rtl_fm_passthrough,
+        )
+
+        try:
+            validate_rtl_fm_passthrough(args)
+        except RtlFmArgumentError as exc:
+            raise ValueError(f"decoders.{name}.args: {exc}") from exc
+        if fir_size is not None and int(fir_size) not in FIR_SIZES:
+            raise ValueError(f"decoders.{name}.fir_size must be one of {list(FIR_SIZES)}")
+        if atan_math is not None and atan_math not in ATAN_MATHS:
+            raise ValueError(f"decoders.{name}.atan_math must be one of {list(ATAN_MATHS)}")
+    return DecoderConfig(
+        path=data.get("path", name),
+        args=args,
+        fir_size=int(fir_size) if fir_size is not None else None,
+        atan_math=atan_math,
     )

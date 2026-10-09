@@ -97,6 +97,29 @@ def test_rtl_sdr_iq_command_builds_stdout_capture_command():
     ]
 
 
+def test_rtl_sdr_iq_command_supports_unbounded_file_output():
+    assert rtl_sdr_iq_command(
+        path="/usr/bin/rtl_sdr",
+        center_frequency_hz=462_712_500,
+        sample_rate_hz=240_000,
+        device_index=1,
+        ppm=2,
+        output_path="/tmp/capture.sigmf-data",
+    ) == [
+        "/usr/bin/rtl_sdr",
+        "-f",
+        "462712500",
+        "-s",
+        "240000",
+        "-d",
+        "1",
+        "-p",
+        "2",
+        "-S",
+        "/tmp/capture.sigmf-data",
+    ]
+
+
 def test_iq_samples_from_u8_converts_interleaved_iq_bytes():
     np = pytest.importorskip("numpy")
 

@@ -8,8 +8,9 @@ from uuid import uuid4
 from olab_rf.models.tracks import dt_from_iso, dt_to_iso, utc_now
 
 
-FrequencyScanBackend = Literal["rtl_power", "rtl_sdr_iq"]
+FrequencyScanBackend = Literal["rtl_power", "rtl_sdr_iq", "iq_replay"]
 FrequencyScanStatusValue = Literal["created", "running", "complete", "stopped", "error"]
+_FREQUENCY_SCAN_BACKENDS = {"rtl_power", "rtl_sdr_iq", "iq_replay"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -20,32 +21,65 @@ class FrequencyScanRequest:
     ``SessionManager.start_frequency_scan`` or
     ``SessionManager.capture_frequency_baseline`` and then advanced with
     ``SessionManager.poll``.
+
+    ``backend="iq_replay"`` is a different shape: it replays a previously
+    recorded SigMF file (``replay_path``, required) instead of driving a live
+    receiver. ``min_freq_hz``/``max_freq_hz``/``bin_size_hz``/``duration_sec``
+    must be left at their ``0`` default for this backend (the file's own
+    metadata governs instead), and ``channel_frequencies_hz``/
+    ``sample_rate_hz``/``gain_db`` must be left empty/``None`` — all are
+    meaningless once a file has already been captured. ``channel_width_hz``
+    still applies, as the match tolerance. ``replay_path`` is rejected for
+    every other backend.
     """
 
-    min_freq_hz: int
-    max_freq_hz: int
-    bin_size_hz: int
-    duration_sec: float
+    min_freq_hz: int = 0
+    max_freq_hz: int = 0
+    bin_size_hz: int = 0
+    duration_sec: float = 0.0
     channel_frequencies_hz: list[int] = field(default_factory=list)
     channel_width_hz: int | None = None
     backend: FrequencyScanBackend = "rtl_power"
     gain_db: float | None = None
     sample_rate_hz: int | None = None
     resume_previous: bool = False
+    replay_path: str | None = None
+    replay_max_samples: int | None = None
 
     def __post_init__(self) -> None:
-        if self.min_freq_hz <= 0:
-            raise ValueError("min_freq_hz must be greater than zero")
-        if self.max_freq_hz <= self.min_freq_hz:
-            raise ValueError("max_freq_hz must be greater than min_freq_hz")
-        if self.bin_size_hz <= 0:
-            raise ValueError("bin_size_hz must be greater than zero")
-        if self.duration_sec <= 0:
-            raise ValueError("duration_sec must be greater than zero")
+        if self.backend not in _FREQUENCY_SCAN_BACKENDS:
+            raise ValueError(f"unknown frequency scan backend: {self.backend}")
         if self.channel_width_hz is not None and self.channel_width_hz <= 0:
             raise ValueError("channel_width_hz must be greater than zero")
-        if self.backend not in {"rtl_power", "rtl_sdr_iq"}:
-            raise ValueError(f"unknown frequency scan backend: {self.backend}")
+        if self.backend == "iq_replay":
+            if self.replay_path is None:
+                raise ValueError("replay_path is required for backend='iq_replay'")
+            if self.min_freq_hz or self.max_freq_hz or self.bin_size_hz or self.duration_sec:
+                raise ValueError(
+                    "min_freq_hz/max_freq_hz/bin_size_hz/duration_sec must be left at "
+                    "their default of 0 for backend='iq_replay'"
+                )
+            if self.channel_frequencies_hz:
+                raise ValueError("channel_frequencies_hz must be empty for backend='iq_replay'")
+            if self.sample_rate_hz is not None:
+                raise ValueError("sample_rate_hz is not supported for backend='iq_replay'")
+            if self.gain_db is not None:
+                raise ValueError("gain_db is not supported for backend='iq_replay'")
+            if self.replay_max_samples is not None and self.replay_max_samples <= 0:
+                raise ValueError("replay_max_samples must be greater than zero")
+        else:
+            if self.replay_path is not None:
+                raise ValueError("replay_path is only supported for backend='iq_replay'")
+            if self.replay_max_samples is not None:
+                raise ValueError("replay_max_samples is only supported for backend='iq_replay'")
+            if self.min_freq_hz <= 0:
+                raise ValueError("min_freq_hz must be greater than zero")
+            if self.max_freq_hz <= self.min_freq_hz:
+                raise ValueError("max_freq_hz must be greater than min_freq_hz")
+            if self.bin_size_hz <= 0:
+                raise ValueError("bin_size_hz must be greater than zero")
+            if self.duration_sec <= 0:
+                raise ValueError("duration_sec must be greater than zero")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -59,15 +93,17 @@ class FrequencyScanRequest:
             "gain_db": self.gain_db,
             "sample_rate_hz": self.sample_rate_hz,
             "resume_previous": self.resume_previous,
+            "replay_path": self.replay_path,
+            "replay_max_samples": self.replay_max_samples,
         }
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> FrequencyScanRequest:
         return cls(
-            min_freq_hz=int(payload["min_freq_hz"]),
-            max_freq_hz=int(payload["max_freq_hz"]),
-            bin_size_hz=int(payload["bin_size_hz"]),
-            duration_sec=float(payload["duration_sec"]),
+            min_freq_hz=int(payload.get("min_freq_hz", 0)),
+            max_freq_hz=int(payload.get("max_freq_hz", 0)),
+            bin_size_hz=int(payload.get("bin_size_hz", 0)),
+            duration_sec=float(payload.get("duration_sec", 0.0)),
             channel_frequencies_hz=[
                 int(item) for item in payload.get("channel_frequencies_hz") or []
             ],
@@ -86,6 +122,12 @@ class FrequencyScanRequest:
                 else None
             ),
             resume_previous=bool(payload.get("resume_previous", False)),
+            replay_path=payload.get("replay_path"),
+            replay_max_samples=(
+                int(payload["replay_max_samples"])
+                if payload.get("replay_max_samples") is not None
+                else None
+            ),
         )
 
 
@@ -297,6 +339,70 @@ class FrequencyScanStatus:
             baseline_id=payload.get("baseline_id"),
             error=payload.get("error"),
         )
+
+
+PriorityScanStateValue = Literal["scanning", "locked", "stopped", "error"]
+
+
+@dataclass(frozen=True, slots=True)
+class PriorityScanStatus:
+    """Snapshot of a multi-channel priority scan.
+
+    See ``SessionManager.start_priority_scan``/``SessionManager.priority_scan``.
+    v1 is non-preemptive round-robin: channels are visited in list order, one
+    dwell or lock at a time, with no priority-driven interruption of an
+    active lock -- "priority" in the feature name is aspirational for v1.
+
+    ``completed_segments``/``dropped_segments``/``capped_closes`` are
+    scan-lifetime totals, carried forward across the fresh backend/segmenter
+    every channel visit builds -- they do not reset to 0 when the scanner
+    hops to the next channel.
+    """
+
+    scan_id: str
+    session_id: str
+    channel_ids: list[str]
+    state: PriorityScanStateValue = "scanning"
+    current_channel_id: str | None = None
+    current_channel_label: str | None = None
+    current_range_id: str | None = None
+    current_range_label: str | None = None
+    cycle_count: int = 0
+    completed_segments: int = 0
+    dropped_segments: int = 0
+    capped_closes: int = 0
+    error: str | None = None
+    # Live view of the currently-tuned channel's segmenter, for a future
+    # tuning-playground panel -- null whenever no segmenter is active yet.
+    noise_floor_db: float | None = None
+    last_frame_band_ratio: float | None = None
+    active: bool = False
+    recalibrating: bool = False
+    started_at: datetime = field(default_factory=utc_now)
+    stopped_at: datetime | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "scan_id": self.scan_id,
+            "session_id": self.session_id,
+            "channel_ids": list(self.channel_ids),
+            "state": self.state,
+            "current_channel_id": self.current_channel_id,
+            "current_channel_label": self.current_channel_label,
+            "current_range_id": self.current_range_id,
+            "current_range_label": self.current_range_label,
+            "cycle_count": self.cycle_count,
+            "completed_segments": self.completed_segments,
+            "dropped_segments": self.dropped_segments,
+            "capped_closes": self.capped_closes,
+            "error": self.error,
+            "noise_floor_db": self.noise_floor_db,
+            "last_frame_band_ratio": self.last_frame_band_ratio,
+            "active": self.active,
+            "recalibrating": self.recalibrating,
+            "started_at": dt_to_iso(self.started_at),
+            "stopped_at": dt_to_iso(self.stopped_at),
+        }
 
 
 def _coerce_dt(value: object) -> datetime | None:
