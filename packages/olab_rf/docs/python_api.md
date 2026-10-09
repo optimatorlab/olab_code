@@ -51,7 +51,9 @@ command-line tools such as `rtl_power`, `rtl_sdr`, `rtl_fm`, `rtl_ais`, and
 NumPy is a base dependency used by voice segmentation and the normal IQ scan
 path, which uses the system `rtl_sdr` recorder. The
 `pyrtlsdr` extra is for lower-level direct-library experiments and requires a
-compatible system `librtlsdr`.
+compatible system `librtlsdr`: `pyrtlsdr` 0.5 fails to import against Ubuntu's
+`librtlsdr` 2.0.1 (`undefined symbol: rtlsdr_set_dithering`). Nothing else in
+`olab_rf` uses it; see `install.md` for details and workarounds.
 
 Create a manager from local config:
 
