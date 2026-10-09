@@ -22,9 +22,9 @@ automatically from PyPI once published — no separate install step.
 
 | Package | Distribution | Status |
 |---|---|---|
-| [`olab_camera`](packages/olab_camera/) | `olab-camera` | migrated; PyPI release pending |
-| [`olab_utils`](packages/olab_utils/) | `olab-utils` | migrated; PyPI release pending |
-| [`olab_rf`](packages/olab_rf/) | `olab-rf` | migrated; PyPI release pending |
-| [`olab_voice`](packages/olab_voice/) | `olab-voice` | migrated; PyPI release pending |
-| [`olab_audio`](packages/olab_audio/) | `olab-audio` | migrated; PyPI release pending |
-| [`olab_playground`](packages/olab_playground/) | `olab-playground` | migrated; PyPI release pending |
+| [`olab_camera`](packages/olab_camera/) | `olab-camera` | [on PyPI](https://pypi.org/project/olab-camera/) |
+| [`olab_utils`](packages/olab_utils/) | `olab-utils` | [on PyPI](https://pypi.org/project/olab-utils/) |
+| [`olab_rf`](packages/olab_rf/) | `olab-rf` | [on PyPI](https://pypi.org/project/olab-rf/) |
+| [`olab_voice`](packages/olab_voice/) | `olab-voice` | [on PyPI](https://pypi.org/project/olab-voice/) |
+| [`olab_audio`](packages/olab_audio/) | `olab-audio` | [on PyPI](https://pypi.org/project/olab-audio/) |
+| [`olab_playground`](packages/olab_playground/) | `olab-playground` | [on PyPI](https://pypi.org/project/olab-playground/) |
