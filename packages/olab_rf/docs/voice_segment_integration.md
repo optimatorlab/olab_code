@@ -41,7 +41,8 @@ The transport-neutral integration surface is:
 | `manager.current_voice_segment_status()` | Return current capture state and input level meter. |
 | `manager.pop_voice_events()` | Return lifecycle transitions since the prior call. |
 | `manager.pop_voice_segments()` | Return completed transmission segments since the prior call. |
-| `manager.update_voice_segment_settings(...)` | Update carrier-gate settings without restarting capture. |
+| `manager.update_voice_segment_settings(...)` | Update carrier-gate and audio-conditioning settings without restarting capture. |
+| `manager.restart_voice_capture(...)` | Respawn the receiver for gain/ppm/frequency/sample-rate changes, preserving unpopped segments and run counters. |
 | `manager.reset_voice_segment_calibration()` | Discard the idle-level estimate between transmissions. |
 
 An async server should own explicit polling. Do not also enable `auto_poll=True`

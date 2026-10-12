@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from importlib.metadata import PackageNotFoundError, version
 
+from olab_rf.decoders.sigmf import read_sigmf_iq
 from olab_rf.models import (
     FrequencyBaseline,
     DigitalListenStatus,
@@ -16,6 +17,7 @@ from olab_rf.models import (
     FrequencyScanStatus,
     Observation,
     PcmAudioFrame,
+    PriorityScanStatus,
     RadioSession,
     RadioVoiceSegment,
     ReceiverConfig,
@@ -59,8 +61,10 @@ __all__ = [
     "get_history",
     "Observation",
     "PcmAudioFrame",
+    "PriorityScanStatus",
     "RadioSession",
     "RadioVoiceSegment",
+    "read_sigmf_iq",
     "ReceiverConfig",
     "RecordingRequest",
     "RecordingStatus",

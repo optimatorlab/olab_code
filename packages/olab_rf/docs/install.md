@@ -108,11 +108,21 @@ causes are:
 - multiple RTL-SDR dongles have duplicate/default serials.
 
 The optional `rtl_sdr_iq` backend uses the system `rtl_sdr` recorder for normal
-runtime scans. The lower-level direct Python adapter can also load `librtlsdr`
-through `pyrtlsdr`; if that path reports an undefined symbol such as
-`rtlsdr_set_dithering`, the Python wrapper and installed system `librtlsdr` are
-not compatible. Use the command-line `rtl_sdr` path or resolve the `librtlsdr`
-installation before debugging direct-adapter code.
+runtime scans, and IQ recording (`SessionManager.start_recording(kind="iq")`)
+and the `iq_replay` scan backend (`start_iq_replay_scan(...)`) share the same
+`rtl_sdr` command-line dependency — `iq_replay` itself needs no hardware at
+replay time, only for the original recording. None of these paths use
+`pyrtlsdr`.
+
+The lower-level direct Python adapter (`capture_iq_samples`) is the only code
+that loads `librtlsdr` through `pyrtlsdr`. `pyrtlsdr` 0.4 and 0.5 bind
+`rtlsdr_set_dithering` at import time, and Ubuntu's `librtlsdr` 2.0.1 does not
+export it, so `import rtlsdr` fails with
+`undefined symbol: rtlsdr_set_dithering`. That breaks only this adapter; voice
+capture, scans, priority scanning and IQ recording are unaffected. To use the
+adapter, install a `librtlsdr` that exports that symbol, or use `pyrtlsdr` 0.3.0
+with `setuptools<81` (0.3.0 imports `pkg_resources`), which loads against 2.0.1.
+Otherwise use the command-line `rtl_sdr` path.
 
 ## DVB Driver Conflict
 
