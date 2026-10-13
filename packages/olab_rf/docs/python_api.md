@@ -874,6 +874,67 @@ or AIS traffic. If `readsb` or `rtl_ais` exits early, call `manager.poll()` and
 inspect `manager.status.error`; decoder stderr such as device-busy or SDR-open
 failures is reported there.
 
+## Remote ID
+
+> **Experimental, not validated on real traffic.** The `droneid-go` flags are
+> confirmed from its `-h`, but its ZMQ message schema is reconstructed from
+> `alphafox02/DragonSync`'s consumer code and `droneid-go` has never run on
+> real Remote ID broadcasts. BLE through `droneid-go -ble` and a Sniffle
+> dongle is planned and untested. `UnixRidCaptureBackend` (BLE) is known not
+> to work on a Bluetooth 5.2 adapter and reports itself running even when
+> scanning failed, so a healthy `backend_status()` does not prove BLE is
+> receiving. See `install.md` for details.
+
+`RemoteIdManager` is a standalone class, independent of `SessionManager`'s
+one-RTL-SDR-at-a-time lifecycle -- construct it directly and hand it a
+`TrackStore` (typically the same one a `SessionManager` uses, so both
+protocols share one map):
+
+```python
+from olab_rf import RemoteIdManager, TrackStore
+from olab_rf.decoders.droneid_go import DroneidGoBackend
+from olab_rf.decoders.unix_rid_capture import UnixRidCaptureBackend
+
+track_store = TrackStore()
+manager = RemoteIdManager(
+    track_store,
+    [DroneidGoBackend(iface="wlan1"), UnixRidCaptureBackend(hci_device="hci0")],
+    session_id="session-1",
+    sensor_id="remoteid-1",
+)
+
+manager.start()
+try:
+    while True:
+        manager.poll()
+        for track in track_store.list():
+            print(track.track_id, track.lat, track.lon, track.metadata["transports"])
+        for event in manager.pop_transport_events():
+            print(event.event, event.backend, event.transport, event.mac, event.serial)
+finally:
+    manager.stop()
+```
+
+One `Track` per drone (`track_id = f"remoteid-{serial}"`) regardless of
+which transport(s) currently see it -- `track.metadata["transports"]`
+records per-transport contribution, e.g. `{"wifi": {"backend": "droneid-go",
+"last_seen": ...}, "ble": {"backend": "unix_rid_capture", "last_seen":
+...}}`. `manager.pop_transport_events()` drains discrete
+`transport_acquired`/`transport_lost`/`identity_resolved` lifecycle events,
+keyed per `(backend, transport, MAC)` -- independent of the merged
+`Track`'s own `state()`, which only moves to `stale`/`expired` once *both*
+transports go quiet. `manager.is_running()` is a coarse "any backend
+running" check; `manager.backend_status()` breaks that down per backend
+(`name`, `transport`, `running`, `error`) when you need to know which one is
+unhealthy.
+
+Both backends require external tools this pass documents but does not
+vendor/build (see [install.md](install.md#remote-id-decoders-wi-fi-and-bluetooth)):
+`droneid-go` (proprietary, download the release yourself, needs the
+`droneid-go` install extra for `pyzmq`) for Wi-Fi, `unix_rid_capture`
+(MIT, build from source with an `ENABLE_PCAP=0` patch) for Bluetooth Low
+Energy.
+
 ## History
 
 When a manager has a `SqliteHistory`, completed active scans are persisted.
@@ -1150,6 +1211,38 @@ Important fields:
 - `metadata`: original decoder payload details.
 
 Use `track.to_dict()` when returning tracks through an API or serializing them.
+
+### `RemoteIdManager(track_store, backends, *, session_id, sensor_id, transport_timeout_s=8.0, stale_after_s=60.0, expire_after_s=300.0, history=None)`
+
+Standalone Remote ID manager (see [Remote ID](#remote-id) above). Raises
+`ValueError` at construction if two backends declare the same `transport`.
+
+- `start()` / `stop()`: start/stop every backend; `start()` is fail-fast
+  with rollback (a backend that fails to start stops every backend already
+  started this call before re-raising); both are idempotent.
+- `is_running() -> bool`: any backend running.
+- `backend_status() -> list[dict]`: per-backend `{"name", "transport",
+  "running", "error"}`.
+- `poll(*, now=None) -> list[DecodedMessage]`: drain every backend, merge
+  into `Track`s. `now` is an optional injected clock for deterministic
+  testing, same shape as `Track.age_s(now)`.
+- `pop_transport_events() -> list[RemoteIdTransportEvent]`: drain pending
+  lifecycle events.
+
+### `RemoteIdBroadcast`
+
+One normalized per-transport observation, pre-`Track`-merge (what a
+`RemoteIdBackend.poll()` returns). `backend`, `transport`, `serial`
+(`str | None`), `mac` (`str | None`), `lat`/`lon`/`altitude_m`/`speed_mps`/
+`course_deg`, `operator_lat`/`operator_lon`, `self_id`, `observed_at`, `raw`.
+
+### `RemoteIdTransportEvent`
+
+A lifecycle transition for one `(backend, transport, mac)` Remote ID
+contact: `event` (`"transport_acquired"` / `"transport_lost"` /
+`"identity_resolved"`), `mac`, `transport`, `backend`, `serial`
+(`str | None` -- unresolved until an `identity_resolved` event or a
+`serial`-bearing broadcast for the same `mac`), `occurred_at`, `message`.
 
 ### Other Workflow Methods
 

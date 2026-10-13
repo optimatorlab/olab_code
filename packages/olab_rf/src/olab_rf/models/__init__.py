@@ -9,6 +9,7 @@ from olab_rf.models.frequencies import (
 )
 from olab_rf.models.recording import RecordingRequest, RecordingStatus
 from olab_rf.models.receivers import ReceiverConfig
+from olab_rf.models.remoteid import RemoteIdTransportEvent
 from olab_rf.models.scanning import (
     FrequencyBaseline,
     FrequencyCandidate,
@@ -50,6 +51,7 @@ __all__ = [
     "ReceiverConfig",
     "RecordingRequest",
     "RecordingStatus",
+    "RemoteIdTransportEvent",
     "SensorStatus",
     "SpectrumBin",
     "SpectrumEvent",

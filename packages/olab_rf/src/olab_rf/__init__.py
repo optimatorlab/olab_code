@@ -23,6 +23,7 @@ from olab_rf.models import (
     ReceiverConfig,
     RecordingRequest,
     RecordingStatus,
+    RemoteIdTransportEvent,
     SensorStatus,
     SpectrumBin,
     SpectrumEvent,
@@ -32,9 +33,11 @@ from olab_rf.models import (
     VoiceCaptureEvent,
     VoiceSegmentStatus,
 )
+from olab_rf.decoders.remoteid_base import RemoteIdBroadcast
 from olab_rf.history import get_history
 from olab_rf.services.frequency_catalog import FrequencyCatalog
 from olab_rf.services.range_scanner import FrequencyRangeScanPlan, build_frequency_range_scan_plan
+from olab_rf.services.remoteid_manager import RemoteIdManager
 from olab_rf.services.session_manager import SessionManager
 
 try:
@@ -68,6 +71,9 @@ __all__ = [
     "ReceiverConfig",
     "RecordingRequest",
     "RecordingStatus",
+    "RemoteIdBroadcast",
+    "RemoteIdManager",
+    "RemoteIdTransportEvent",
     "SensorStatus",
     "SessionManager",
     "SpectrumBin",
