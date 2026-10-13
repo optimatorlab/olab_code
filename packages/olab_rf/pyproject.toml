@@ -34,6 +34,7 @@ dev = [
     "ruff>=0.4",
     "httpx>=0.27",
     "pyais>=3.1",
+    "pyzmq>=25.0",
 ]
 web = [
     "fastapi>=0.111",
@@ -52,8 +53,11 @@ nats = [
     "msgpack>=1.0",
     "nats-py>=2.6",
 ]
+droneid-go = [
+    "pyzmq>=25.0",
+]
 all = [
-    "olab-rf[web,ais,pyrtlsdr,nats]",
+    "olab-rf[web,ais,pyrtlsdr,nats,droneid-go]",
 ]
 
 [project.scripts]
