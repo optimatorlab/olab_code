@@ -278,6 +278,16 @@ construct a `RemoteIdManager` directly in Python.
 > **BLE via `droneid-go -ble`:** receiving BLE Remote ID through
 > `droneid-go -ble <sniffle-serial-port>` and a Sniffle dongle is planned and
 > untested. Nothing in `olab_rf` uses it yet.
+>
+> **`unix_rid_capture` (BLE) is known not to work on a Bluetooth 5.2 adapter,
+> and fails silently.** On an Intel AX201 the controller rejects its legacy LE
+> scan commands (HCI status 0x0c, command disallowed), because the kernel
+> drives the adapter with extended scanning. The process keeps running and
+> prints `rx packets 0`, so `UnixRidCaptureBackend.is_running()` and
+> `RemoteIdManager.backend_status()` report BLE as healthy while nothing is
+> scanned. It also parses legacy advertising reports only (no extended
+> advertising, no Long Range). It is unverified on any adapter and may be
+> removed once BLE through `droneid-go -ble` has been tested.
 
 ### droneid-go (Wi-Fi)
 

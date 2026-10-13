@@ -880,7 +880,10 @@ failures is reported there.
 > confirmed from its `-h`, but its ZMQ message schema is reconstructed from
 > `alphafox02/DragonSync`'s consumer code and `droneid-go` has never run on
 > real Remote ID broadcasts. BLE through `droneid-go -ble` and a Sniffle
-> dongle is planned and untested. See `install.md` for details.
+> dongle is planned and untested. `UnixRidCaptureBackend` (BLE) is known not
+> to work on a Bluetooth 5.2 adapter and reports itself running even when
+> scanning failed, so a healthy `backend_status()` does not prove BLE is
+> receiving. See `install.md` for details.
 
 `RemoteIdManager` is a standalone class, independent of `SessionManager`'s
 one-RTL-SDR-at-a-time lifecycle -- construct it directly and hand it a

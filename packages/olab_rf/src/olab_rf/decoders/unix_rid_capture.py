@@ -91,6 +91,12 @@ class UnixRidCaptureBackend:
     `decoders/sdrtrunk.py`'s `SdrTrunkBackend` uses for owning a subprocess
     -- not `decoders/readsb.py`/`decoders/rtl_ais.py`, which are pure
     command-builder/parse functions with no process ownership of their own.
+
+    Known limitation: `is_running()` only reflects whether the subprocess is
+    alive. On a Bluetooth 5.2 adapter the controller rejects the binary's
+    legacy LE scan commands (HCI 0x0c), yet the process keeps running and
+    prints `rx packets 0`, so this backend looks healthy while scanning
+    nothing. See docs/install.md.
     """
 
     transport = "ble"
