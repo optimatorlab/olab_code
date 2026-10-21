@@ -9,3 +9,6 @@ CHUNK = 512
 # Normalize int16 PCM to float32 in [-1.0, +1.0].
 # See https://stackoverflow.com/questions/16778878/python-write-a-wav-file-into-numpy-float-array/62298670#62298670
 ONE_OVER_MAX_INT16 = 1 / 32768.0  # 1/2**15
+
+# Normalize int32 PCM (used by MicArray) to float32 in [-1.0, +1.0].
+ONE_OVER_MAX_INT32 = 1 / 2147483648.0  # 1/2**31

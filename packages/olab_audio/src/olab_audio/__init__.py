@@ -28,6 +28,9 @@ a clear `AttributeError` naming the install command, not a confusing
 Classes:
     Mic: Microphone capture -- device-safe enumeration, recording, dB level,
         log-binned spectrum (Mic.spectrum()).
+    MicArray: Hardware-agnostic multichannel capture (one N-channel int32
+        stream at an explicit rate) with per-label levels/spectrum and an
+        aligned recorder (one mono 32-bit WAV per label + JSON manifest).
     Speaker: Simple playback.
     Recording / Recording_bytes / Recording_np: In-progress recording buffers.
         `.normalize()` peak-normalizes the buffer in place, before save().
@@ -36,6 +39,8 @@ Functions:
     get_input_devices / get_output_devices / get_connected_devices: Device
         enumeration (ALSA pseudo-device plugins filtered out -- opening one
         as a capture stream can segfault the process; see device.py).
+    get_input_device_info: Look up one input device by name substring (global
+        PortAudio index + max input channels).
     get_default_source_ports / set_default_source_port: PulseAudio/PipeWire
         port control for hardware exposing multiple mutually-exclusive
         ports on one physical source (e.g. a laptop's internal/jack mic).
@@ -61,13 +66,14 @@ try:
 except PackageNotFoundError:
 	__version__ = "0.0.0"
 
-from ._constants import CHANNELS, CHUNK, FORMAT, ONE_OVER_MAX_INT16, SAMPLERATE, SPEAKER_FORMAT
+from ._constants import CHANNELS, CHUNK, FORMAT, ONE_OVER_MAX_INT16, ONE_OVER_MAX_INT32, SAMPLERATE, SPEAKER_FORMAT
 from ._resample import StreamResampler, resample
 from ._util import bytes2np, convert_to_db, defaultFromNone, np2bytes, np2np, spectrum_db
 from .device import (
 	audio,
 	get_connected_devices,
 	get_default_source_ports,
+	get_input_device_info,
 	get_input_devices,
 	get_loopback_input_devices,
 	get_output_devices,
@@ -77,6 +83,7 @@ from .device import (
 	terminate,
 )
 from .mic import Mic
+from .micarray import MicArray
 from .recording import Recording, Recording_bytes, Recording_np, append, normalize_wav, saveAudio, wav_to_mp3
 from .speaker import Speaker
 
@@ -133,6 +140,7 @@ __all__ = [
 	"CHUNK",
 	"FORMAT",
 	"ONE_OVER_MAX_INT16",
+	"ONE_OVER_MAX_INT32",
 	"SAMPLERATE",
 	"SPEAKER_FORMAT",
 	"audio",
@@ -142,10 +150,12 @@ __all__ = [
 	"defaultFromNone",
 	"get_connected_devices",
 	"get_default_source_ports",
+	"get_input_device_info",
 	"get_input_devices",
 	"get_loopback_input_devices",
 	"get_output_devices",
 	"Mic",
+	"MicArray",
 	"normalize_wav",
 	"np2bytes",
 	"np2np",

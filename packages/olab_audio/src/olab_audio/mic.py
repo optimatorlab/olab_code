@@ -331,15 +331,25 @@ class Mic():
 		# regardless of whether start() ever succeeded.
 		if self.stream is None:
 			return
+		# Drop the reference first, then attempt BOTH stop_stream() and close()
+		# independently: if stop_stream() raises (errored stream, unplugged
+		# device), close() must still run or the PortAudio/ALSA handle stays
+		# open until terminate(). Report only after both attempts so a raising
+		# excFunc cannot skip close().
+		stream, self.stream = self.stream, None
+		msgs = []
 		try:
-			self.stream.stop_stream()
-			self.stream.close()
+			stream.stop_stream()
 		except Exception as e:
-			self.excFunc(msg = f'Could not stop stream: {e}')
-		else:
+			msgs.append(f'Could not stop stream: {e}')
+		try:
+			stream.close()
+		except Exception as e:
+			msgs.append(f'Could not close stream: {e}')
+		if not msgs:
 			print('stream stopped')
-		finally:
-			self.stream = None
+		for m in msgs:
+			self.excFunc(msg = m)
 
 	def stop(self, postFunc=None):
 		# Stop the processes
