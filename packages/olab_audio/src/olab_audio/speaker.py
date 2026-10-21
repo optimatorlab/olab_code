@@ -41,27 +41,41 @@ class Speaker():
 
 		samples = samples.astype('float32')
 
+		# Convert 32-bit np array to bytes sequence (before opening the device,
+		# so bad input such as a non-numeric volume never leaves a stream open)
+		output_bytes = (volume * samples).tobytes()
+
 		# for paFloat32 sample values must be in range [-1.0, 1.0]
 		self.stream = audio.open(format=frmt,
 						channels=channels,
 						rate=samplerate,
 						output=True)
 
-		# Convert 32-bit np array to bytes sequence
-		output_bytes = (volume * samples).tobytes()
-
-		# Play.
-		self.stream.write(output_bytes)
-
-		self.stop()
+		# Play. Always close the stream, even if write() raises.
+		try:
+			self.stream.write(output_bytes)
+		finally:
+			self.stop()
 
 	def stop(self):
 		# Stop the speaker
 		if self.stream is None:
 			return
-		self.stream.stop_stream()
-		self.stream.close()
-		self.stream = None
+		stream, self.stream = self.stream, None
+		first = None
+		# close() is attempted even if stop_stream() raised, or the stream leaks.
+		try:
+			stream.stop_stream()
+		except Exception as e:
+			first = e
+		try:
+			stream.close()
+		except Exception as e:
+			first = first or e
+		if first is not None:
+			# Speaker has no excFunc, so keep the failure visible. If both
+			# raised, the close() error is intentionally dropped.
+			raise first
 
 	def terminate(self):
 		'''

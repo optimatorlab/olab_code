@@ -10,15 +10,21 @@ from olab_audio.mic import Mic
 
 
 class _FakeStream:
-    def __init__(self):
+    def __init__(self, fail_stop=False, fail_close=False):
         self.stopped = False
         self.closed = False
+        self.fail_stop = fail_stop
+        self.fail_close = fail_close
 
     def stop_stream(self):
         self.stopped = True
+        if self.fail_stop:
+            raise OSError('Stream not open')
 
     def close(self):
         self.closed = True
+        if self.fail_close:
+            raise OSError('close boom')
 
 
 class _FakePyAudio:
@@ -903,3 +909,48 @@ def test_start_loopback_capture_forwards_mic_start_kwargs(monkeypatch, tmp_path)
 
     assert len(received) == 1
     assert len(received[0]) == frame_count
+
+
+def _started_mic(monkeypatch, errors, **stream_flags):
+    fake_audio = _FakePyAudio()
+    monkeypatch.setattr("olab_audio.mic.audio", fake_audio)
+    mic = Mic(deviceID=3, excFunc=lambda msg: errors.append(msg))
+    mic.start()
+    stream = mic.stream
+    stream.fail_stop = stream_flags.get('fail_stop', False)
+    stream.fail_close = stream_flags.get('fail_close', False)
+    return mic, stream
+
+
+def test_mic_stop_closes_stream_even_if_stop_stream_raises(monkeypatch):
+    errors = []
+    mic, stream = _started_mic(monkeypatch, errors, fail_stop=True)
+    mic.stop()
+    assert stream.closed is True
+    assert errors == ['Could not stop stream: Stream not open']
+    assert mic.stream is None
+    mic.stop()  # second stop is a no-op
+    assert len(errors) == 1
+
+
+def test_mic_stop_reports_close_failure(monkeypatch):
+    errors = []
+    mic, stream = _started_mic(monkeypatch, errors, fail_close=True)
+    mic.stop()
+    assert errors == ['Could not close stream: close boom']
+    assert mic.stream is None
+
+
+def test_mic_stop_closes_stream_even_if_excfunc_raises(monkeypatch):
+    def bad_exc(msg):
+        raise RuntimeError('excFunc boom')
+    fake_audio = _FakePyAudio()
+    monkeypatch.setattr("olab_audio.mic.audio", fake_audio)
+    mic = Mic(deviceID=3, excFunc=bad_exc)
+    mic.start()
+    stream = mic.stream
+    stream.fail_stop = True
+    with pytest.raises(RuntimeError, match='excFunc boom'):
+        mic.stop()
+    assert stream.closed is True
+    assert mic.stream is None
