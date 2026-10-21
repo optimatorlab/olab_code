@@ -204,6 +204,45 @@ def get_input_devices():
 	return devices
 
 
+def get_input_device_info(name=None):
+	"""Look up ONE input device and return
+	`{'deviceID', 'name', 'maxInputChannels', 'defaultSampleRate'}`, or None.
+
+	`deviceID` is always the GLOBAL PortAudio device index -- the value
+	`audio.open(input_device_index=...)` takes. (`get_input_devices()` reports
+	the host-API-0-local index, which coincides with the global one on ALSA/
+	Linux; this function does not rely on that coincidence.)
+
+	name=None -> PortAudio's default input device (None if there isn't one).
+	otherwise -> the FIRST input-capable device (by index) whose name contains
+	`name`, case-insensitively. Same ALSA pseudo-device filter as
+	get_input_devices(), so a plugin node that segfaults on open is never
+	returned. Callers that need certainty with several similarly-named devices
+	should pass an explicit deviceID instead. Prints nothing.
+	"""
+	def _entry(d, fallback_index):
+		return {'deviceID': d.get('index', fallback_index),
+				'name': d.get('name'),
+				'maxInputChannels': d.get('maxInputChannels'),
+				'defaultSampleRate': d.get('defaultSampleRate')}
+
+	if name is None:
+		try:
+			info = audio.get_default_input_device_info()
+		except Exception:
+			return None
+		return _entry(info, info.get('index'))
+
+	wanted = str(name).lower()
+	host_info = audio.get_host_api_info_by_index(0)
+	for i in range(0, host_info.get('deviceCount')):
+		dev_info = audio.get_device_info_by_host_api_device_index(0, i)
+		dev_name = dev_info.get('name') or ''
+		if dev_info.get('maxInputChannels') > 0 and _keep_device(host_info, dev_name) and wanted in dev_name.lower():
+			return _entry(dev_info, i)
+	return None
+
+
 def get_output_devices():
 	print('NOTE: This function will not capture devices added/removed since olab_audio was first used. Call reinit_audio() to force a re-scan.')
 
