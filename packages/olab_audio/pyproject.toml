@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "olab-audio"
-version = "0.1.0"
+version = "0.2.0"
 description = "Audio device I/O (Mic/Speaker/recording, device enumeration, PulseAudio control) plus an optional DSP/analysis/teaching toolkit."
 requires-python = ">=3.10"
 readme = "README.md"
