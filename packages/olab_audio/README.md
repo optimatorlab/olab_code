@@ -1,7 +1,7 @@
 # olab_audio
 
-Audio device I/O (`Mic`, `Speaker`, recording, device enumeration,
-PulseAudio port control) — the core install needs only `pyaudio`,
+Audio device I/O (`Mic`, `Speaker`, multichannel `MicArray`, recording,
+device enumeration, PulseAudio port control) — the core install needs only `pyaudio`,
 `pulsectl`, and `numpy` — plus two optional extras: `resample` (lightweight
 cross-rate PCM conversion) and `analysis` (a DSP/teaching/research toolkit:
 `Wave`, `Spectrogram`, `Spectrum`, tone/chirp/pitch synthesis, `trim`,
@@ -158,6 +158,140 @@ Notes:
 - Capture only receives audio actually routed to the selected sink (silent
   otherwise -- expected, not a bug), and uses the sink's native device rate,
   which may not be 44.1kHz.
+
+## Multichannel microphone arrays (`MicArray`)
+
+`MicArray` captures many microphones from **one** multichannel USB audio
+interface on **one** PortAudio stream, so the channels can never drift apart.
+It gives each microphone a label, live level/peak/spectrum readouts, and a
+recorder that writes one mono 32-bit WAV per microphone plus a JSON manifest.
+It is hardware-agnostic: labels and per-channel `meta` are opaque and passed
+through untouched, and nothing in it knows what interface or microphones are
+attached. `Mic` is unaffected; `MicArray` is a separate class.
+
+```python
+import olab_audio
+
+arr = olab_audio.MicArray(
+    channels=[
+        {'label': 'B1', 'channel': 1,  'meta': {'sensitivity': 0.05}},
+        {'label': 'D1', 'channel': 14, 'meta': {}},
+    ],
+    deviceName='UMC1820',        # substring match, resolved at start()
+)
+if not arr.start():              # False on failure; the reason goes to excFunc
+    raise SystemExit('could not start the array')
+
+arr.db                           # {'B1': -48.2, 'D1': -51.7} dBFS; None until the first buffer
+arr.peak_db                      # peak hold per label, never below the live level
+arr.spectrum('B1')               # log-binned dB spectrum of one label's latest buffer
+
+arr.recordStart('takes', 'take1')    # takes/take1_B1.wav, takes/take1_D1.wav, takes/take1_manifest.json
+# ... capture ...
+take = arr.recordStop()          # blocks until the files and manifest are final
+arr.stop()
+```
+
+**Channels.** Each entry is `{'label', 'channel', 'meta'}`. `channel` is the
+1-based hardware jack number. Labels must match `[A-Za-z0-9._-]+` because they
+become filenames, and neither labels nor jack numbers may repeat. `meta` must
+be JSON-serialisable and is copied into the manifest. Find a device with
+`olab_audio.get_input_device_info('UMC')`, which returns
+`{'deviceID', 'name', 'maxInputChannels', 'defaultSampleRate'}` for the first
+match (case-insensitive) or `None`; `name=None` gives the default input
+device. Or pass `deviceID` (the global PortAudio index) instead of
+`deviceName`. `meta` is optional and defaults to `{}`. Invalid constructor
+arguments raise `ValueError`; `start()` and `recordStart()` report failures
+instead.
+
+**The stream is opened at an explicit sample rate (default 48000), never the
+device's own default, and at the device's full input width.** Both matter:
+many multichannel interfaces report a 44.1 kHz default, and on a Behringer
+UMC1820 opening only the first 14 of its 18 inputs overflowed about every
+1.4 s while opening all 18 was clean. `open_channels=` overrides the width
+(it must be at least the highest configured jack and no more than the device
+has). For a virtual or alias device (`pipewire`, `default`), which may report
+a very large channel count, pass `deviceID` and `open_channels` explicitly.
+`frames_per_buffer` defaults to 8192 (about 171 ms at 48 kHz); latency doesn't
+matter for recording. In standalone tests on a UMC1820 (18 channels), 1024-
+and 4096-frame buffers overflowed about every 3 s and 8192 did not. Only
+`paInt32` is supported.
+
+**Live readouts.** `db` and `peak_db` are dBFS per label and are `None` until
+the first buffer arrives; `reset_peaks()` restarts the peak hold at the
+current level, and a peak of `-0.1` dBFS or higher is a clipping indicator.
+`subscribe(callback, labels=None)` calls `callback(data=..., labels=...)` for
+every buffer with a float32 array of shape `(frames, len(labels))`; treat
+`data` as read-only. Subscriber and `excFunc` exceptions are isolated, so one
+bad callback never stops the audio callback or the others. `lastCallbackTime`
+is `time.monotonic()` at the most recent callback (`None` until the first), so
+a caller can notice a stalled stream.
+
+**Recording.** `recordStart(filepath, basename, labels=None, timeLimitSec=None,
+postFunc=None)` arms a take; every selected label (all by default) starts on
+the same buffer boundary and ends on the same one, so the files have equal
+lengths and share a start sample. It returns `False` (and reports through
+`excFunc`) instead of raising, and never overwrites an existing take.
+`recordStop()` ends the take at a buffer boundary and returns
+`{'dir', 'files', 'manifest', 'frames', 'gaps', 'error'}` (`None` if there is
+nothing to stop; `frames` is the shortest file's length, and `manifest` is
+`None` if the manifest could not be written); the same dict is passed to
+`postFunc(take=...)` and kept as `arr.lastTake`. WAV files are limited to
+4 GiB (roughly 6 hours per channel at 48 kHz); use `timeLimitSec` to split
+long recordings.
+
+**Manifest** (`<basename>_manifest.json`): `samplerate`, `frames_per_buffer`,
+`startFrameIndex`, `totalFrames`, `startedAtWall`, `startedAtWallNote`,
+`measuredFramesPerWallSecond`, `gaps`, `gapNote`, `error`, `manifestVersion`,
+and `labels`, which maps each label to `{channel, meta, file, frames}`.
+`startedAtWall` is the
+wall-clock time of the take's first sample, derived from the PortAudio buffer
+time at the take's first callback; its accuracy against an independent clock
+has **not** been measured, so don't rely on it for fine alignment with other
+sensors until it is. If the time information is unusable it is `null` with a
+`startedAtWallNote`; if the take ended before its first buffer, `startedAtWall`,
+`startedAtWallNote` and `startFrameIndex` are all `null`.
+`measuredFramesPerWallSecond` is the stream's measured rate against the
+computer's clock (an interface can run slightly off nominal); it is `null`
+for takes shorter than two buffers and for takes with unfilled gaps, and on a
+take with estimated overflow fills it includes those estimated frames.
+
+**Dropouts.** If PortAudio reports an input overflow, an unknown number of
+frames was lost. `MicArray` estimates how many from the gap in buffer
+timestamps, inserts that many zero frames into **every** channel (so the
+files stay equal length and aligned), and records
+`{'at_frame', 'est_lost_frames', 'method': 'adc_time'}` in `gaps`. **This is an
+estimate**. In standalone checks against the computer's clock on a healthy
+18-channel stream (8192-frame buffers with injected stalls, and 1024-frame
+buffers with natural overflows) the net error was about 10 frames per gap,
+with roughly 1 ms resolution; `MicArray`'s own zero-fill path has not yet been
+run on hardware (see below). When overflows are frequent the estimate can be
+badly wrong: about 2.4x too high on a stream that overflowed about every
+1.4 s.
+Other entries: `queue_drop` is an **exact** count (the writer fell behind, so
+a buffer was replaced by zeros of the same length). `unflagged_gap` (a timing
+gap with no overflow flag) and `flag_only` (an overflow was flagged but the
+estimate was unavailable or implausible) are logged but never filled, since a
+wrong fill would corrupt good audio. Overflow handling is
+a safety net; if you see gaps routinely, fix the cause (stream width, system
+load) rather than relying on the zero-fill.
+
+**Lifecycle.** `start()` and `recordStart()` return `True`/`False`, and
+`start()` fails (and closes the stream) if the opened stream is not actually
+active. `stop()` finalises any take in progress and is safe to call
+repeatedly (its `postFunc` fires on every call). `start()`
+and `stop()` are refused (reported through `excFunc`) when called from inside
+a subscriber or other callback running on the audio thread. User callbacks
+never run while a `MicArray` lock is held.
+
+**Validation status.** Validated on real hardware with a Behringer UMC1820
+(18 inputs, UMC analog plus an ADAT-connected preamp): a 20 s recording with
+no overflows and a clap recorded on two channels, plus the failure modes listed
+in `CHANGELOG.md`. **Not yet validated:** long runs through `MicArray`,
+the overflow zero-fill path on a healthy stream, `startedAtWall` accuracy, all
+12-16 channels of a full array, operation under load, and unplug/replug during
+a take. Tracked in
+[#81](https://github.com/optimatorlab/olab_code/issues/81).
 
 ## Normalizing recordings
 
@@ -337,6 +471,10 @@ fixed here, not just carried forward:
   short recordings; for long ones, finalization should eventually move to
   a non-callback worker thread. Flagged by review as a follow-up-quality
   item, not a blocker.
+- **More real-hardware validation of `MicArray`** (long runs, the overflow
+  zero-fill path on a healthy stream, `startedAtWall` accuracy, a full
+  12-16 channel array, load, unplug/replug) — tracked in
+  [#81](https://github.com/optimatorlab/olab_code/issues/81).
 - **Real Raspberry Pi hardware validation** of device filtering,
   sample-rate selection, and the `soxr` backend's performance — the
   non-hardware test suite is thorough, but real-hardware confirmation

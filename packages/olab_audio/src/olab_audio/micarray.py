@@ -37,10 +37,12 @@ _MAX_GAP_FILL_SECONDS = 10.0
 _UNFLAGGED_GAP_FRACTION = 0.5
 # start() waits at most this long for the opened stream to report active.
 _ACTIVE_WAIT_SECONDS = 0.5
-_LABEL_RE = re.compile(r'^[A-Za-z0-9._-]+$')
+_LABEL_RE = re.compile(r'[A-Za-z0-9._-]+')  # used with fullmatch: '$' would accept a trailing newline
 _GAP_NOTE = (
-	"est_lost_frames with method 'adc_time' are ESTIMATES (tolerance about +/-1 ms, ~50 frames, per gap, validated only for isolated overflows on a healthy stream; "
-	"they can be badly wrong when overflows are frequent: ~2.4x too high was observed on an overflowing stream); "
+	"est_lost_frames with method 'adc_time' are ESTIMATES: in standalone checks against the computer's clock on a healthy "
+	"18-channel stream (8192-frame buffers with injected stalls, 1024-frame buffers with natural overflows) the net error was "
+	"about 10 frames per gap at roughly 1 ms resolution, but MicArray's own zero-fill path has not been run on hardware; "
+	"when overflows are frequent they can be badly wrong (about 2.4x too high on an overflowing 14-of-18-channel stream); "
 	"'queue_drop' counts are EXACT; 'unflagged_gap' and 'flag_only' entries are NOT filled "
 	"('flag_only': PortAudio flagged an overflow but the ADC-time estimator was unavailable or implausible, "
 	"est_lost_frames is null). at_frame is the index in the output files where inserted zeros begin "
@@ -134,14 +136,15 @@ class MicArray():
 	misalign), with an aligned recorder.
 
 	channels - ordered list of {'label': 'B1', 'channel': 1, 'meta': {...}}.
-	           `channel` is the 1-based hardware jack number; the stream opens
-	           max(channel) channels. `meta` is deep-copied and passed through
+	           `channel` is the 1-based hardware jack number (column
+	           `channel-1` of the opened stream). `meta` is deep-copied and passed through
 	           untouched into the manifest.
 	deviceName / deviceID - substring match resolved at start() (PortAudio
 	           indexes are unstable) / explicit GLOBAL PortAudio index (wins).
 	samplerate - ALWAYS used explicitly, never the device default.
-	frames_per_buffer - large by default (8192): latency is irrelevant for
-	           recording and small buffers overflowed periodically in testing.
+	frames_per_buffer - 8192 by default; latency does not matter for
+	           recording. In standalone tests on a UMC1820 (18 channels), 1024- and
+	           4096-frame buffers overflowed about every 3 s and 8192 did not.
 	open_channels - optional override of the stream width. By default start()
 	           opens the device's FULL maxInputChannels (real hardware: a partial
 	           14-of-18 open overflowed about every 1.4 s, the full open was clean);
@@ -165,9 +168,13 @@ class MicArray():
 	stream. `db`/`peak_db` values are None until the first buffer; peak_db >= db
 	always (reset_peaks() restarts the peak at the current level).
 
-	Gap estimates ('adc_time') can be badly wrong when overflows are frequent
-	(observed ~2.4x too high on an overflowing 14-channel stream); they were only
-	validated for isolated overflows on a healthy stream.
+	Gap estimates ('adc_time') are ESTIMATES. In standalone checks against the
+	computer's clock on a healthy 18-channel stream (8192-frame buffers with
+	injected stalls, 1024-frame buffers with natural overflows) the net error was
+	about 10 frames per gap at roughly 1 ms resolution, but MicArray's own
+	zero-fill path has not been run on hardware. When overflows are frequent they
+	can be badly wrong (about 2.4x too high on an overflowing 14-of-18-channel
+	stream).
 
 	Take lifecycle: ARMED (registered, awaiting first buffer) -> RECORDING ->
 	ENDED -> FINALIZED. A take starts at the first buffer processed after
@@ -201,7 +208,7 @@ class MicArray():
 			if not isinstance(spec, dict):
 				raise ValueError(f'channel spec must be a dict, got {spec!r}')
 			label, jack = spec.get('label'), spec.get('channel')
-			if not isinstance(label, str) or not _LABEL_RE.match(label):
+			if not isinstance(label, str) or not _LABEL_RE.fullmatch(label):
 				raise ValueError(f'label must match [A-Za-z0-9._-]+ (it becomes a filename), got {label!r}')
 			if label in self._jacks:
 				raise ValueError(f'duplicate label {label!r}')
