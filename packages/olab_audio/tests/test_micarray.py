@@ -239,7 +239,7 @@ def test_start_validation_and_restart_after_failed_open(fake, tmp_path):
 
 
 @pytest.mark.parametrize('bad', [
-    [], [{'label': 'a/b', 'channel': 1}], [{'label': 'A', 'channel': 0}], [{'label': 'A', 'channel': True}],
+    [], [{'label': 'a/b', 'channel': 1}], [{'label': 'B1\n', 'channel': 1}], [{'label': 'A', 'channel': 0}], [{'label': 'A', 'channel': True}],
     [{'label': 'A', 'channel': 1}, {'label': 'A', 'channel': 2}],
     [{'label': 'A', 'channel': 1}, {'label': 'B', 'channel': 1}],
     [{'label': 'A', 'channel': 1, 'meta': {'f': float('nan')}}], [{'label': 'A', 'channel': 1, 'meta': {'f': object()}}],
