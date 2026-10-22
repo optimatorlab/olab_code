@@ -1,0 +1,3 @@
+# Output the hardware scripts write into the directory they are run from.
+takes/
+est_*.npz
