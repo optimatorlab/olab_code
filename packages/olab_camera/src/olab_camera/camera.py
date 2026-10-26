@@ -633,6 +633,11 @@ class Camera():
 			# self.barcode is a dictionary.  We'll limit ourselves to just 1 barcode thread. though.
 			idName = 'default'
 
+			if (idName in self.barcode):
+				if (getattr(self.barcode[idName], 'isThreadActive', False)):
+					self.logger.log(f'A barcode thread for {idName} is already running.', severity=olab_utils.SEVERITY_ERROR)
+					return
+
 			res_rows  = self.defaultFromNone(res_rows,  self.res_rows,   int)
 			res_cols  = self.defaultFromNone(res_cols,  self.res_cols,   int)
 
@@ -670,6 +675,11 @@ class Camera():
 		try:
 			# self.calibrate is a dictionary.  We'll limit ourselves to just 1 calibration thread, though.
 			idName = 'default'
+
+			if (idName in self.calibrate):
+				if (getattr(self.calibrate[idName], 'isThreadActive', False)):
+					self.logger.log(f'A calibrate thread for {idName} is already running.', severity=olab_utils.SEVERITY_ERROR)
+					return
 
 			res_rows  = self.defaultFromNone(res_rows,  self.res_rows,   int)
 			res_cols  = self.defaultFromNone(res_cols,  self.res_cols,   int)
@@ -726,6 +736,11 @@ class Camera():
 		try:
 			# self.facedetect is a dictionary.  We'll limit ourselves to just 1 face detection thread. though.
 			idName = 'default'
+
+			if (idName in self.facedetect):
+				if (getattr(self.facedetect[idName], 'isThreadActive', False)):
+					self.logger.log(f'A facedetect thread for {idName} is already running.', severity=olab_utils.SEVERITY_ERROR)
+					return
 
 			res_rows  = self.defaultFromNone(res_rows,  self.res_rows,   int)
 			res_cols  = self.defaultFromNone(res_cols,  self.res_cols,   int)
@@ -796,6 +811,12 @@ class Camera():
 
 			# self.roi is a dictionary.  We'll limit ourselves to just 1 ROI thread. though.
 			idName = 'default'
+
+			if (idName in self.roi):
+				if (getattr(self.roi[idName], 'isThreadActive', False)):
+					self.logger.log(f'An ROI thread for {idName} is already running.', severity=olab_utils.SEVERITY_ERROR)
+					return
+
 			self.roi[idName] = _ROI(self, idName, trackerKey, roiBB, int(fps_target), postFunction, color, decorate)
 			self.roi[idName].start()
 
@@ -837,6 +858,11 @@ class Camera():
 
 			# self.timelapse is a dictionary.  We'll limit ourselves to just 1 timelapse thread, though.
 			idName = 'default'
+
+			if (idName in self.timelapse):
+				if (getattr(self.timelapse[idName], 'isThreadActive', False)):
+					self.logger.log(f'A timelapse thread for {idName} is already running.', severity=olab_utils.SEVERITY_ERROR)
+					return
 
 			res_rows  = self.defaultFromNone(res_rows,  self.res_rows,   int)
 			res_cols  = self.defaultFromNone(res_cols,  self.res_cols,   int)
@@ -894,6 +920,11 @@ class Camera():
 				# model_name should be something like "YOLO11n.pt" or "YOLO11n-cls.pt"
 				self.logger.log('Error in addUltralytics: model_name must be specified', severity=olab_utils.SEVERITY_ERROR)
 				return
+
+			if (idName in self.ultralytics):
+				if (getattr(self.ultralytics[idName], 'isThreadActive', False)):
+					self.logger.log(f'An ultralytics thread for {idName} is already running.', severity=olab_utils.SEVERITY_ERROR)
+					return
 
 			res_rows   = self.defaultFromNone(res_rows,   self.res_rows,   int)
 			res_cols   = self.defaultFromNone(res_cols,   self.res_cols,   int)
