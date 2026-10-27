@@ -385,6 +385,7 @@ def test_ultralytics_thread_forwards_selected_device_to_both_call_modes(img, id_
     feature = _Ultralytics.__new__(_Ultralytics)
     feature.camObject = camera
     feature.idName = id_name
+    feature.isThreadActive = True   # start() sets this before launching the thread
     feature.model = _FakeModel()
     feature.conf_threshold = .25
     feature.verbose = False

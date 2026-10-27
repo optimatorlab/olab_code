@@ -96,7 +96,6 @@ class _Aruco():
 		self.camObject is the parent (from Camera).
 		We are in self.camObject.aruco[idName]
 		'''
-		self.isThreadActive = True
 
 		while self.camObject.camOn:
 			try:
@@ -207,6 +206,9 @@ class _Aruco():
 
 			arucoThread = threading.Thread(target=self._thread_Aruco, args=())
 			arucoThread.daemon = True    # Allows your main script to exit, shutting down this thread, too.
+			# Set before the thread runs so add*() duplicate guards see it immediately,
+			# and so a stop() issued before the thread's first line is not overwritten.
+			self.isThreadActive = True
 			arucoThread.start()
 
 			# Add to decorations deque
@@ -216,6 +218,9 @@ class _Aruco():
 
 		except Exception as e:
 			self.camObject.logger.log(f'Error in aruco start: {e}.', severity=olab_utils.SEVERITY_ERROR)
+			# Don't leave a stuck-active flag or a stray overlay from a failed start().
+			self.isThreadActive = False
+			self.stop()
 
 	def stop(self):
 		try:
@@ -374,8 +379,6 @@ class _Calibrate():
 
 		timeStart = time.time()
 
-		self.isThreadActive = True
-
 		try:
 			while self.isThreadActive:
 				# We should be going very slowly...no need to wait for next frame.
@@ -421,7 +424,9 @@ class _Calibrate():
 				if (delta > 0):
 					time.sleep(delta)
 
-				self.isThreadActive = self.camObject.camOn
+				# Only ever clear the flag here: assigning camOn would undo a stop() made during the sleep.
+				if (not self.camObject.camOn):
+					self.isThreadActive = False
 				if ((time.time() - timeStart >= self.timeoutSec) or (len(imgpoints) >= self.numImages)):
 					self.isThreadActive = False
 
@@ -510,9 +515,15 @@ class _Calibrate():
 
 			calThread = threading.Thread(target=self._thread_Calibrate, args=())
 			calThread.daemon = True    # Allows your main script to exit, shutting down this thread, too.
+			# Set before the thread runs so add*() duplicate guards see it immediately,
+			# and so a stop() issued before the thread's first line is not overwritten.
+			self.isThreadActive = True
 			calThread.start()
 		except Exception as e:
 			self.camObject.logger.log(f'Error in calibrate start: {e}.', severity=olab_utils.SEVERITY_ERROR)
+			# Don't leave a stuck-active flag or a stray overlay from a failed start().
+			self.isThreadActive = False
+			self.stop()
 
 	def stop(self):
 		"""Stop calibration thread and clean up resources.
@@ -637,7 +648,6 @@ class _Barcode():
 		self.camObject is the parent (from Camera).
 		We are in self.camObject.barcode['default]
 		'''
-		self.isThreadActive = True
 
 		while self.camObject.camOn:
 			try:
@@ -732,10 +742,16 @@ class _Barcode():
 
 			barThread = threading.Thread(target=self._thread_Barcode, args=())
 			barThread.daemon = True    # Allows your main script to exit, shutting down this thread, too.
+			# Set before the thread runs so add*() duplicate guards see it immediately,
+			# and so a stop() issued before the thread's first line is not overwritten.
+			self.isThreadActive = True
 			barThread.start()
 
 		except Exception as e:
 			self.camObject.logger.log(f'Error in barcode start: {e}.', severity=olab_utils.SEVERITY_ERROR)
+			# Don't leave a stuck-active flag or a stray overlay from a failed start().
+			self.isThreadActive = False
+			self.stop()
 
 
 	def stop(self):
@@ -927,7 +943,6 @@ class _QRCode():
 		self.camObject is the parent (from Camera).
 		We are in self.camObject.qr[idName]
 		'''
-		self.isThreadActive = True
 
 		while self.camObject.camOn:
 			try:
@@ -1007,10 +1022,16 @@ class _QRCode():
 
 			qrThread = threading.Thread(target=self._thread_QRCode, args=())
 			qrThread.daemon = True    # Allows your main script to exit, shutting down this thread, too.
+			# Set before the thread runs so add*() duplicate guards see it immediately,
+			# and so a stop() issued before the thread's first line is not overwritten.
+			self.isThreadActive = True
 			qrThread.start()
 
 		except Exception as e:
 			self.camObject.logger.log(f'Error in QRCode start: {e}.', severity=olab_utils.SEVERITY_ERROR)
+			# Don't leave a stuck-active flag or a stray overlay from a failed start().
+			self.isThreadActive = False
+			self.stop()
 
 
 	def stop(self):
@@ -1174,7 +1195,6 @@ class _FaceDetect():
 		self.camObject is the parent (from Camera).
 		We are in self.camObject.facedetect['default]
 		'''
-		self.isThreadActive = True
 
 		img_x_y  = (self.res_cols, self.res_rows)
 		orig_x_y = (self.camObject.res_cols, self.camObject.res_rows)
@@ -1258,10 +1278,16 @@ class _FaceDetect():
 
 			faceThread = threading.Thread(target=self._thread_FaceDetect, args=())
 			faceThread.daemon = True    # Allows your main script to exit, shutting down this thread, too.
+			# Set before the thread runs so add*() duplicate guards see it immediately,
+			# and so a stop() issued before the thread's first line is not overwritten.
+			self.isThreadActive = True
 			faceThread.start()
 
 		except Exception as e:
 			self.camObject.logger.log(f'Error in facedetect start: {e}.', severity=olab_utils.SEVERITY_ERROR)
+			# Don't leave a stuck-active flag or a stray overlay from a failed start().
+			self.isThreadActive = False
+			self.stop()
 
 
 	def stop(self):
@@ -1376,8 +1402,6 @@ class _Timelapse():
 
 		startTime = time.time()
 
-		self.isThreadActive = True
-
 		while self.camObject.camOn:
 			try:
 				timeNow = time.time()
@@ -1441,9 +1465,15 @@ class _Timelapse():
 
 			tlThread = threading.Thread(target=self._thread_Timelapse, args=())
 			tlThread.daemon = True    # Allows your main script to exit, shutting down this thread, too.
+			# Set before the thread runs so add*() duplicate guards see it immediately,
+			# and so a stop() issued before the thread's first line is not overwritten.
+			self.isThreadActive = True
 			tlThread.start()
 		except Exception as e:
 			self.camObject.logger.log(f'Error in Timelapse start: {e}.', severity=olab_utils.SEVERITY_ERROR)
+			# Don't leave a stuck-active flag or a stray overlay from a failed start().
+			self.isThreadActive = False
+			self.stop()
 
 	def stop(self):
 		"""Stop timelapse capture thread.
@@ -1572,7 +1602,6 @@ class _ROI():
 		self.camObject is the parent (from Camera).
 		We are in self.camObject.roi['default]
 		'''
-		self.isThreadActive = True
 
 		while self.camObject.camOn:
 			try:
@@ -1644,9 +1673,15 @@ class _ROI():
 
 			roiThread = threading.Thread(target=self._thread_ROI, args=())
 			roiThread.daemon = True    # Allows your main script to exit, shutting down this thread, too.
+			# Set before the thread runs so add*() duplicate guards see it immediately,
+			# and so a stop() issued before the thread's first line is not overwritten.
+			self.isThreadActive = True
 			roiThread.start()
 		except Exception as e:
 			self.camObject.logger.log(f'Error in ROI start: {e}.', severity=olab_utils.SEVERITY_ERROR)
+			# Don't leave a stuck-active flag or a stray overlay from a failed start().
+			self.isThreadActive = False
+			self.stop()
 
 
 	def stop(self):
@@ -1889,7 +1924,6 @@ class _Ultralytics():
 		self.camObject is the parent (from Camera).
 		We are in self.camObject.ultralytics[idName]
 		'''
-		self.isThreadActive = True
 
 		while self.camObject.camOn:
 			try:
@@ -1959,6 +1993,9 @@ class _Ultralytics():
 
 			ultraThread = threading.Thread(target=self._thread_Ultralytics, args=())
 			ultraThread.daemon = True    # Allows your main script to exit, shutting down this thread, too.
+			# Set before the thread runs so add*() duplicate guards see it immediately,
+			# and so a stop() issued before the thread's first line is not overwritten.
+			self.isThreadActive = True
 			ultraThread.start()
 
 			# Add to decorations deque
@@ -1968,6 +2005,9 @@ class _Ultralytics():
 
 		except Exception as e:
 			self.camObject.logger.log(f'Error in ultralytics start: {e}.', severity=olab_utils.SEVERITY_ERROR)
+			# Don't leave a stuck-active flag or a stray overlay from a failed start().
+			self.isThreadActive = False
+			self.stop()
 
 
 	def stop(self):
