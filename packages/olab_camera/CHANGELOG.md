@@ -3,7 +3,7 @@
 All notable changes to `olab-camera` are documented here. Format loosely
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [0.1.1] - 2026-10-27
 
 ### Fixed
 
