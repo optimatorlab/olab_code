@@ -50,7 +50,7 @@ notebook = [
     "notebook>=7.0",
 ]
 nats = [
-    "msgpack>=1.0",
+    "msgpack>=1.2.3",
     "nats-py>=2.6",
 ]
 droneid-go = [
