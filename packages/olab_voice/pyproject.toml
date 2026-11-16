@@ -53,7 +53,7 @@ audio-pyaudio = [
 ]
 nats = [
     "nats-py==2.15.0",
-    "msgpack==1.2.1",
+    "msgpack==1.2.4",
 ]
 web = [
     "fastapi",
